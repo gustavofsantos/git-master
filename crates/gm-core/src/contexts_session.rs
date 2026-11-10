@@ -197,6 +197,133 @@ pub(crate) fn sight(
     })
 }
 
+/// The context a repository's own memories go to (D222 (4), (6)): its id, and the context it is
+/// stored in.
+pub(crate) struct OwnContext {
+    pub(crate) repo_id: String,
+    pub(crate) context: i64,
+}
+
+/// What the clone's identity says about its binding: its id, if any, and the contexts it is bound to
+/// directly, or the other clone it clashes with.
+enum Binding {
+    Clone {
+        repo_id: Option<String>,
+        bound: Vec<i64>,
+    },
+    Clash {
+        other_path: String,
+    },
+}
+
+fn binding(store: &mut ContextStore, git: &dyn GitPort, root: &Path) -> Result<Binding, String> {
+    Ok(match sight(store, git, root)? {
+        Sight::Nothing => Binding::Clone {
+            repo_id: None,
+            bound: Vec::new(),
+        },
+        Sight::Contexts { repo_id, member_of } => Binding::Clone {
+            repo_id: Some(repo_id),
+            bound: member_of,
+        },
+        Sight::Clash { other_path } => Binding::Clash { other_path },
+    })
+}
+
+/// The repository's own context, created and bound when it does not exist yet (D222 (4)). The id is
+/// written to the clone when it has none, as `add_repo` writes it.
+fn own_context(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+    repo_id: Option<String>,
+) -> Result<OwnContext, String> {
+    let common = git.common_dir(root).map_err(|e| e.0)?;
+    let repo_id = match repo_id {
+        Some(id) => id,
+        None => repo_id::ensure(&common).map_err(|e| e.to_string())?,
+    };
+    let top = git.resolve_root(root).map_err(|e| e.0)?;
+    let folder = top.file_name().map_or_else(
+        || top.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let context = store
+        .repository_context(&repo_id, &common.to_string_lossy(), &folder, now_ms())
+        .map_err(|e| e.to_string())?;
+    Ok(OwnContext { repo_id, context })
+}
+
+/// The refusal of a proposal in a repository bound to several contexts: it names them by path,
+/// sorted (D222 (4)).
+fn several_message(store: &ContextStore, bound: &[i64]) -> Result<String, String> {
+    let nodes = store.nodes().map_err(|e| e.to_string())?;
+    let mut paths: Vec<String> = bound
+        .iter()
+        .map(|&id| visibility::context_path(&nodes, id))
+        .collect();
+    paths.sort();
+    let names = paths
+        .iter()
+        .map(|path| format!("\"{path}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "this repository is bound to several contexts: {names}; name one with context"
+    ))
+}
+
+/// Where a proposal without a context goes (D222 (4)): the one context the repository is bound to,
+/// or else its own context, created and bound when needed. Refused when several contexts are bound
+/// and when the clone's id clashes.
+pub(crate) fn proposal_home(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+) -> Result<OwnContext, String> {
+    match binding(store, git, root)? {
+        Binding::Clash { other_path } => Err(memory_scope::clash_note(&other_path)),
+        Binding::Clone { bound, .. } if bound.len() > 1 => Err(several_message(store, &bound)?),
+        Binding::Clone { repo_id, bound } => one_or_own(store, git, root, repo_id, &bound),
+    }
+}
+
+/// Where the memories of a plain repository move when they leave its `threads.db` (D222 (6)): the
+/// same context a proposal goes to, except that a repository bound to several contexts moves its
+/// memories to its own. `None` for a clone whose id clashes, which is left as it is.
+pub(crate) fn move_home(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+) -> Result<Option<OwnContext>, String> {
+    match binding(store, git, root)? {
+        Binding::Clash { .. } => Ok(None),
+        Binding::Clone { repo_id, bound } if bound.len() > 1 => {
+            own_context(store, git, root, repo_id).map(Some)
+        }
+        Binding::Clone { repo_id, bound } => {
+            one_or_own(store, git, root, repo_id, &bound).map(Some)
+        }
+    }
+}
+
+/// The one context a clone is bound to, with its id, or else its own context.
+fn one_or_own(
+    store: &mut ContextStore,
+    git: &dyn GitPort,
+    root: &Path,
+    repo_id: Option<String>,
+    bound: &[i64],
+) -> Result<OwnContext, String> {
+    match (repo_id, bound) {
+        (Some(repo_id), [context]) => Ok(OwnContext {
+            repo_id,
+            context: *context,
+        }),
+        (repo_id, _) => own_context(store, git, root, repo_id),
+    }
+}
+
 /// The contexts of a workspace's members, each with the members that see it (D216 (4)): the union of
 /// the members' contexts with their parents, nearest first. A member that cannot be read adds none.
 fn workspace_contexts(

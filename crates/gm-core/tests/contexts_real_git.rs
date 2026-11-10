@@ -898,7 +898,6 @@ fn a_repository_in_three_contexts_sees_all_three_and_labels_each_result_with_its
             ("Billing rule", "Platform / Billing"),
             ("Partners rule", "Partners"),
             ("Platform rule", "Platform"),
-            ("Repository rule", "repository"),
         ]
     );
 }
@@ -912,7 +911,11 @@ fn the_scope_filter_names_the_repository_or_one_visible_context_and_refuses_the_
         let found = search(api, &Actor::Human, "", Some(scope), 50, None).expect(scope);
         texts(&found.memories)
     };
-    assert_eq!(scoped(&mut api, "repository"), ["Repository rule"]);
+    assert_eq!(
+        sorted(scoped(&mut api, "repository")),
+        ["Billing rule", "Partners rule", "Platform rule"],
+        "a repository's own scope is what it is bound to"
+    );
     assert_eq!(
         sorted(scoped(&mut api, "Billing")),
         ["Billing rule", "Platform rule"],
@@ -927,7 +930,7 @@ fn the_scope_filter_names_the_repository_or_one_visible_context_and_refuses_the_
         ["Platform rule"],
         "a context does not take the memories of its sub-contexts"
     );
-    assert_eq!(scoped(&mut api, "all").len(), 4);
+    assert_eq!(scoped(&mut api, "all").len(), 3);
 
     // A second Billing under Partners, joined by api, makes the bare name ambiguous.
     let second = create(&mut api, "Billing", Some(fixture.partners));
@@ -964,7 +967,6 @@ fn sorted(mut texts: Vec<String>) -> Vec<String> {
 fn populate_with_scopes(world: &World) -> Fixture {
     let fixture = populate(world);
     let mut api = engine_on(&world.path("api"), &world.db);
-    propose_at(&mut api, &Actor::Human, None, "Repository rule");
     for (context, text) in [
         ("Platform", "Platform rule"),
         ("Billing", "Billing rule"),
@@ -976,23 +978,30 @@ fn populate_with_scopes(world: &World) -> Fixture {
 }
 
 #[test]
-fn a_repository_memory_ranks_before_an_equally_relevant_context_memory() {
+fn an_equally_relevant_memory_in_two_bound_contexts_is_listed_with_each_scope() {
     let world = World::new();
     populate(&world);
     let mut api = engine_on(&world.path("api"), &world.db);
-    // The same text in each store, and nothing else in either, so `bm25` is equal.
-    propose_at(&mut api, &Actor::Human, None, "The widget cache is warm");
+    // The same text in each context, and nothing else in either, so `bm25` is equal.
     propose_at(
         &mut api,
         &Actor::Human,
         Some("Platform"),
         "The widget cache is warm",
     );
+    propose_at(
+        &mut api,
+        &Actor::Human,
+        Some("Billing"),
+        "The widget cache is warm",
+    );
     let found = search(&mut api, &Actor::Human, "widget", None, 50, None)
         .expect("list")
         .memories;
-    let scopes: Vec<&str> = found.iter().map(|memory| memory.scope.as_str()).collect();
-    assert_eq!(scopes, ["repository", "Platform"]);
+    // Both contexts are bound to api, so neither is nearer: the order is by uid, and each is labelled.
+    let mut scopes: Vec<&str> = found.iter().map(|memory| memory.scope.as_str()).collect();
+    scopes.sort_unstable();
+    assert_eq!(scopes, ["Platform", "Platform / Billing"]);
 }
 
 #[test]
@@ -1000,7 +1009,7 @@ fn pages_walk_the_merged_list_without_repeats_or_gaps_and_a_cursor_stays_with_it
     let world = World::new();
     populate(&world);
     let mut api = engine_on(&world.path("api"), &world.db);
-    propose_at(&mut api, &Actor::Human, None, "alpha note");
+    propose_at(&mut api, &Actor::Human, Some("Partners"), "alpha note");
     propose_at(&mut api, &Actor::Human, Some("Platform"), "beta note");
     propose_at(&mut api, &Actor::Human, Some("Billing"), "gamma note");
 
@@ -1107,133 +1116,6 @@ fn an_agent_proposes_in_a_context_it_belongs_to_and_a_human_makes_it_visible_to_
         ["Shared proposal"],
         "the accepted memory is seen by agents of every repository in the context"
     );
-}
-
-#[test]
-fn moving_a_repository_memory_into_a_context_keeps_its_uid_history_and_sources() {
-    let world = World::new();
-    let fixture = populate(&world);
-    let mut billing = engine_on(&world.path("billing"), &world.db);
-    write_file(&world.path("billing"), "rules.md", "retry twice\n");
-    commit_all(&world.path("billing"), "add the rules");
-    let original = memory_of(&send(
-        &mut billing,
-        &Actor::Human,
-        CommandKind::ProposeMemory {
-            kind: MemoryKind::Rule,
-            text: "Retry the upload".into(),
-            sources: vec![MemorySourceInput {
-                kind: MemorySourceKind::File,
-                reference: "rules.md".into(),
-                entry_from: None,
-                entry_to: None,
-            }],
-            context: None,
-            basis: MemoryBasis::Tested,
-            member: None,
-        },
-    ));
-    let blob = original.sources[0].blob_oid.clone();
-    assert!(blob.is_some(), "the human's file source records its blob");
-
-    let moved = send(
-        &mut billing,
-        &Actor::Human,
-        CommandKind::MoveMemoryToContext {
-            uid: original.uid.clone(),
-            context: fixture.platform,
-        },
-    );
-    assert_eq!(state_of(&moved), OperationState::Done, "{moved:?}");
-    let moved = memory_of(&moved);
-    assert_eq!(moved.uid, original.uid);
-    assert_eq!(moved.created_at, original.created_at);
-    assert_eq!(original.basis, MemoryBasis::Tested);
-    assert_eq!(moved.basis, MemoryBasis::Tested, "the move keeps the basis");
-    assert_eq!(moved.status, MemoryStatus::Accepted);
-    assert_eq!(moved.sources.len(), 1);
-    assert_eq!(moved.sources[0].reference, "rules.md");
-    assert_eq!(moved.sources[0].blob_oid, blob, "the blob is kept");
-    assert!(
-        moved.sources[0].repo_id.is_some(),
-        "the source names its repository"
-    );
-    assert_eq!(moved.scope, "Platform");
-
-    // Billing still sees Platform, so the memory is listed there, but not as its own any more.
-    let left = search(
-        &mut billing,
-        &Actor::Human,
-        "",
-        Some("repository"),
-        50,
-        None,
-    )
-    .expect("list");
-    assert!(
-        left.memories
-            .iter()
-            .all(|memory| memory.uid != original.uid),
-        "it left the repository's own list"
-    );
-    let mut web = engine_on(&world.path("web"), &world.db);
-    let found = search(&mut web, &agent(), "", None, 50, None).expect("list");
-    assert_eq!(texts(&found.memories), ["Retry the upload"]);
-    let read = read_memory(&mut web, &original.uid);
-    assert!(
-        read.files_changed_since.is_empty(),
-        "read from web, the file is unchanged: {:?}",
-        read.files_changed_since
-    );
-}
-
-#[test]
-fn moving_onto_a_text_duplicate_in_the_context_is_refused_and_the_original_stays() {
-    let world = World::new();
-    let fixture = populate(&world);
-    let mut web = engine_on(&world.path("web"), &world.db);
-    let duplicate = memory_of(&propose_at(
-        &mut web,
-        &Actor::Human,
-        Some("Platform"),
-        "Retry the upload",
-    ));
-    let mut billing = engine_on(&world.path("billing"), &world.db);
-    let original = memory_of(&propose_at(
-        &mut billing,
-        &Actor::Human,
-        None,
-        "Retry the upload",
-    ));
-
-    let refused = send(
-        &mut billing,
-        &Actor::Human,
-        CommandKind::MoveMemoryToContext {
-            uid: original.uid.clone(),
-            context: fixture.platform,
-        },
-    );
-    assert_eq!(state_of(&refused), OperationState::Failed);
-    assert!(
-        failure(&refused).is_some_and(|message| message.contains(&duplicate.uid)),
-        "{refused:?}"
-    );
-    let kept = search(
-        &mut billing,
-        &Actor::Human,
-        "",
-        Some("repository"),
-        50,
-        None,
-    )
-    .expect("list");
-    assert_eq!(texts(&kept.memories), ["Retry the upload"]);
-    assert_eq!(kept.memories[0].uid, original.uid, "the original stays");
-    let in_platform =
-        search(&mut web, &Actor::Human, "", Some("Platform"), 50, None).expect("list");
-    assert_eq!(in_platform.memories.len(), 1, "one copy in the context");
-    assert_eq!(in_platform.memories[0].uid, duplicate.uid);
 }
 
 #[test]
@@ -1408,14 +1290,14 @@ fn a_file_whose_repository_was_unknown_at_acceptance_stays_unavailable_when_it_b
 }
 
 #[test]
-fn an_unreadable_contexts_file_leaves_the_repository_memories_and_says_why() {
+fn an_unreadable_contexts_file_answers_nothing_and_says_why() {
     let world = World::new();
     populate_with_scopes(&world);
     let mut api = engine_on(&world.path("api"), &world.db);
     std::fs::write(&world.db, b"this is not a database, only junk bytes").unwrap();
 
     let listed = search(&mut api, &Actor::Human, "", None, 50, None).expect("still answers");
-    assert_eq!(texts(&listed.memories), ["Repository rule"]);
+    assert!(listed.memories.is_empty(), "every memory is in contexts.db");
     assert!(!listed.contexts_read);
     assert!(
         listed
@@ -1430,11 +1312,11 @@ fn an_unreadable_contexts_file_leaves_the_repository_memories_and_says_why() {
 }
 
 #[test]
-fn a_copied_clone_with_a_clashing_id_lists_only_its_repository_memories_and_says_why() {
+fn a_copied_clone_with_a_clashing_id_lists_no_context_and_says_why() {
     let world = World::new();
     populate(&world);
     let mut api = engine_on(&world.path("api"), &world.db);
-    propose_at(&mut api, &Actor::Human, None, "Repository rule");
+    propose_at(&mut api, &Actor::Human, Some("Partners"), "Partners rule");
     let platform_rule = memory_of(&propose_at(
         &mut api,
         &Actor::Human,
@@ -1446,7 +1328,7 @@ fn a_copied_clone_with_a_clashing_id_lists_only_its_repository_memories_and_says
 
     let mut clone = engine_on(&copy, &world.db);
     let listed = search(&mut clone, &Actor::Human, "", None, 50, None).expect("list");
-    assert_eq!(texts(&listed.memories), ["Repository rule"]);
+    assert!(listed.memories.is_empty(), "a clash reads no context");
     assert!(
         listed.contexts_read,
         "the file is readable, the clone clashes"
@@ -1506,7 +1388,12 @@ fn the_proposed_total_of_a_context_shared_by_two_repositories_matches_their_merg
         Some("Platform"),
         "web proposal in Platform",
     );
-    propose_at(&mut api, &agent(), None, "api repository proposal");
+    propose_at(
+        &mut api,
+        &agent(),
+        Some("Partners"),
+        "api partners proposal",
+    );
     // An accepted memory in Platform is not counted.
     propose_at(
         &mut web,
@@ -1535,9 +1422,9 @@ fn the_proposed_total_of_a_context_shared_by_two_repositories_matches_their_merg
     let platform = everything_in(&mut api, Some("Platform"));
     assert_eq!(platform.proposed_total, 3);
     assert_eq!(platform.memories.len(), 3);
-    let own = everything_in(&mut api, Some("repository"));
-    assert_eq!(own.proposed_total, 3);
-    assert_eq!(own.memories.len(), 1);
+    let partners = everything_in(&mut api, Some("Partners"));
+    assert_eq!(partners.proposed_total, 3);
+    assert_eq!(partners.memories.len(), 1);
 }
 
 #[test]
@@ -1548,7 +1435,7 @@ fn the_proposed_total_is_full_on_a_page_of_one_and_ignores_the_query() {
     let mut billing = engine_on(&world.path("billing"), &world.db);
     propose_at(&mut api, &agent(), Some("Platform"), "alpha in Platform");
     propose_at(&mut billing, &agent(), Some("Billing"), "beta in Billing");
-    propose_at(&mut api, &agent(), None, "gamma in the repository");
+    propose_at(&mut api, &agent(), Some("Partners"), "gamma in Partners");
 
     let page = search(&mut api, &Actor::Human, "", None, 1, None).expect("page");
     assert_eq!(page.memories.len(), 1);
@@ -1556,7 +1443,7 @@ fn the_proposed_total_is_full_on_a_page_of_one_and_ignores_the_query() {
     assert_eq!(page.proposed_total, 3, "the page does not narrow the total");
 
     let matching = search(&mut api, &Actor::Human, "gamma", None, 1, None).expect("query");
-    assert_eq!(texts(&matching.memories), ["gamma in the repository"]);
+    assert_eq!(texts(&matching.memories), ["gamma in Partners"]);
     assert_eq!(
         matching.proposed_total, 3,
         "the query does not narrow the total"

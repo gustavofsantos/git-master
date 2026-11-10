@@ -319,7 +319,8 @@ fn an_agent_on_a_workspace_proposes_into_a_member_marks_its_memory_and_searches_
 
     let marked = result(&replies[3]);
     assert_eq!(marked["recorded"], true);
-    assert_eq!(marked["memory"]["scope"], "member api");
+    // The clone's own memory is in its context, labelled by it, not by the member (D222 (4)).
+    assert_eq!(marked["memory"]["scope"], "api");
     assert!(
         marked["memory"]["marks"]
             .as_array()
@@ -344,7 +345,7 @@ fn an_agent_on_a_workspace_proposes_into_a_member_marks_its_memory_and_searches_
     );
 
     let read = &result(&replies[5])["memory"];
-    assert_eq!(read["scope"], "member api");
+    assert_eq!(read["scope"], "api");
     assert!(
         read["marks"]
             .as_array()

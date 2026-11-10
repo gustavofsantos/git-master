@@ -377,7 +377,8 @@ fn a_memory_read_shows_its_sources_its_supersession_and_a_file_changed_since_acc
     assert!(newer["decided_at"].is_i64(), "{newer}");
     assert_eq!(newer["sources"][0]["kind"], "file");
     assert_eq!(newer["sources"][0]["ref"], "f.txt");
-    assert_eq!(newer["sources"][0]["repo_id"], Value::Null);
+    // A memory a repository proposes names the repository on each source (D193 (7)).
+    assert!(newer["sources"][0]["repo_id"].is_string(), "{newer}");
     assert_eq!(
         newer["files_changed_since"],
         json!([{ "path": "f.txt", "state": "changed" }])
@@ -461,7 +462,7 @@ fn contexts_connect_two_repositories_and_a_memory_of_one_is_found_from_the_other
     assert_eq!(contexts.len(), 1, "{listed}");
     assert_eq!(contexts[0]["name"], "Platform");
     assert_eq!(contexts[0]["path"], "Platform");
-    assert_eq!(contexts[0]["accepted_memories"], 1);
+    assert_eq!(contexts[0]["accepted_memories"], 2);
 
     let everything = result(&replies[2])["memories"].as_array().unwrap().clone();
     let shared_hit = everything
@@ -471,14 +472,23 @@ fn contexts_connect_two_repositories_and_a_memory_of_one_is_found_from_the_other
     assert_eq!(shared_hit["scope"], "Platform");
     assert_eq!(shared_hit["untrusted"], true);
 
+    // Repository B is bound to one context, so its own memory is stored there too (D222 (4)): the
+    // scope `repository` is its reach, and both memories are in Platform.
     let own = result(&replies[3])["memories"].as_array().unwrap().clone();
-    assert_eq!(own.len(), 1, "{own:?}");
-    assert_eq!(own[0]["id"], local.as_str());
-    assert_eq!(own[0]["scope"], "repository");
+    assert_eq!(own.len(), 2, "{own:?}");
+    assert!(own.iter().any(|memory| memory["id"] == local.as_str()));
+    assert!(
+        own.iter().all(|memory| memory["scope"] == "Platform"),
+        "{own:?}"
+    );
 
     let by_context = result(&replies[4])["memories"].as_array().unwrap().clone();
-    assert_eq!(by_context.len(), 1, "{by_context:?}");
-    assert_eq!(by_context[0]["id"], shared.as_str());
+    assert_eq!(by_context.len(), 2, "{by_context:?}");
+    assert!(
+        by_context
+            .iter()
+            .any(|memory| memory["id"] == shared.as_str())
+    );
 
     let proposed = result(&replies[5]);
     assert_eq!(proposed["created"], true);
@@ -780,27 +790,16 @@ fn a_memory_of_a_context_is_counted_in_contexts_db_and_a_search_counts_it_too() 
 }
 
 #[test]
-fn a_moved_memory_keeps_its_count() {
+fn a_retrieval_is_counted_on_the_memory_in_its_repository_context() {
     let (_tmp, repo, db) = fixture();
     let mut human = engine_on(&repo, &db);
+    // A repository bound to no context gets its own (D222 (4)), and the memory is stored there.
     let uid = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
     session(
         &repo,
         &db,
         &[initialize(), call(2, "memory_get", &json!({ "id": uid }))],
     );
-    let context = create_context(&mut human, "Platform");
-    join(&mut human, context, &repo);
-    let events = send(
-        &mut human,
-        &Actor::Human,
-        CommandKind::MoveMemoryToContext {
-            uid: uid.clone(),
-            context,
-        },
-    );
-    assert_eq!(ended(&events), OperationState::Done, "move: {events:?}");
-
     assert_eq!(retrieval_count(&mut human, &uid), 1);
 }
 
@@ -810,7 +809,7 @@ fn a_failing_count_does_not_fail_the_read() {
     let mut human = engine_on(&repo, &db);
     let uid = propose_as_human(&mut human, "Keep the ledger append-only.", "f.txt", None);
     // Every write that counts a retrieval is refused; the reads must still answer.
-    let refused = rusqlite::Connection::open(repo.join(".git/gitmaster/threads.db")).unwrap();
+    let refused = rusqlite::Connection::open(&db).unwrap();
     refused
         .execute_batch(
             "CREATE TRIGGER refuse_count BEFORE UPDATE OF retrieval_count ON memory

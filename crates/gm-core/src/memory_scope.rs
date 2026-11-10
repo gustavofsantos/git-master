@@ -44,6 +44,8 @@ const NOT_ACCEPTED: &str = "only an accepted memory can be attached to another c
 const NOT_MOVABLE: &str = "only a proposed or accepted memory can move to a context";
 const LINKED: &str = "a memory with supersedes links cannot move to a context";
 const NOT_A_WORKSPACE: &str = "this repository is not a workspace";
+/// What a proposal without a context answers when no contexts database is configured (D222 (4)).
+const NO_CONTEXTS_DB: &str = "no contexts database is configured, so the memory has nowhere to go";
 /// What a command answers when a member's memory reaches the workspace's own store: the command is
 /// run in the member's store first (D216 (3)), so this is never the answer of a working engine.
 pub(crate) const ROUTED: &str =
@@ -421,7 +423,7 @@ impl Reach {
     }
 
     /// Whether the open root is a workspace.
-    fn is_workspace(&self) -> bool {
+    pub(crate) fn is_workspace(&self) -> bool {
         self.workspace
     }
 
@@ -502,6 +504,13 @@ impl Reach {
         }
     }
 
+    /// Whether a scope covers the contexts the repository sees. A plain repository's own scope is its
+    /// reach too: its memories are in its contexts, so `repository` names what it is bound to (D222
+    /// (4)). A workspace's own scope is its own store, which holds no context memory.
+    fn covers_contexts(&self, scope: Scope) -> bool {
+        reads_contexts(scope) || (matches!(scope, Scope::Repository) && !self.workspace)
+    }
+
     /// The contexts a request's scope covers, each with the contexts above it: the default reach for
     /// `All`, the named context and its ancestors for `Context` (D222 (2)).
     fn scope_ids(&self, scope: Scope) -> Vec<i64> {
@@ -510,7 +519,7 @@ impl Reach {
 }
 
 /// The note of a clone whose id is held by another clone (D193 (4)).
-fn clash_note(other_path: &str) -> String {
+pub(crate) fn clash_note(other_path: &str) -> String {
     format!(
         "this clone shares its repository id with the clone at {other_path}, so its contexts are not used here"
     )
@@ -870,7 +879,7 @@ fn accepted_size(stores: &Stores<'_>, scope: Scope) -> Result<(u32, u64), String
     for (_, threads) in member_stores(stores, scope) {
         rows.extend(threads.accepted_text().unwrap_or_default());
     }
-    if reads_contexts(scope)
+    if stores.reach.covers_contexts(scope)
         && let Some(contexts) = stores.reach.store()
     {
         let ids = stores.reach.scope_ids(scope);
@@ -1063,7 +1072,7 @@ fn list(
         }
     }
     let near = stores.reach.reach_of(scope);
-    if reads_contexts(scope)
+    if stores.reach.covers_contexts(scope)
         && let Some(contexts) = stores.reach.store()
     {
         let ids = stores.reach.scope_ids(scope);
@@ -1212,6 +1221,55 @@ pub(crate) fn propose_in_context(
     )?;
     let repo_id = stores.reach.writer_id()?;
     let context = stores.reach.context_named(name)?;
+    store_proposal(id, stores, ctx, actor, &repo_id, context, proposal)
+}
+
+/// `ProposeMemory` without a context in a plain repository (D222 (4)): the memory goes to the one
+/// context the repository is bound to, or else to its own context, which is created and bound when
+/// needed. The contexts are read once more after that, so the reach sees the new binding. Refused
+/// when no contexts database is configured, when several contexts are bound and when the id clashes.
+pub(crate) fn propose_in_repository(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    actor: &Actor,
+    proposal: &Proposal<'_>,
+) -> Result<Vec<Event>, String> {
+    let is_human = matches!(actor, Actor::Human);
+    memories::authorize(
+        is_human,
+        &MemoryAction::Propose {
+            sources: proposal.sources.len(),
+        },
+    )?;
+    let db = ctx.contexts_db.ok_or_else(|| NO_CONTEXTS_DB.to_owned())?;
+    let mut contexts = ContextStore::open(db).map_err(|e| e.to_string())?;
+    let home = contexts_session::proposal_home(&mut contexts, ctx.git, ctx.root)?;
+    drop(contexts);
+    stores.reach = Reach::load(ctx.git, ctx.root, ctx.contexts_db, None);
+    store_proposal(
+        id,
+        stores,
+        ctx,
+        actor,
+        &home.repo_id,
+        home.context,
+        proposal,
+    )
+}
+
+/// Stores a proposal at `context`, with `repo_id` on each of its sources (D193 (7)). The checks of
+/// the proposal were made by the caller.
+fn store_proposal(
+    id: OperationId,
+    stores: &mut Stores<'_>,
+    ctx: &Context<'_>,
+    actor: &Actor,
+    repo_id: &str,
+    context: i64,
+    proposal: &Proposal<'_>,
+) -> Result<Vec<Event>, String> {
+    let is_human = matches!(actor, Actor::Human);
     let text = redacted(ctx, proposal.text)?;
     let mut sources = proposal
         .sources
@@ -1219,7 +1277,7 @@ pub(crate) fn propose_in_context(
         .map(|source| stored_source(ctx, source, is_human))
         .collect::<Result<Vec<_>, _>>()?;
     for source in &mut sources {
-        source.repo_id = Some(repo_id.clone());
+        source.repo_id = Some(repo_id.to_owned());
     }
     let status = if is_human {
         MemoryStatus::Accepted
@@ -1250,6 +1308,52 @@ pub(crate) fn propose_in_context(
         .memory_contexts(&memory.uid)
         .map_err(|e| e.to_string())?;
     Ok(changed(id, ctx, &stores.reach, memory, created, &attached))
+}
+
+/// Moves the memories of a plain repository out of its `threads.db` into `contexts.db` (D222 (6)),
+/// into the context a proposal of the repository goes to. Each memory keeps its uid, sources, marks,
+/// retrieval count and links; it is inserted first, the links next, and only then deleted here, so a
+/// move interrupted at any point loses nothing and the next command finishes it. Nothing happens when
+/// no contexts database is set, when the store holds no memory (a read creates no file), for a
+/// workspace (its own move is a later step), or when the clone's id clashes.
+pub(crate) fn move_repository_memories(
+    store: &mut ThreadStore,
+    ctx: &Context<'_>,
+) -> Result<(), String> {
+    let Some(db) = ctx.contexts_db else {
+        return Ok(());
+    };
+    if workspace_folders(ctx.git, ctx.global_config, ctx.root).is_some() {
+        return Ok(());
+    }
+    if !store.has_memories().map_err(|e| e.to_string())? {
+        return Ok(());
+    }
+    let mut contexts = ContextStore::open(db).map_err(|e| e.to_string())?;
+    let Some(home) = contexts_session::move_home(&mut contexts, ctx.git, ctx.root)? else {
+        return Ok(());
+    };
+    let moved = store.memories_to_move().map_err(|e| e.to_string())?;
+    let uids: Vec<String> = moved.iter().map(|(memory, _)| memory.uid.clone()).collect();
+    for (mut memory, marks) in moved {
+        for source in &mut memory.sources {
+            source.repo_id.get_or_insert_with(|| home.repo_id.clone());
+        }
+        contexts
+            .import_memory(&memory, &marks, home.context)
+            .map_err(|e| e.to_string())?;
+    }
+    contexts
+        .import_links(&store.supersedes_links().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    for uid in &uids {
+        match store.memory_id_of(uid) {
+            Ok(row) => store.delete_memory(row).map_err(|e| e.to_string())?,
+            Err(StoreError::NotFound) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
 }
 
 /// `AcceptMemory` of a context memory (D192 (3), (4), D193 (1), (7)). The blob of each file source

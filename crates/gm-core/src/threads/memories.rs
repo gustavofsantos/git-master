@@ -942,6 +942,53 @@ impl ThreadStore {
         memory_by_uid(&self.conn, uid)
     }
 
+    /// Whether the store holds any memory: the one query a memory command makes before it moves the
+    /// repository's memories out (D222 (6)).
+    pub(crate) fn has_memories(&self) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT EXISTS (SELECT 1 FROM memory)", [], |row| row.get(0))?)
+    }
+
+    /// Every memory of the store, oldest first, each with its full mark history, for the move to
+    /// `contexts.db` (D222 (6)). The memories keep their sources, relations and retrieval counts.
+    pub(crate) fn memories_to_move(
+        &self,
+    ) -> Result<Vec<(Memory, Vec<MemoryMarkSummary>)>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT id FROM memory ORDER BY id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| -> Result<_, StoreError> {
+                let memory = memory_by_id(&self.conn, id)?;
+                let history = mark_history(&self.conn, &memory.uid)?;
+                Ok((memory, history))
+            })
+            .collect()
+    }
+
+    /// Every supersedes link of the store, by the uids of the two memories it joins (D222 (6)).
+    pub(crate) fn supersedes_links(&self) -> Result<Vec<SupersedesLink>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT f.uid, t.uid, r.origin, r.at FROM memory_rel r
+             JOIN memory f ON f.id = r.from_memory
+             JOIN memory t ON t.id = r.to_memory
+             WHERE r.kind = 'supersedes' ORDER BY f.id, t.id",
+        )?;
+        let links = statement
+            .query_map([], |row| {
+                Ok(SupersedesLink {
+                    from: row.get(0)?,
+                    to: row.get(1)?,
+                    origin: row.get(2)?,
+                    at: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(links)
+    }
+
     /// The row id of the memory with `uid`. `NotFound` when missing.
     pub fn memory_id_of(&self, uid: &str) -> Result<i64, StoreError> {
         id_of_uid(&self.conn, uid)
@@ -1130,6 +1177,64 @@ fn insert_sources(conn: &Connection, id: i64, sources: &[MemorySource]) -> Resul
                 source.blob_oid,
                 source.blob_read,
             ],
+        )?;
+    }
+    Ok(())
+}
+
+/// A supersedes link of a store, by the uids of the memories it joins (D222 (6)): carried into
+/// another store with its origin and time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SupersedesLink {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) origin: String,
+    pub(crate) at: i64,
+}
+
+/// Inserts a memory as it is stored, with its sources and its mark history, and returns its row id
+/// (D222 (6)). Nothing is checked but the uid's freedom, which the caller has checked: no duplicate
+/// key and no status rule apply, since the memory is an existing record and not a proposal.
+pub(crate) fn insert_stored(
+    conn: &Connection,
+    memory: &Memory,
+    marks: &[MemoryMarkSummary],
+) -> Result<i64, StoreError> {
+    conn.execute(
+        "INSERT INTO memory (uid, kind, text, basis, status, origin, proposed_by, model, created_at,
+            decided_at, decided_by, retrieval_count, last_retrieved_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            memory.uid,
+            kind_text(memory.kind),
+            memory.text,
+            basis_text(memory.basis),
+            status_text(memory.status),
+            memory.origin,
+            memory.proposed_by,
+            memory.model,
+            memory.created_at,
+            memory.decided_at,
+            memory.decided_by,
+            i64::from(memory.retrieval_count),
+            memory.last_retrieved_at,
+        ],
+    )?;
+    let id = conn.last_insert_rowid();
+    insert_sources(conn, id, &memory.sources)?;
+    insert_marks(conn, &memory.uid, marks)?;
+    Ok(id)
+}
+
+/// Inserts supersedes links between memories of this store, by uid. A link already here is kept.
+pub(crate) fn insert_links(conn: &Connection, links: &[SupersedesLink]) -> Result<(), StoreError> {
+    for link in links {
+        let from = id_of_uid(conn, &link.from)?;
+        let to = id_of_uid(conn, &link.to)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_rel (from_memory, to_memory, kind, origin, at)
+             VALUES (?1, ?2, 'supersedes', ?3, ?4)",
+            params![from, to, link.origin, link.at],
         )?;
     }
     Ok(())

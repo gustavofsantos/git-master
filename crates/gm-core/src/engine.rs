@@ -2989,6 +2989,7 @@ impl Engine {
             root: &root,
             global_config: None,
             contexts_db: None,
+            in_member: false,
         };
         threads_session::provenance_from_lines(
             store,
@@ -4351,6 +4352,7 @@ impl Engine {
             root: &root,
             global_config: self.workspace_config.as_deref(),
             contexts_db: self.contexts_db.as_deref(),
+            in_member: false,
         };
         threads_session::run(id, store, &ctx, actor, kind)
     }

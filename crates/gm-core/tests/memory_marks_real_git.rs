@@ -512,12 +512,14 @@ fn a_mark_on_a_memory_that_is_not_there_is_not_found() {
 }
 
 #[test]
-fn marks_move_with_a_memory_into_a_context_and_the_repository_copy_is_gone() {
+fn marks_stay_with_a_memory_of_its_context_and_a_second_move_is_refused() {
     let world = world();
     let mut engine = engine_on(&world);
     let platform = create_context(&mut engine, "Platform");
     join(&mut engine, platform.id, &world.root);
+    // The repository is bound to one context, so its memory is stored there from the start (D222 (4)).
     let memory = accepted(&mut engine, "Retry the upload twice");
+    assert_eq!(memory.scope, "Platform");
     mark(&mut engine, &agent(), &memory.uid, MemoryMark::Useful, None);
     mark(
         &mut engine,
@@ -525,6 +527,14 @@ fn marks_move_with_a_memory_into_a_context_and_the_repository_copy_is_gone() {
         &memory.uid,
         MemoryMark::Wrong,
         Some("the second retry is not needed"),
+    );
+
+    let (read_memory, history) = read(&mut engine, &memory.uid);
+    assert_eq!(read_memory.marks.len(), 2);
+    assert_eq!(history.len(), 2, "the whole history is kept: {history:?}");
+    assert_eq!(
+        history[1].reason.as_deref(),
+        Some("the second retry is not needed")
     );
 
     let moved = send(
@@ -535,19 +545,8 @@ fn marks_move_with_a_memory_into_a_context_and_the_repository_copy_is_gone() {
             context: platform.id,
         },
     );
-    assert_eq!(state_of(&moved), OperationState::Done, "{moved:?}");
-    let moved = memory_of(&moved);
-    assert_eq!(moved.uid, memory.uid);
-    assert_eq!(moved.marks.len(), 2, "the marks came with the memory");
-    assert_eq!(moved.scope, "Platform");
-
-    let (read_memory, history) = read(&mut engine, &memory.uid);
-    assert_eq!(read_memory.marks.len(), 2);
-    assert_eq!(history.len(), 2, "the whole history moved: {history:?}");
-    assert_eq!(
-        history[1].reason.as_deref(),
-        Some("the second retry is not needed")
-    );
+    assert_eq!(state_of(&moved), OperationState::Failed);
+    assert_eq!(failure(&moved), "The memory is already in a context.");
     assert!(
         listed_uids(&mut engine, "", None, None)
             .iter()

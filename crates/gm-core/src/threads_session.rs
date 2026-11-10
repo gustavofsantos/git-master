@@ -115,6 +115,9 @@ pub(crate) struct Context<'a> {
     pub(crate) global_config: Option<&'a Path>,
     /// The contexts file (`contexts.db`), read by the memory commands; `None` when there is none.
     pub(crate) contexts_db: Option<&'a Path>,
+    /// True when a workspace member's store runs the command (D216 (3)): the member keeps its
+    /// memories in its own store, so the repository's move and proposal rules do not apply to it.
+    pub(crate) in_member: bool,
 }
 
 /// What a thread command needs a human for, or `None` when an agent may run it.
@@ -483,6 +486,20 @@ fn memories_command(
     kind: &CommandKind,
 ) -> Result<Vec<Event>, String> {
     let is_human = matches!(actor, Actor::Human);
+    // A plain repository's memories move into contexts.db before the command reads or writes them
+    // (D222 (6)). A failed move never fails a read: the repository's memories still answer, and a
+    // list says why they were not moved. A write is refused, so nothing is written around it.
+    let mut move_note = None;
+    if !ctx.in_member
+        && let Err(error) = memory_scope::move_repository_memories(store, ctx)
+    {
+        if !is_read_memory(kind) {
+            return Err(error);
+        }
+        move_note = Some(format!(
+            "the memories of this repository could not be moved to contexts.db: {error}"
+        ));
+    }
     let mut stores = Stores::new(store, ctx);
     if let Some(index) = member_of_command(&stores, kind)? {
         let member = stores.members.swap_remove(index);
@@ -517,12 +534,16 @@ fn memories_command(
                     cursor: cursor.as_deref(),
                 },
             )?;
+            let note = match (listed.note, move_note) {
+                (Some(note), Some(moved)) => Some(format!("{note}; {moved}")),
+                (note, moved) => note.or(moved),
+            };
             Ok(vec![Event::MemoriesListed {
                 id,
                 memories: listed.memories,
                 next_cursor: listed.next_cursor,
                 contexts_read: listed.contexts_read,
-                note: listed.note,
+                note,
                 proposed_total: listed.proposed_total,
                 accepted_total: listed.accepted_total,
                 accepted_characters: listed.accepted_characters,
@@ -606,6 +627,7 @@ fn in_member(
         root: &member.root,
         global_config: ctx.global_config,
         contexts_db: ctx.contexts_db,
+        in_member: true,
     };
     let mut inner = kind.clone();
     if let CommandKind::ProposeMemory { member: named, .. } = &mut inner {
@@ -642,9 +664,25 @@ fn propose_command(
         basis: *basis,
     };
     match context {
-        None => propose_memory(id, stores, ctx, actor, &proposal),
+        // A workspace and a member keep their proposals in their own store (D216, K1c); a plain
+        // repository's go to its context (D222 (4)).
+        None if ctx.in_member || stores.reach.is_workspace() => {
+            propose_memory(id, stores, ctx, actor, &proposal)
+        }
+        None => memory_scope::propose_in_repository(id, stores, ctx, actor, &proposal),
         Some(name) => memory_scope::propose_in_context(id, stores, ctx, actor, name, &proposal),
     }
+}
+
+/// Whether a memory command only reads (or counts a retrieval): such a command answers as it did
+/// before a failed move, where a write is refused (D222 (6)).
+fn is_read_memory(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ListMemories { .. }
+            | CommandKind::ReadMemory { .. }
+            | CommandKind::RecordMemoryRetrieval { .. }
+    )
 }
 
 /// Accepts, rejects or deletes a memory, of the repository's store or of a context (D192, D193
@@ -2584,6 +2622,7 @@ mod tests {
             root,
             global_config: Some(settings),
             contexts_db: None,
+            in_member: false,
         }
     }
 

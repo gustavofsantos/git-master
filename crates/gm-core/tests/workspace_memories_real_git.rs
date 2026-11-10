@@ -8,11 +8,13 @@ use std::process::Command as Process;
 
 use gm_core::Engine;
 use gm_core::git::SubprocessGit;
+use gm_core::threads::memories::NewMemory;
+use gm_core::threads::store::ThreadStore;
 use gm_core::workspace_cli::run_with;
 use gm_core::worktree_cli::Env;
 use gm_schema::threads::{
     Context, FileChange, FileChangeState, Memory, MemoryBasis, MemoryKind, MemoryMark,
-    MemoryMarkSummary, MemorySourceInput, MemorySourceKind, MemoryStatus,
+    MemoryMarkSummary, MemorySource, MemorySourceInput, MemorySourceKind, MemoryStatus,
 };
 use gm_schema::{Actor, Command, CommandKind, Event, OperationId, OperationState};
 
@@ -219,37 +221,30 @@ impl Fixture {
             Vec::new(),
             None,
         );
-        let mut member_api = self.engine_on(&self.member_api);
+        // The clone's own context memories first: a plain command on the clone moves the memories it
+        // keeps in its store into its one context (D222 (6)), so the store is written last.
         propose(
-            &mut member_api,
-            Kind::Rule,
-            "api rule",
-            vec![file("f.txt")],
-            None,
-        );
-        propose(
-            &mut member_api,
-            Kind::Decision,
-            "api note",
-            Vec::new(),
-            None,
-        );
-        propose(
-            &mut member_api,
+            &mut self.engine_on(&self.member_api),
             Kind::Rule,
             "platform policy",
             Vec::new(),
             Some("Platform"),
         );
-        let mut member_web = self.engine_on(&self.member_web);
-        propose(&mut member_web, Kind::Fact, "web fact", Vec::new(), None);
         propose(
-            &mut member_web,
+            &mut self.engine_on(&self.member_web),
             Kind::Lesson,
             "billing rule",
             Vec::new(),
             Some("Billing"),
         );
+        keep_in_member_store(
+            &self.member_api,
+            MemoryKind::Rule,
+            "api rule",
+            Some("f.txt"),
+        );
+        keep_in_member_store(&self.member_api, MemoryKind::Decision, "api note", None);
+        keep_in_member_store(&self.member_web, MemoryKind::Fact, "web fact", None);
         propose(
             &mut self.engine_on(&self.docs),
             Kind::Fact,
@@ -260,11 +255,55 @@ impl Fixture {
     }
 }
 
+/// Keeps an accepted memory in the threads store of the clone behind `member`, where a memory a
+/// person writes without a context lived before K1b (D216 (1)). The workspace reads a member's
+/// memories there, so these tests seed them there. A file source records its blob at `HEAD`, as a
+/// person's proposal does. The plain-repository rule is tested in `repository_context_real_git.rs`.
+fn keep_in_member_store(member: &Path, kind: MemoryKind, text: &str, file: Option<&str>) {
+    let common = member.join(git(member, &["rev-parse", "--git-common-dir"]));
+    let mut store = ThreadStore::open(&common).expect("the store opens");
+    let sources: Vec<MemorySource> = file
+        .map(|path| MemorySource {
+            kind: MemorySourceKind::File,
+            reference: path.to_owned(),
+            repo_id: None,
+            entry_from: None,
+            entry_to: None,
+            blob_oid: blob_at_head(member, path),
+            blob_read: true,
+        })
+        .into_iter()
+        .collect();
+    store
+        .propose_memory(&NewMemory {
+            kind,
+            text,
+            basis: MemoryBasis::Observed,
+            status: MemoryStatus::Accepted,
+            origin: "human",
+            sources: &sources,
+            at: 1_700_000_000_000,
+        })
+        .expect("the memory is kept");
+}
+
+/// The blob of `path` at `HEAD` of the repository at `root`, when the file is there.
+fn blob_at_head(root: &Path, path: &str) -> Option<String> {
+    let output = Process::new("git")
+        .args(["rev-parse", "-q", "--verify", &format!("HEAD:{path}")])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
     Fact,
     Rule,
-    Decision,
     Lesson,
 }
 
@@ -273,7 +312,6 @@ impl Kind {
         match self {
             Self::Fact => MemoryKind::Fact,
             Self::Rule => MemoryKind::Rule,
-            Self::Decision => MemoryKind::Decision,
             Self::Lesson => MemoryKind::Lesson,
         }
     }
@@ -538,13 +576,7 @@ fn a_member_memory_added_later_appears_on_the_next_read() {
     let mut ws = fx.engine_on(&fx.ws);
     let before = list(&mut ws, Some("member api")).expect("the list answers");
     assert_eq!(before.memories.len(), 2);
-    propose(
-        &mut fx.engine_on(&fx.member_api),
-        Kind::Fact,
-        "api later",
-        Vec::new(),
-        None,
-    );
+    keep_in_member_store(&fx.member_api, MemoryKind::Fact, "api later", None);
     let after = list(&mut ws, Some("member api")).expect("the list answers");
     assert!(labelled(&after.memories).contains(&row("api later", "member api", Some("api"))));
 }
@@ -842,7 +874,8 @@ fn a_human_accepts_a_proposed_member_memory_from_the_workspace() {
         status_in(&clone.memories, "api proposed"),
         MemoryStatus::Accepted
     );
-    assert!(labelled(&clone.memories).contains(&row("api proposed", "repository", None)));
+    // The clone is bound to one context, so its own memories moved there (D222 (6)).
+    assert!(labelled(&clone.memories).contains(&row("api proposed", "Platform", None)));
 }
 
 #[test]
@@ -1234,11 +1267,12 @@ fn a_plain_repository_lists_no_member_and_sees_only_its_own_scopes() {
     let mut api = fx.engine_on(&fx.member_api);
     let listed = list(&mut api, None).expect("the list answers");
     assert_eq!(listed.note, None);
+    // The clone is bound to one context, so its memories moved there on this list (D222 (6)).
     assert_eq!(
         labelled(&listed.memories),
         vec![
-            row("api note", "repository", None),
-            row("api rule", "repository", None),
+            row("api note", "Platform", None),
+            row("api rule", "Platform", None),
             row("platform policy", "Platform", None),
         ]
     );

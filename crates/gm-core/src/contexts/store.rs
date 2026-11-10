@@ -11,11 +11,15 @@ use gm_schema::threads::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::visibility::{self, ContextNode};
-use crate::threads::memories::{self, BlobRead, Carried, Found, NewMemory, Placement};
+use crate::threads::memories::{
+    self, BlobRead, Carried, Found, NewMemory, Placement, SupersedesLink,
+};
 use crate::threads::store::{BUSY_TIMEOUT, StoreError, begin, create_private, invalid, retry_busy};
 
 /// Migrations in order; `PRAGMA user_version` counts how many have run, so the first is version 1.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
+const MIGRATIONS: &[&str] = &[
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+];
 /// Characters of a context name (D193 (3)).
 const NAME_CHARS: usize = 64;
 
@@ -122,6 +126,14 @@ CREATE TABLE memory_mark (
     reason     TEXT CHECK (reason IS NULL OR length(reason) <= 200),
     at         INTEGER NOT NULL);
 CREATE INDEX memory_mark_actor ON memory_mark (memory_uid, actor, id);
+";
+
+/// Schema 6 (D222 (4), (6)): the context of a repository. `repository_of` holds the repository id of
+/// the context `GitMaster` created for it, so the context is found again after its user renames or
+/// moves it. A repository has one such context, and a context is the one of one repository.
+const SCHEMA_V6: &str = "
+ALTER TABLE context ADD COLUMN repository_of TEXT;
+CREATE UNIQUE INDEX context_repository_of ON context (repository_of) WHERE repository_of IS NOT NULL;
 ";
 
 /// The contexts store: one connection to `contexts.db`.
@@ -326,18 +338,48 @@ impl ContextStore {
         }
         let tx = begin(&mut self.conn)?;
         context_row(&tx, context)?;
-        tx.execute(
-            "INSERT INTO context_repo (context_id, repo_id, path, name, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(context_id, repo_id) DO UPDATE SET path = excluded.path, name = excluded.name",
-            params![context, repo_id, path, name, at],
-        )?;
-        tx.execute(
-            "UPDATE context_repo SET path = ?1 WHERE repo_id = ?2",
-            params![path, repo_id],
-        )?;
+        bind(&tx, context, repo_id, path, name, at)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The context of repository `repo_id` (D222 (4), (6)): the one `GitMaster` created for it, found by
+    /// its id after a rename or a move. When there is none, a top-level context named `folder_name` is
+    /// created, with a numeric suffix when a top-level context already has the name, and marked with
+    /// the id. The repository is bound to it as `add_repo` binds it, so the context is in its reach.
+    /// Returns the context's id.
+    pub fn repository_context(
+        &mut self,
+        repo_id: &str,
+        path: &str,
+        folder_name: &str,
+        at: i64,
+    ) -> Result<i64, StoreError> {
+        if repo_id.is_empty() {
+            return Err(invalid("a repository has an id"));
+        }
+        let tx = begin(&mut self.conn)?;
+        let found: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM context WHERE repository_of = ?1",
+                params![repo_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let id = if let Some(id) = found {
+            id
+        } else {
+            let name = free_root_name(&tx, folder_name)?;
+            tx.execute(
+                "INSERT INTO context (uid, name, parent_id, created_at, repository_of)
+                 VALUES (?1, ?2, NULL, ?3, ?4)",
+                params![memories::new_uid(), name, at, repo_id],
+            )?;
+            tx.last_insert_rowid()
+        };
+        bind(&tx, id, repo_id, path, folder_name, at)?;
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Removes a repository from a context. `NotFound` when it is not there. The memories stay.
@@ -456,6 +498,37 @@ impl ContextStore {
             marks,
         };
         self.store_in_contexts(&new, &checked, Some(&carried), contexts, Some(&memory.uid))
+    }
+
+    /// Stores a memory of `threads.db` as it is, attached to `context` (D222 (6)): its fields, its
+    /// sources (the caller has set each one's repository), its mark history and its retrieval count.
+    /// No duplicate key is checked and no status rule applies, since the memory is an existing record.
+    /// A memory already stored under its uid is left as it is and returns `false`, so a migration
+    /// interrupted after this write is finished by a retry.
+    pub fn import_memory(
+        &mut self,
+        memory: &Memory,
+        marks: &[MemoryMarkSummary],
+        context: i64,
+    ) -> Result<bool, StoreError> {
+        let tx = begin(&mut self.conn)?;
+        if memories::id_by_uid(&tx, &memory.uid)?.is_some() {
+            return Ok(false);
+        }
+        context_row(&tx, context)?;
+        let id = memories::insert_stored(&tx, memory, marks)?;
+        attach(&tx, id, context)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Stores supersedes links carried from `threads.db`, once their memories are stored here
+    /// (D222 (6)). A link already stored is kept.
+    pub(crate) fn import_links(&mut self, links: &[SupersedesLink]) -> Result<(), StoreError> {
+        let tx = begin(&mut self.conn)?;
+        memories::insert_links(&tx, links)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Stores a checked memory attached to `contexts`, inside one transaction (D193 (7), (8)).
@@ -761,6 +834,51 @@ fn duplicate(name: &str) -> StoreError {
     ))
 }
 
+/// The name a new top-level context takes from `folder`: the folder's name, or with a number after it
+/// the first one no top-level context has (`folder 2`, `folder 3`, ...). A name too long is cut to fit.
+fn free_root_name(conn: &Connection, folder: &str) -> Result<String, StoreError> {
+    let base = folder.trim();
+    let base = if base.is_empty() { "repository" } else { base };
+    let mut number = 1_u32;
+    loop {
+        let suffix = if number == 1 {
+            String::new()
+        } else {
+            format!(" {number}")
+        };
+        let room = NAME_CHARS - suffix.chars().count();
+        let head: String = base.chars().take(room).collect();
+        let name = format!("{}{suffix}", head.trim_end());
+        if !sibling_named(conn, None, &name, None)? {
+            return Ok(name);
+        }
+        number += 1;
+    }
+}
+
+/// Binds repository `repo_id`, seen at `path` under `name`, to `context` (D193 (4)). The path is set
+/// on every context the repository is in, since a clone has one path.
+fn bind(
+    conn: &Connection,
+    context: i64,
+    repo_id: &str,
+    path: &str,
+    name: &str,
+    at: i64,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO context_repo (context_id, repo_id, path, name, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(context_id, repo_id) DO UPDATE SET path = excluded.path, name = excluded.name",
+        params![context, repo_id, path, name, at],
+    )?;
+    conn.execute(
+        "UPDATE context_repo SET path = ?1 WHERE repo_id = ?2",
+        params![path, repo_id],
+    )?;
+    Ok(())
+}
+
 /// Whether a context other than `except` under `parent` (the root when `None`) has `name`.
 fn sibling_named(
     conn: &Connection,
@@ -924,6 +1042,7 @@ fn attach(conn: &Connection, memory: i64, context: i64) -> Result<(), StoreError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::threads::memories::SupersedesLink;
     use gm_schema::threads::{
         MemoryBasis, MemoryKind, MemoryMark, MemorySource, MemorySourceKind, MemoryStatus,
     };
@@ -995,7 +1114,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .expect("version");
-            assert_eq!(version, 5);
+            assert_eq!(version, 6);
         }
     }
 
@@ -1047,7 +1166,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert!(
             store
                 .read_memory_by_uid("oldmemory1")
@@ -1581,6 +1700,157 @@ mod tests {
         store.delete_memory(&second.uid).expect("delete");
         assert!(matches!(
             store.delete_memory(&second.uid),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    const OTHER: &str = "fedcba9876543210fedcba9876543210";
+
+    /// Version 5 gains `repository_of` and keeps every row (D222 (4)).
+    #[test]
+    fn version_five_gains_the_repository_of_column_and_keeps_the_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contexts.db");
+        {
+            let conn = Connection::open(&path).expect("raw");
+            for sql in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5] {
+                conn.execute_batch(sql).expect("schema");
+            }
+            conn.execute_batch(
+                "INSERT INTO context (id, uid, name, parent_id, created_at)
+                    VALUES (1, 'ctxuid', 'Platform', NULL, 1);",
+            )
+            .expect("row");
+            conn.pragma_update(None, "user_version", 5)
+                .expect("version");
+        }
+        let store = ContextStore::open(&path).expect("migrate");
+        let (name, marked): (String, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT name, repository_of FROM context WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row kept");
+        assert_eq!(name, "Platform");
+        assert_eq!(marked, None);
+    }
+
+    /// The context of a repository is created once, found by its id after a rename, and suffixed
+    /// when a top-level context already has the folder's name (D222 (4)).
+    #[test]
+    fn a_repository_context_is_created_once_found_after_a_rename_and_suffixed_on_a_clash() {
+        let mut store = store();
+        let manual = root(&mut store, "app");
+        let first = store
+            .repository_context(REPO, "/work/app/.git", "app", 1)
+            .expect("create");
+        assert_eq!(store.read_context(first).expect("read").name, "app 2");
+        let again = store
+            .repository_context(REPO, "/elsewhere/.git", "other", 2)
+            .expect("find");
+        assert_eq!(again, first, "found by the repository id, not the name");
+        assert_eq!(store.repo_contexts(REPO).expect("bound"), vec![first]);
+        assert_eq!(
+            store.repo_path(REPO).expect("path").as_deref(),
+            Some("/elsewhere/.git"),
+            "the bound path is the last one seen"
+        );
+        store
+            .update_context(first, Some("Renamed"), None)
+            .expect("rename");
+        let after = store
+            .repository_context(REPO, "/work/app/.git", "app", 3)
+            .expect("after rename");
+        assert_eq!(after, first, "still found after the rename");
+        let second = store
+            .repository_context(OTHER, "/work/app-two/.git", "app", 4)
+            .expect("second");
+        assert_ne!(second, first);
+        // The rename freed "app 2", so the second repository takes it.
+        assert_eq!(store.read_context(second).expect("read").name, "app 2");
+        assert_eq!(store.read_context(manual).expect("manual").name, "app");
+        let marked: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT repository_of FROM context WHERE id = ?1",
+                params![first],
+                |row| row.get(0),
+            )
+            .expect("marked");
+        assert_eq!(marked.as_deref(), Some(REPO));
+    }
+
+    /// A memory of `threads.db` is imported as it is: its status, marks and counts are kept, a
+    /// repeat writes nothing, and the supersedes links come after the memories (D222 (6)).
+    #[test]
+    fn an_imported_memory_keeps_its_status_marks_counts_and_links_and_a_repeat_writes_nothing() {
+        let mut from = store();
+        let a = root(&mut from, "A");
+        let (old, _) = propose(&mut from, "old rule", &[a], None);
+        from.accept_memory(&old.uid, None, &[], &[], 20)
+            .expect("accept");
+        let (new, _) = propose(&mut from, "new rule", &[a], None);
+        from.accept_memory(&new.uid, None, std::slice::from_ref(&old.uid), &[], 30)
+            .expect("supersede");
+        let (gone, _) = propose(&mut from, "dropped rule", &[a], None);
+        from.reject_memory(&gone.uid, 40).expect("reject");
+        from.mark_memory(&new.uid, "human", MemoryMark::Useful, None, 50)
+            .expect("mark");
+        from.count_retrieval(&new.uid, 60).expect("retrieve");
+
+        let mut to = store();
+        let b = root(&mut to, "B");
+        let mut moved = Vec::new();
+        for uid in [&old.uid, &new.uid, &gone.uid] {
+            let memory = from.read_memory_by_uid(uid).expect("read");
+            let history = from.memory_mark_history(uid).expect("history");
+            moved.push((memory, history));
+        }
+        for (memory, history) in &moved {
+            assert!(to.import_memory(memory, history, b).expect("import"));
+        }
+        let links = [SupersedesLink {
+            from: new.uid.clone(),
+            to: old.uid.clone(),
+            origin: "human".to_owned(),
+            at: 30,
+        }];
+        to.import_links(&links).expect("links");
+        to.import_links(&links).expect("the links again");
+
+        let imported = to.read_memory_by_uid(&new.uid).expect("new");
+        assert_eq!(imported.status, MemoryStatus::Accepted);
+        assert_eq!(imported.retrieval_count, 1);
+        assert_eq!(imported.last_retrieved_at, Some(60));
+        assert_eq!(imported.marks.len(), 1);
+        assert_eq!(imported.supersedes, vec![old.uid.clone()]);
+        assert_eq!(
+            to.read_memory_by_uid(&old.uid).expect("old").superseded_by,
+            vec![new.uid.clone()]
+        );
+        assert_eq!(
+            to.read_memory_by_uid(&gone.uid).expect("gone").status,
+            MemoryStatus::Rejected
+        );
+        assert_eq!(to.memory_contexts(&new.uid).expect("in"), vec![b]);
+        assert_eq!(all(&to, &[b]).len(), 3);
+
+        // A repeat of the import writes nothing: no second copy, no second mark.
+        let (memory, history) = &moved[1];
+        assert!(!to.import_memory(memory, history, b).expect("repeat"));
+        assert_eq!(all(&to, &[b]).len(), 3);
+        assert_eq!(to.memory_mark_history(&new.uid).expect("history").len(), 1);
+
+        let unknown = [SupersedesLink {
+            from: "nosuchuid00000000".to_owned(),
+            to: old.uid.clone(),
+            origin: "human".to_owned(),
+            at: 1,
+        }];
+        assert!(matches!(
+            to.import_links(&unknown),
             Err(StoreError::NotFound)
         ));
     }

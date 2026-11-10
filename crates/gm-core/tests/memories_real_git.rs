@@ -64,6 +64,8 @@ fn commit_all(root: &Path, message: &str) {
     git(root, &["commit", "-q", "-m", message]);
 }
 
+/// An engine on `root` whose `contexts.db` is in the test's own directory, beside the repository, so
+/// no test writes the real data directory (D222).
 fn engine_on(root: &Path) -> Engine {
     let git = SubprocessGit {
         log: Some(CommandLog::default()),
@@ -71,6 +73,8 @@ fn engine_on(root: &Path) -> Engine {
         ..SubprocessGit::default()
     };
     let mut engine = Engine::new(Box::new(git));
+    let base = root.parent().expect("the repository has a directory");
+    engine.set_contexts_db(Some(base.join("contexts.db")));
     let events = send(
         &mut engine,
         &Actor::Human,
