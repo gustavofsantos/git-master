@@ -16,7 +16,9 @@ use gpui::{
     px, uniform_list,
 };
 
-use crate::contexts_model::{ContextRow, ContextsModel, DeleteConfirm, DeletePlan, DeletePreview};
+use crate::contexts_model::{
+    ContextRow, ContextsModel, DeleteConfirm, DeletePlan, DeletePreview, counts_text,
+};
 use crate::icon::{self, Icon};
 use crate::memory_rows;
 use crate::shell_memories::button;
@@ -31,6 +33,8 @@ use crate::worktree_create::field_row;
 const WIDTH: f32 = 720.;
 /// The top edge of the dialog, under the title bar.
 const TOP: f32 = 72.;
+/// The width of the tree, the context names beside it and the right pane.
+const TREE_WIDTH: f32 = 320.;
 /// The height of the tree's list. Its rows are virtualized.
 const TREE_HEIGHT: f32 = 320.;
 /// The height of one row of the tree; `uniform_list` needs every row the same.
@@ -564,7 +568,7 @@ impl StatusView {
         let selected = self.model.contexts.selected();
         let menu = dialog.menu;
         div()
-            .w(px(260.))
+            .w(px(TREE_WIDTH))
             .flex_none()
             .flex()
             .flex_col()
@@ -626,6 +630,7 @@ impl StatusView {
         let indent = f32::from(u16::try_from(row.depth).unwrap_or(u16::MAX)) * INDENT;
         let mut line = div()
             .id(("context-row", index))
+            .w_full()
             .h(px(ROW_HEIGHT))
             .flex()
             .flex_row()
@@ -687,10 +692,7 @@ impl StatusView {
                     .flex_none()
                     .text_xs()
                     .text_color(theme::muted())
-                    .child(format!(
-                        "{} repos · {} memories",
-                        row.repo_count, row.accepted_memories
-                    )),
+                    .child(counts_text(row.repo_count, row.accepted_memories)),
             );
         }
         line.child(

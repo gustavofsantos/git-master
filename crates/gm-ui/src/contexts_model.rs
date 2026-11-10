@@ -529,6 +529,27 @@ fn unique(contexts: Vec<Context>) -> Vec<Context> {
         .collect()
 }
 
+/// The counts a tree row shows: its repositories, then its accepted memories, each with the noun
+/// that fits its count (`1 repository`, `2 repositories`, `1 memory`, `0 memories`).
+#[must_use]
+pub fn counts_text(repos: usize, memories: u32) -> String {
+    format!(
+        "{} · {}",
+        counted(
+            u64::try_from(repos).unwrap_or(u64::MAX),
+            "repository",
+            "repositories"
+        ),
+        counted(u64::from(memories), "memory", "memories"),
+    )
+}
+
+/// `count` with its noun: the singular only for exactly one.
+fn counted(count: u64, one: &str, many: &str) -> String {
+    let noun = if count == 1 { one } else { many };
+    format!("{count} {noun}")
+}
+
 /// The tree in list order, pre-order: each context, then its sub-contexts by name. A parent id
 /// that is not read makes its context a root. A cycle in the input has no root, so each cycle is
 /// entered at one of its members; every context is listed exactly once and the walk terminates.
@@ -705,6 +726,15 @@ mod tests {
                 ("Incident: stuck exports", 0, false),
             ]
         );
+    }
+
+    #[test]
+    fn the_counts_name_each_count_with_its_noun() {
+        assert_eq!(counts_text(0, 0), "0 repositories · 0 memories");
+        assert_eq!(counts_text(1, 0), "1 repository · 0 memories");
+        assert_eq!(counts_text(1, 1), "1 repository · 1 memory");
+        assert_eq!(counts_text(2, 1), "2 repositories · 1 memory");
+        assert_eq!(counts_text(2, 12), "2 repositories · 12 memories");
     }
 
     fn repo(repo_id: &str) -> ContextRepo {
