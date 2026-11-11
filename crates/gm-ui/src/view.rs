@@ -152,6 +152,8 @@ pub struct StatusView {
     pub(crate) diff_pane: Entity<DiffPane>,
     /// The read-only pane that shows one file of the open commit (H4).
     pub(crate) commit_diff_pane: Entity<DiffPane>,
+    /// The read-only pane of the Branch and Compare tabs: one file of the shown range (D231 (4)).
+    pub(crate) compare_diff_pane: Entity<DiffPane>,
     /// The sidebar's width, in logical pixels, as the user dragged it.
     pub(crate) sidebar_width: f32,
     /// The selectable fields of the commit detail panel (H3).
@@ -370,6 +372,7 @@ impl StatusView {
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
+        let compare_diff_pane = cx.new(DiffPane::read_only);
         let workflow_source = workflow_editor::new_editor("", window, cx);
         let workflow_source_sub = workflow_editor::subscribe(&workflow_source, window, cx);
         let conflict_result = cx.new(|cx| {
@@ -399,6 +402,7 @@ impl StatusView {
         // Both diffs open in the saved layout (D39, D40).
         diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
         commit_diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
+        compare_diff_pane.update(cx, |pane, cx| pane.set_layout(settings.diff_layout, cx));
         // The commit message box's focus: an empty box with something staged asks the workflows (`WF3d`).
         let composer_focus = composer.read(cx).focus_handle(cx);
         let mut subscriptions = vec![
@@ -434,6 +438,15 @@ impl StatusView {
                 window,
                 |this, _, event: &DiffPaneEvent, window, cx| {
                     this.on_diff_pane_event(event, window, cx);
+                },
+            ),
+            // Escape in the compare diff closes its file; the history's close is for its own pane.
+            cx.subscribe_in(
+                &compare_diff_pane,
+                window,
+                |this, _, event: &DiffPaneEvent, window, cx| match event {
+                    DiffPaneEvent::LeaveCommit => this.close_compare_file(cx),
+                    other => this.on_diff_pane_event(other, window, cx),
                 },
             ),
             // Coming back to the window is a reason to refresh; the watcher debounces it.
@@ -488,6 +501,7 @@ impl StatusView {
             composer,
             diff_pane,
             commit_diff_pane,
+            compare_diff_pane,
             sidebar_width: resize::SIDEBAR_DEFAULT,
             commit_texts,
             left_width: resize::LEFT_DEFAULT,
@@ -716,6 +730,7 @@ impl StatusView {
             self.after_file_event(cx);
         }
         self.show_fresh_commit_stacks(window, cx);
+        self.show_fresh_compare_stack(window, cx);
         self.settle_dialogs(window, cx);
         // A transform's answer follows the same rule for the composer and for the branch name (`WF3d`).
         if let Some((id, value, changed)) = transform {
@@ -804,6 +819,36 @@ impl StatusView {
         }
     }
 
+    /// The Branch and Compare tabs' stacked diff: the request a range read asked for is sent, and
+    /// the diffs that arrived are shown in the compare pane (D231 (4)).
+    fn show_fresh_compare_stack(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(request) = self.model.compare.take_stack_request() {
+            let id = self.engine.dispatch(
+                Actor::Human,
+                CommandKind::LoadRevisionStack {
+                    base: request.base,
+                    tip: request.tip,
+                    files: request.files.clone(),
+                },
+            );
+            self.model
+                .compare_stack
+                .request(id, 0, request.files, request.more);
+        }
+        if let Some(fresh) = self.model.compare_stack.take_fresh() {
+            self.compare_diff_pane.update(cx, |pane, cx| {
+                pane.show_stack(
+                    fresh.files,
+                    fresh.more,
+                    fresh.diffs,
+                    fresh.focus,
+                    window,
+                    cx,
+                );
+            });
+        }
+    }
+
     /// Shows the outcome of each dialog's operation that the model settled.
     fn settle_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_pending_workflow_review(window, cx);
@@ -879,15 +924,24 @@ impl StatusView {
                 (self.screen == Screen::WorkingCopy)
                     .then(|| self.left_column(left_width, commit_height, cx)),
             )
-            .children((self.screen == Screen::WorkingCopy).then(|| {
-                div().flex_1().min_w(px(0.)).min_h(px(0.)).child(
-                    if self.model.selected_submodule().is_some() {
-                        self.submodule_pane(cx).into_any_element()
-                    } else {
-                        self.diff_pane.clone().into_any_element()
-                    },
-                )
-            }))
+            .children(
+                (self.screen == Screen::WorkingCopy
+                    && self.model.compare.tab == ChangesTab::Uncommitted)
+                    .then(|| {
+                        div().flex_1().min_w(px(0.)).min_h(px(0.)).child(
+                            if self.model.selected_submodule().is_some() {
+                                self.submodule_pane(cx).into_any_element()
+                            } else {
+                                self.diff_pane.clone().into_any_element()
+                            },
+                        )
+                    }),
+            )
+            .children(
+                (self.screen == Screen::WorkingCopy
+                    && self.model.compare.tab != ChangesTab::Uncommitted)
+                    .then(|| self.compare_diff_area()),
+            )
             .children((self.screen == Screen::Inbox).then(|| self.inbox_page(cx)))
             .children((self.screen == Screen::History).then(|| self.history_page(cx)))
             .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
@@ -934,6 +988,8 @@ impl StatusView {
             self.request_hook_sections();
         }
         self.load_selected(cx);
+        // The Branch and Compare tabs follow the repository: a commit, a fetch or a checkout (D231).
+        self.read_changes_tab(cx);
     }
 
     /// Asks for the branch stacks the By stack view draws (D138), after every status
@@ -1192,10 +1248,32 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Shows the Changes page on `tab` (D231 (1)). The tab's own read is not sent here yet.
+    /// Shows the Changes page on `tab` (D231 (1)) and reads what the tab shows. A change of tab
+    /// drops the stacked diff of the old one and closes the Base picker.
     pub(crate) fn show_changes_tab(&mut self, tab: ChangesTab, cx: &mut Context<Self>) {
+        if tab != self.model.compare.tab {
+            self.model.compare.forget_stack();
+            self.model.compare_stack.close();
+        }
         self.model.compare.set_tab(tab);
         self.screen = Screen::WorkingCopy;
+        self.read_changes_tab(cx);
+        cx.notify();
+    }
+
+    /// Asks the engine for the read the shown tab needs (D231 (4b)): the Branch tab's range, or the
+    /// Compare tab's once both fields are filled. Uncommitted reads nothing here. A read already in
+    /// flight is superseded by the engine, so a new one is sent without checking.
+    pub(crate) fn read_changes_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(kind) = self.model.compare.active_command() else {
+            return;
+        };
+        let id = self.engine.dispatch(Actor::Human, kind);
+        match self.model.compare.tab {
+            ChangesTab::Branch => self.model.request_branch_view(id),
+            ChangesTab::Compare => self.model.request_compare_view(id),
+            ChangesTab::Uncommitted => {}
+        }
         cx.notify();
     }
 
@@ -1353,6 +1431,8 @@ impl StatusView {
                 self.diff_pane
                     .update(cx, |pane, cx| pane.set_layout(*layout, cx));
                 self.commit_diff_pane
+                    .update(cx, |pane, cx| pane.set_layout(*layout, cx));
+                self.compare_diff_pane
                     .update(cx, |pane, cx| pane.set_layout(*layout, cx));
                 self.save_layout(*layout, cx);
             }
@@ -1796,6 +1876,17 @@ impl StatusView {
 
     /// Tab and shift-Tab: list, then diff pane, then composer.
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The Branch and Compare tabs have no composer: the list and the diff take turns.
+        if self.screen == Screen::WorkingCopy && self.model.compare.tab != ChangesTab::Uncommitted {
+            if self.list_focus.is_focused(window) {
+                let handle = self.compare_diff_pane.read(cx).focus_handle();
+                window.focus(&handle);
+            } else {
+                self.list_focus.focus(window);
+            }
+            cx.notify();
+            return;
+        }
         let in_list = self.list_focus.is_focused(window);
         let in_composer = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let current = if in_list {

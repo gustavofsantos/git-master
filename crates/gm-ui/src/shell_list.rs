@@ -1,5 +1,6 @@
-//! The left column of the Changes page: the commit box at its top (UI redesign, slice 2), then
-//! the heading and the change list, its files grouped under their folders with a box each.
+//! The left column of the Changes page: the tabs at its top (D231), then on Uncommitted the commit
+//! box (UI redesign, slice 2), the heading and the change list, its files grouped under their
+//! folders with a box each. The Branch and Compare tabs draw their own column (`shell_compare`).
 
 use std::ops::Range;
 
@@ -11,6 +12,7 @@ use gpui::{
 
 use crate::action_registry::{Action, Args};
 use crate::change_tree::{self, Check, Row};
+use crate::compare::ChangesTab;
 use crate::icon::{self, Icon};
 use crate::move_file;
 use crate::resize::{self, LEFT};
@@ -40,7 +42,7 @@ impl StatusView {
             |this: &mut StatusView, _| this.left_width = resize::LEFT_DEFAULT,
             cx,
         );
-        div()
+        let column = div()
             .relative()
             .w(px(width))
             .flex_none()
@@ -50,10 +52,18 @@ impl StatusView {
             .flex_col()
             .border_r_1()
             .border_color(theme::hairline())
-            .child(self.commit_block(commit_height, cx))
-            .child(self.heading())
-            .child(self.change_list(cx))
-            .child(width_strip)
+            .child(self.changes_tab_bar(cx));
+        // Uncommitted is the Working Copy column as it always was; Branch and Compare are
+        // read-only and have no composer (D231 (1), (2)).
+        let column = if self.model.compare.tab == ChangesTab::Uncommitted {
+            column
+                .child(self.commit_block(commit_height, cx))
+                .child(self.heading())
+                .child(self.change_list(cx))
+        } else {
+            column.child(self.compare_column(cx))
+        };
+        column.child(width_strip)
     }
 
     /// "Working Copy", and the number of changed files muted beside it.

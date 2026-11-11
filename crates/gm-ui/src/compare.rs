@@ -3,12 +3,12 @@
 //! the pickers' suggestions. Pure: no GPUI, so every rule is unit-tested on its
 //! own. The view draws what this holds and sends the commands it asks for.
 
-// The Changes page draws these in a later slice; until then only the tests call them.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::HashSet;
 
-use gm_schema::{BranchEntry, CommandKind, CommitFile, OperationId, RangeMode, RevisionRange};
+use gm_schema::{
+    BranchEntry, CommandKind, CommitFile, OperationId, RangeMode, RevisionRange, StackSnapshot,
+    StackState,
+};
 
 use crate::fuzzy::fuzzy_match;
 
@@ -23,6 +23,13 @@ pub enum ChangesTab {
 }
 
 impl ChangesTab {
+    /// The tabs in the order the tab bar draws them.
+    pub const ALL: [ChangesTab; 3] = [
+        ChangesTab::Uncommitted,
+        ChangesTab::Branch,
+        ChangesTab::Compare,
+    ];
+
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -115,6 +122,8 @@ pub struct CompareState {
     pub tab: ChangesTab,
     /// The base of the Branch tab; `None` is the default branch.
     pub base: Option<String>,
+    /// Whether the Base picker is open. It closes on a pick and when the tab changes.
+    pub base_open: bool,
     pub branch_view: RangeView,
     /// The **From** field of the Compare tab, as typed. Empty until the view fills it.
     pub from: String,
@@ -127,30 +136,48 @@ pub struct CompareState {
     /// The `ListTags` in flight, if any.
     pub tags_id: Option<OperationId>,
     stack_request: Option<StackRequest>,
+    /// The `(base, tip)` of the stacked diff asked for last. A range read again with
+    /// the same pair is the same diff, so the diff already shown is kept (its scroll
+    /// and its file) instead of being read again on every status refresh.
+    stack_key: Option<(String, String)>,
 }
 
 impl CompareState {
     pub fn set_tab(&mut self, tab: ChangesTab) {
+        if self.tab != tab {
+            self.base_open = false;
+        }
         self.tab = tab;
     }
 
+    /// Takes a base from the picker; the picker closes.
     pub fn set_base(&mut self, base: Option<String>) {
         self.base = base;
+        self.base_open = false;
     }
 
+    /// Opens or closes the Base picker.
+    pub fn toggle_base_menu(&mut self) {
+        self.base_open = !self.base_open;
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn set_from(&mut self, from: String) {
         self.from = from;
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn set_to(&mut self, to: String) {
         self.to = to;
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn set_mode(&mut self, mode: RangeMode) {
         self.mode = mode;
     }
 
     /// Exchanges **From** and **To**, to read the same change backwards.
+    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn swap(&mut self) {
         std::mem::swap(&mut self.from, &mut self.to);
     }
@@ -163,6 +190,7 @@ impl CompareState {
     /// Whether the Compare fields are both empty, so the view should fill them
     /// with the default branch and HEAD.
     #[must_use]
+    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn needs_defaults(&self) -> bool {
         self.from.trim().is_empty() && self.to.trim().is_empty()
     }
@@ -214,8 +242,19 @@ impl CompareState {
         self.tags_id = Some(id);
     }
 
+    /// The view of the shown tab: the Branch tab's or the Compare tab's. `None` on Uncommitted.
+    #[must_use]
+    pub fn tab_view(&self) -> Option<&RangeView> {
+        match self.tab {
+            ChangesTab::Uncommitted => None,
+            ChangesTab::Branch => Some(&self.branch_view),
+            ChangesTab::Compare => Some(&self.compare_view),
+        }
+    }
+
     /// Routes a range answer to the view that awaits `id`. When it is taken and
-    /// lists files, the stacked diff of it becomes the next stack request.
+    /// lists files, the stacked diff of it becomes the next stack request, unless
+    /// that diff is the one already asked for. A range with no files forgets it.
     pub fn range_received(&mut self, id: OperationId, range: RevisionRange) -> bool {
         let request = (!range.files.is_empty()).then(|| StackRequest {
             base: range.base.clone(),
@@ -229,9 +268,23 @@ impl CompareState {
             self.compare_view.received(id, range)
         };
         if taken {
-            self.stack_request = request;
+            let key = request
+                .as_ref()
+                .map(|request| (request.base.clone(), request.tip.clone()));
+            self.stack_request = match &key {
+                Some(wanted) if self.stack_key.as_ref() != Some(wanted) => request,
+                _ => None,
+            };
+            self.stack_key = key;
         }
         taken
+    }
+
+    /// The stacked diff is no longer the one shown, so the next range that lists
+    /// files asks for it again. Called when the tab changes.
+    pub fn forget_stack(&mut self) {
+        self.stack_key = None;
+        self.stack_request = None;
     }
 
     /// Routes git's message for a failed read to the view that awaits `id`, and
@@ -307,14 +360,98 @@ pub fn empty_notice(tab: ChangesTab, range: &RevisionRange) -> String {
     }
 }
 
+/// What the summary line under the tab area shows (D231 (2), (3)).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Summary {
+    /// Nothing has been read yet: an empty line.
+    Idle,
+    Reading,
+    /// Git's message, shown as given.
+    Failed(String),
+    Shown {
+        header: String,
+        totals: String,
+    },
+}
+
+/// The summary line of the shown tab's view.
+#[must_use]
+pub fn summary(tab: ChangesTab, view: &RangeView) -> Summary {
+    match view {
+        RangeView::Idle => Summary::Idle,
+        RangeView::Loading { .. } => Summary::Reading,
+        RangeView::Failed(message) => Summary::Failed(message.clone()),
+        RangeView::Shown(range) => Summary::Shown {
+            header: header(range, tab),
+            totals: totals(range),
+        },
+    }
+}
+
+/// The line the file list ends with when some files are not listed (D231 (5)).
+#[must_use]
+pub fn more_line(more: usize) -> Option<String> {
+    (more > 0).then(|| format!("and {more} more files, not shown."))
+}
+
+/// The text of the Base button: the base as chosen, else the default branch's name
+/// once the read names it, else `default branch`.
+#[must_use]
+pub fn base_label(base: Option<&str>, shown_from: Option<&str>) -> String {
+    base.or(shown_from).unwrap_or("default branch").to_owned()
+}
+
+/// The stack parent of the checked-out branch, for the Base picker (D231 (2)). A
+/// parent that is gone is no branch to compare with, so it is not offered.
+#[must_use]
+pub fn stack_parent(snapshot: Option<&StackSnapshot>, head: Option<&str>) -> Option<String> {
+    let branch = snapshot?.branch(head?)?;
+    if branch.state == StackState::ParentGone {
+        return None;
+    }
+    branch.parent.clone()
+}
+
+/// One row of the Base picker: the default branch (`name` `None`), or a branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaseRow {
+    pub name: Option<String>,
+    /// The stack parent, marked **parent**.
+    pub parent: bool,
+}
+
+/// The rows of the Base picker: **Default branch** first, then `base_options`.
+#[must_use]
+pub fn base_rows(
+    branches: &[BranchEntry],
+    stack_parent: Option<&str>,
+    current: Option<&str>,
+) -> Vec<BaseRow> {
+    std::iter::once(BaseRow {
+        name: None,
+        parent: false,
+    })
+    .chain(
+        base_options(branches, stack_parent, current)
+            .into_iter()
+            .map(|option| BaseRow {
+                name: Some(option.name),
+                parent: option.parent,
+            }),
+    )
+    .collect()
+}
+
 /// What a picker suggests for one typed revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
 pub struct Suggestion {
     pub text: String,
     pub kind: SuggestionKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
 pub enum SuggestionKind {
     Branch,
     RemoteBranch,
@@ -326,6 +463,7 @@ pub enum SuggestionKind {
 /// unfiltered; otherwise they are ranked by the palette's fuzzy match. A text is
 /// listed once, the first time it appears.
 #[must_use]
+#[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
 pub fn suggestions(
     query: &str,
     branches: &[BranchEntry],
@@ -415,7 +553,7 @@ pub fn base_options(
 
 #[cfg(test)]
 mod tests {
-    use gm_schema::{Change, CommitFile};
+    use gm_schema::{Change, CommitFile, Stack, StackBranch};
 
     use super::*;
 
@@ -740,5 +878,188 @@ mod tests {
                 parent: false
             }]
         );
+    }
+
+    fn stack_branch(name: &str, parent: Option<&str>, state: StackState) -> StackBranch {
+        StackBranch {
+            name: name.into(),
+            parent: parent.map(str::to_owned),
+            depth: 0,
+            state,
+            ahead: 0,
+            behind: 0,
+            restack: 0,
+            commits: Vec::new(),
+            base: None,
+            parent_tip: None,
+        }
+    }
+
+    #[test]
+    fn the_base_picker_closes_on_a_pick_and_on_a_tab_change() {
+        let mut state = CompareState::default();
+        state.set_tab(ChangesTab::Branch);
+        state.toggle_base_menu();
+        assert!(state.base_open);
+        state.set_tab(ChangesTab::Branch);
+        assert!(state.base_open, "the same tab keeps the picker");
+        state.set_tab(ChangesTab::Compare);
+        assert!(!state.base_open);
+        state.set_tab(ChangesTab::Branch);
+        state.toggle_base_menu();
+        state.set_base(Some("develop".into()));
+        assert!(!state.base_open);
+    }
+
+    #[test]
+    fn the_tab_bar_draws_the_tabs_in_their_order() {
+        assert_eq!(
+            ChangesTab::ALL,
+            [
+                ChangesTab::Uncommitted,
+                ChangesTab::Branch,
+                ChangesTab::Compare
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tab_view_is_the_range_of_the_shown_tab_only() {
+        let mut state = CompareState::default();
+        assert!(state.tab_view().is_none());
+        state.set_tab(ChangesTab::Branch);
+        state.request_branch(id(1));
+        assert!(state.tab_view().is_some_and(RangeView::is_loading));
+        state.set_tab(ChangesTab::Compare);
+        assert_eq!(state.tab_view(), Some(&RangeView::Idle));
+    }
+
+    #[test]
+    fn the_summary_follows_the_view() {
+        let shown = range(&["a", "b"], 0);
+        assert_eq!(summary(ChangesTab::Branch, &RangeView::Idle), Summary::Idle);
+        assert_eq!(
+            summary(ChangesTab::Branch, &RangeView::Loading { id: id(1) }),
+            Summary::Reading
+        );
+        assert_eq!(
+            summary(ChangesTab::Compare, &RangeView::Failed("bad".into())),
+            Summary::Failed("bad".into())
+        );
+        assert_eq!(
+            summary(ChangesTab::Branch, &RangeView::Shown(Box::new(shown))),
+            Summary::Shown {
+                header: "feature/billing against main".into(),
+                totals: "2 files · +340 −96".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn more_files_are_named_after_the_list_only_when_there_are_some() {
+        assert_eq!(more_line(0), None);
+        assert_eq!(
+            more_line(40).as_deref(),
+            Some("and 40 more files, not shown.")
+        );
+    }
+
+    #[test]
+    fn the_base_button_names_the_base_chosen_or_the_default_once_read() {
+        assert_eq!(base_label(Some("develop"), Some("main")), "develop");
+        assert_eq!(base_label(None, Some("main")), "main");
+        assert_eq!(base_label(None, None), "default branch");
+    }
+
+    #[test]
+    fn the_stack_parent_is_offered_unless_it_is_gone() {
+        let snapshot = StackSnapshot {
+            stacks: vec![Stack {
+                branches: vec![
+                    stack_branch("parent", None, StackState::Root),
+                    stack_branch("feature", Some("parent"), StackState::Current),
+                    stack_branch("orphan", Some("deleted"), StackState::ParentGone),
+                ],
+            }],
+            looped: Vec::new(),
+        };
+        assert_eq!(
+            stack_parent(Some(&snapshot), Some("feature")),
+            Some("parent".into())
+        );
+        assert_eq!(stack_parent(Some(&snapshot), Some("parent")), None);
+        assert_eq!(stack_parent(Some(&snapshot), Some("orphan")), None);
+        assert_eq!(stack_parent(Some(&snapshot), None), None);
+        assert_eq!(stack_parent(None, Some("feature")), None);
+    }
+
+    #[test]
+    fn the_base_rows_start_with_the_default_branch() {
+        let branches = [branch("main", false), branch("feature", false)];
+        let rows = base_rows(&branches, Some("main"), Some("feature"));
+        assert_eq!(
+            rows,
+            [
+                BaseRow {
+                    name: None,
+                    parent: false
+                },
+                BaseRow {
+                    name: Some("main".into()),
+                    parent: true
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refresh_of_the_same_range_keeps_the_stacked_diff() {
+        let mut state = CompareState::default();
+        state.request_branch(id(1));
+        assert!(state.range_received(id(1), range(&["a.txt"], 0)));
+        assert!(state.take_stack_request().is_some());
+        // The same base and tip read again, as a status refresh does: nothing to ask.
+        state.request_branch(id(2));
+        assert!(state.range_received(id(2), range(&["a.txt"], 0)));
+        assert_eq!(state.take_stack_request(), None);
+    }
+
+    #[test]
+    fn a_moved_tip_asks_for_the_stacked_diff_again() {
+        let mut state = CompareState::default();
+        state.request_branch(id(1));
+        assert!(state.range_received(id(1), range(&["a.txt"], 0)));
+        let _ = state.take_stack_request();
+        let mut moved = range(&["a.txt"], 0);
+        moved.tip = "d".repeat(40);
+        state.request_branch(id(2));
+        assert!(state.range_received(id(2), moved));
+        let request = state.take_stack_request().expect("a new stack request");
+        assert_eq!(request.tip, "d".repeat(40));
+    }
+
+    #[test]
+    fn forgetting_the_stack_asks_for_it_again() {
+        let mut state = CompareState::default();
+        state.request_branch(id(1));
+        assert!(state.range_received(id(1), range(&["a.txt"], 0)));
+        let _ = state.take_stack_request();
+        state.forget_stack();
+        state.request_branch(id(2));
+        assert!(state.range_received(id(2), range(&["a.txt"], 0)));
+        assert!(state.take_stack_request().is_some());
+    }
+
+    #[test]
+    fn a_range_with_no_files_forgets_the_stacked_diff() {
+        let mut state = CompareState::default();
+        state.request_branch(id(1));
+        assert!(state.range_received(id(1), range(&["a.txt"], 0)));
+        let _ = state.take_stack_request();
+        state.request_branch(id(2));
+        assert!(state.range_received(id(2), range(&[], 0)));
+        state.request_branch(id(3));
+        assert!(state.range_received(id(3), range(&["a.txt"], 0)));
+        assert!(state.take_stack_request().is_some());
     }
 }

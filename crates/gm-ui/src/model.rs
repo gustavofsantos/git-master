@@ -611,19 +611,17 @@ impl DiffSlots {
 
 impl Model {
     /// The Branch tab's read `id` was sent (D231 (4b)).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn request_branch_view(&mut self, id: OperationId) {
         self.compare.request_branch(id);
     }
 
     /// The Compare tab's read `id` was sent (D231 (3)).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn request_compare_view(&mut self, id: OperationId) {
         self.compare.request_compare(id);
     }
 
     /// The `ListTags` `id` was sent, for the pickers' suggestions (D231 (4b)).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn request_tags(&mut self, id: OperationId) {
         self.compare.request_tags(id);
     }
@@ -1183,7 +1181,12 @@ impl Model {
                 None
             }
             Event::RevisionRangeLoaded { id, range } => {
-                self.compare.range_received(id, range);
+                // A range with no files has no diff to show: the stacked diff goes with it.
+                let empty = range.files.is_empty();
+                if self.compare.range_received(id, range) && empty {
+                    self.compare.forget_stack();
+                    self.compare_stack.close();
+                }
                 None
             }
             Event::RevisionStackLoaded { id, diffs } => {

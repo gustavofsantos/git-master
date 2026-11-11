@@ -30,6 +30,8 @@ const MARGIN: f32 = 4.;
 pub(crate) enum Target {
     Branch(String),
     File(String),
+    /// A changed file of the Branch or Compare tab, by its path (D231 (5)).
+    CompareFile(String),
     /// A worktree, by its folder.
     Worktree(String),
     /// A workspace of the sidebar, by its folder (D183).
@@ -89,6 +91,7 @@ impl Target {
         match self {
             Self::Branch(name)
             | Self::File(name)
+            | Self::CompareFile(name)
             | Self::Worktree(name)
             | Self::Label { name, .. } => name.clone(),
             Self::Workspace(path) => workspace_list::folder_name(path),
@@ -216,6 +219,20 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         items.insert(1, item(Action::CheckOutMemberBranch, 0));
     }
     offered_items(items, ctx)
+}
+
+/// The menu of a changed file of the Branch or Compare tab (D231 (5)). The diff is read-only,
+/// so Copy File Path is its only action.
+pub(crate) fn compare_file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
+    offered_items(
+        vec![Item::new(
+            Action::CopyFilePath,
+            Args::File(path.to_owned()),
+            0,
+            ctx,
+        )],
+        ctx,
+    )
 }
 
 /// The menu of a thread row: rename, note, tags and star, then the link and the
@@ -667,6 +684,7 @@ impl StatusView {
         match target {
             Target::Branch(name) => branch_items(name, &ctx),
             Target::File(path) => file_items(path, &ctx),
+            Target::CompareFile(path) => compare_file_items(path, &ctx),
             Target::Worktree(path) => worktree_items(path, &ctx),
             Target::Workspace(path) => workspace_items(path, &ctx),
             Target::Stash { index, oid } => stash_items(*index, oid, &ctx),

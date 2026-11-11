@@ -73,6 +73,7 @@ mod review_scorecards;
 mod script_completion;
 mod shell_code;
 mod shell_commit;
+mod shell_compare;
 mod shell_conflicts;
 mod shell_health;
 mod shell_history;

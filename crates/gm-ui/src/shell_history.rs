@@ -785,13 +785,11 @@ fn commit_detail(
                 .flex_col()
                 .gap_1p5()
                 .text_xs()
-                .children(
-                    detail
-                        .files
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, file)| file_row(file, ix, cx)),
-                )
+                .children(detail.files.iter().enumerate().map(|(ix, file)| {
+                    file_row(file, ix, "commit-file", cx, move |this, window, cx| {
+                        this.open_commit_file(ix, window, cx);
+                    })
+                }))
                 .children((detail.more_files > 0).then(|| {
                     div()
                         .text_color(theme::muted())
@@ -912,11 +910,19 @@ fn field_label(text: &'static str) -> Div {
 }
 
 /// One changed file: its change letter, its path (old to new for a rename) and
-/// its line counts. A click opens the file's diff (H4).
-fn file_row(file: &CommitFile, ix: usize, cx: &mut Context<StatusView>) -> Stateful<Div> {
+/// its line counts. `id` names the row, `ix` its place in the list, and a click
+/// calls `open`: the history opens the file's diff (H4), the Changes page's tabs
+/// theirs (D231 (4)).
+pub(crate) fn file_row(
+    file: &CommitFile,
+    ix: usize,
+    id: &'static str,
+    cx: &mut Context<StatusView>,
+    open: impl Fn(&mut StatusView, &mut Window, &mut Context<StatusView>) + 'static,
+) -> Stateful<Div> {
     let (letter, color) = (change_letter(file.change), change_color(file.change));
     div()
-        .id(("commit-file", ix))
+        .id((id, ix))
         .cursor_pointer()
         .flex()
         .flex_row()
@@ -948,7 +954,7 @@ fn file_row(file: &CommitFile, ix: usize, cx: &mut Context<StatusView>) -> State
                 .child(file_counts(file)),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.open_commit_file(ix, window, cx);
+            open(this, window, cx);
         }))
 }
 

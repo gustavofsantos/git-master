@@ -580,6 +580,13 @@ impl StatusView {
     /// Working Copy diff, the Code viewer, or a commit's, stash's or reflog entry's diff.
     /// Nothing elsewhere, or with no line picked.
     pub(crate) fn comment_spot<'a>(&'a self, cx: &'a App) -> CommentSpot<'a> {
+        // The Branch and Compare tabs are read-only and have no comments (D231): the Working Copy's
+        // selection is not on screen then.
+        if self.screen == Screen::WorkingCopy
+            && self.model.compare.tab != crate::compare::ChangesTab::Uncommitted
+        {
+            return CommentSpot::Nothing;
+        }
         match self.screen {
             Screen::Code => return self.code_comment_spot(),
             Screen::History | Screen::Stashes | Screen::Reflog => {
@@ -614,6 +621,11 @@ impl StatusView {
 
     /// The text picked in the diff, for a comment found by its text (D141).
     pub(crate) fn comment_text(&self, cx: &App) -> Option<String> {
+        if self.screen == Screen::WorkingCopy
+            && self.model.compare.tab != crate::compare::ChangesTab::Uncommitted
+        {
+            return None;
+        }
         match self.screen {
             Screen::History | Screen::Stashes | Screen::Reflog => {
                 self.commit_diff_pane.read(cx).comment_text()
