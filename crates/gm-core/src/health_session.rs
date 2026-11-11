@@ -4,18 +4,22 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
-use gm_schema::{HealthProgress, HealthReport, LineChurn, OperationId};
+use gm_schema::{FileHealth, HealthProgress, HealthReport, LineChurn, OperationId, RemovedChurn};
 
+use crate::health::complexity::{self, MAX_BYTES, MEASURED_FILES};
+use crate::health::ingest::{self, Tree};
 use crate::health::store::HealthStore;
-use crate::health::{CommitRecord, DAY_SECS, HealthConfig, churn, ingest, metrics};
+use crate::health::{CommitRecord, DAY_SECS, HealthConfig, churn, metrics};
 
 /// The newest days of the window are indexed first, so the report of the recent commits comes
 /// early; the rest of the window follows (see `HealthJob::run`).
 const RECENT_DAYS: i64 = 183;
+/// The error an ingest function returns when its stop flag is set.
+const CANCELLED: &str = "cancelled";
 
 /// The code health read of one commit and configuration, started by `LoadHealth`. It stops like
 /// a search once `stop` is set.
@@ -31,6 +35,9 @@ pub struct HealthJob {
     pub config: HealthConfig,
     pub config_hash: String,
     pub stop: Arc<AtomicBool>,
+    /// The instant after which the read stops reading history and answers with what the index
+    /// holds, `complete` false (D229 (4)). `None` for no budget, as the app's own read has.
+    pub deadline: Option<Instant>,
 }
 
 /// What a job reports while it runs.
@@ -50,7 +57,8 @@ pub struct HealthOutcome {
 impl HealthJob {
     /// Fills the index for the window in two phases, the recent commits first, and computes the
     /// report. `update` is called with each progress step and with a partial report when the
-    /// older commits are still missing.
+    /// older commits are still missing. A spent budget ends the read with a partial report; a
+    /// stop from the engine ends it with an error.
     #[must_use]
     pub fn run(self, update: &mut dyn FnMut(HealthUpdate)) -> HealthOutcome {
         let result = self.compute(update);
@@ -62,43 +70,60 @@ impl HealthJob {
 
     fn compute(&self, update: &mut dyn FnMut(HealthUpdate)) -> Result<HealthReport, String> {
         let mut store = HealthStore::open(&self.db)?;
+        match self.index(&mut store, update) {
+            Ok(()) => self.report(&store, true),
+            Err(error) if error == CANCELLED && self.budget_spent() => self.report(&store, false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Fills the index: the recent commits, the rest of the window, then the hunks of the
+    /// first-parent window. Stops with `Err("cancelled")` when the stop flag is set.
+    fn index(
+        &self,
+        store: &mut HealthStore,
+        update: &mut dyn FnMut(HealthUpdate),
+    ) -> Result<(), String> {
         let since = self.since();
         let recent = since.max(self.time - RECENT_DAYS * DAY_SECS);
         ingest::ingest(
             &self.root,
-            &mut store,
+            store,
             &self.sha,
             recent,
             &self.stop,
             &mut |progress| {
+                self.check_budget();
                 update(HealthUpdate::Progress(progress));
             },
         )?;
         let full = ingest::window(&self.root, &self.sha, since)?;
         if !store.missing(&full)?.is_empty() {
-            update(HealthUpdate::Partial(self.report(&store)?));
+            update(HealthUpdate::Partial(self.report(store, false)?));
             ingest::ingest(
                 &self.root,
-                &mut store,
+                store,
                 &self.sha,
                 since,
                 &self.stop,
                 &mut |progress| {
+                    self.check_budget();
                     update(HealthUpdate::Progress(progress));
                 },
             )?;
         }
         ingest::ingest_hunks(
             &self.root,
-            &mut store,
+            store,
             &self.sha,
             since,
             &self.stop,
             &mut |progress| {
+                self.check_budget();
                 update(HealthUpdate::Progress(progress));
             },
         )?;
-        self.report(&store)
+        Ok(())
     }
 
     /// The first instant of the window, in seconds.
@@ -106,25 +131,73 @@ impl HealthJob {
         self.time - i64::from(self.config.window_days) * DAY_SECS
     }
 
+    /// Whether the budget of this read is spent.
+    fn budget_spent(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Sets the stop flag once the budget is spent. The ingest functions check it between
+    /// batches, so the read ends there and is not treated as a cancellation.
+    fn check_budget(&self) {
+        if self.budget_spent() {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// The indicators of the commits of the window the index holds. Only files that exist at the
-    /// commit are reported.
-    fn report(&self, store: &HealthStore) -> Result<HealthReport, String> {
+    /// commit are reported. `measure` reads the complexity of the hot files, unless the budget is
+    /// spent: a partial answer does not read blobs past it.
+    fn report(&self, store: &HealthStore, measure: bool) -> Result<HealthReport, String> {
         let window = ingest::window(&self.root, &self.sha, self.since())?;
         let commits = store.load(&window)?;
-        let live = self.live_files()?;
-        let mut files = metrics::compute(&commits, &self.config, Some(&live));
+        let tree = ingest::tree(&self.root, &self.sha)?;
+        let mut files = metrics::compute(&commits, &self.config, Some(&tree.paths));
+        for file in &mut files {
+            file.bytes = tree.blobs.get(&file.path).map_or(0, |blob| blob.bytes);
+        }
+        let mut removed_churn = Vec::new();
         if let Some(churn) = self.churn(store, &commits)? {
             for file in &mut files {
                 file.churn = churn.get(&file.path).cloned();
             }
+            removed_churn = removed(&churn, &tree.paths);
+        }
+        if measure && !self.budget_spent() {
+            self.measure(&mut files, &tree)?;
+        }
+        for file in &mut files {
+            let extra = metrics::measured_constraints(file);
+            file.constraints.extend(extra);
         }
         Ok(HealthReport {
             rev: self.sha.clone(),
             config_hash: self.config_hash.clone(),
             complete: commits.len() == window.len(),
             files,
-            removed_churn: Vec::new(),
+            removed_churn,
         })
+    }
+
+    /// The complexity of the hottest files that are text, at the commit (D229 (1)). Files are in
+    /// rank order; the ones past `MEASURED_FILES` have none.
+    fn measure(&self, files: &mut [FileHealth], tree: &Tree) -> Result<(), String> {
+        let largest = u64::try_from(MAX_BYTES).unwrap_or(u64::MAX);
+        let ids: Vec<Option<String>> = files
+            .iter()
+            .take(MEASURED_FILES)
+            .map(|file| {
+                tree.blobs
+                    .get(&file.path)
+                    .filter(|blob| blob.bytes <= largest)
+                    .map(|blob| blob.id.clone())
+            })
+            .collect();
+        let measured = complexity::read(&self.root, &ids, &self.stop)?;
+        for (file, value) in files.iter_mut().zip(measured) {
+            file.complexity = value;
+        }
+        Ok(())
     }
 
     /// The churn of each file, from the hunks of the first-parent window (D228). `None` until the
@@ -151,28 +224,19 @@ impl HealthJob {
         }
         Ok(Some(churn::follow(&kept, &days, &self.config)))
     }
+}
 
-    /// The paths of the files the commit holds (`git ls-tree`).
-    fn live_files(&self) -> Result<HashSet<String>, String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(["--no-optional-locks", "-c", "core.quotepath=off"])
-            .args(["ls-tree", "-r", "-z", "--name-only", &self.sha])
-            .env("LC_ALL", "C")
-            .output()
-            .map_err(|e| format!("cannot run git: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "cannot list the files of {}: {}",
-                self.sha,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .collect())
-    }
+/// The churn of the files that the commit no longer holds, by path. A path with no churn is
+/// left out (D229 (3)).
+fn removed(churn: &HashMap<String, LineChurn>, live: &HashSet<String>) -> Vec<RemovedChurn> {
+    let mut removed: Vec<RemovedChurn> = churn
+        .iter()
+        .filter(|(path, value)| !live.contains(path.as_str()) && **value != LineChurn::default())
+        .map(|(path, value)| RemovedChurn {
+            path: path.clone(),
+            churn: value.clone(),
+        })
+        .collect();
+    removed.sort_by(|a, b| a.path.cmp(&b.path));
+    removed
 }

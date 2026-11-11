@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gm_schema::{DormancyBreak, FileHealth, Ownership, Partner, SPARK_BARS, Trend};
+use gm_schema::{CHURN_DAYS, DormancyBreak, FileHealth, Ownership, Partner, SPARK_BARS, Trend};
 
 use super::config::{Excluder, scope_index};
 use super::{CommitRecord, HealthConfig};
@@ -26,6 +26,10 @@ const MIN_RECENT_CHANGES: usize = 3;
 const SPARK_SPAN: u32 = 15;
 const HOT_PERCENTILE: f64 = 95.0;
 const MIN_OWNER_COMMITS: u32 = 5;
+/// The heat and the complexity percentiles from which a file is hot and complex (D229 (1)).
+const HOT_AND_COMPLEX: f64 = 90.0;
+/// Lines added in the window from which the churn constraint applies (D229 (2)).
+const MIN_CHURN_LINES: u32 = 50;
 
 /// One commit as the metrics see it: only the files that still count.
 struct Counted {
@@ -501,6 +505,35 @@ fn constraints(
     out
 }
 
+/// The constraints that need the complexity or the churn of a file, after the ones `compute`
+/// gives (D229 (1), (2)). The job adds them once both are known.
+#[must_use]
+pub fn measured_constraints(file: &FileHealth) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(complexity) = &file.complexity
+        && file.percentile >= HOT_AND_COMPLEX
+        && complexity.percentile >= HOT_AND_COMPLEX
+    {
+        out.push(format!(
+            "Hot and complex (deepest nesting {}, {} lines): change it in small steps, and add or update a test for each change of behavior.",
+            complexity.indent_max, complexity.lines
+        ));
+    }
+    if let Some(churn) = &file.churn
+        && churn.added >= MIN_CHURN_LINES
+        && u64::from(churn.rewritten) * 10 >= u64::from(churn.added)
+    {
+        // The share rounded to the nearest whole percent, halves up.
+        let added = u64::from(churn.added);
+        let share = (u64::from(churn.rewritten) * 200 + added) / (2 * added);
+        out.push(format!(
+            "{share}% of the {} lines added here were rewritten within {CHURN_DAYS} active days: read the file's recent history before changing it.",
+            churn.added
+        ));
+    }
+    out
+}
+
 fn round_to(value: f64, places: i32) -> f64 {
     let scale = 10f64.powi(places);
     (value * scale).round() / scale
@@ -515,6 +548,7 @@ mod tests {
     /// No `live` filter: every file is reported.
     const NO_LIVE: Option<&HashSet<String>> = None;
 
+    use gm_schema::LineChurn;
     use proptest::prelude::*;
 
     use super::*;
@@ -926,6 +960,106 @@ mod tests {
                 .collect();
             log(&entries)
         })
+    }
+
+    fn bare(percentile: f64) -> FileHealth {
+        FileHealth {
+            path: "f.rs".to_owned(),
+            rank: 1,
+            percentile,
+            heat: 1.0,
+            trend: Trend::Steady,
+            spark: [0; SPARK_BARS],
+            dormancy_break: None,
+            changes_together: Vec::new(),
+            ownership: Ownership {
+                authors: 1,
+                top_author_share: 1.0,
+                minor_contributors: 0,
+            },
+            constraints: Vec::new(),
+            churn: None,
+            bytes: 0,
+            complexity: None,
+        }
+    }
+
+    fn complexity(percentile: f64) -> gm_schema::Complexity {
+        gm_schema::Complexity {
+            lines: 300,
+            indent_max: 6,
+            indent_mean: 2.0,
+            indent_total: 900,
+            percentile,
+        }
+    }
+
+    #[test]
+    fn a_hot_and_complex_file_gets_the_complexity_constraint() {
+        let mut file = bare(95.0);
+        file.complexity = Some(complexity(90.0));
+        assert_eq!(
+            measured_constraints(&file),
+            vec!["Hot and complex (deepest nesting 6, 300 lines): change it in small steps, and add or update a test for each change of behavior.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_file_needs_both_heat_and_complexity_at_ninety() {
+        let mut cold = bare(89.9);
+        cold.complexity = Some(complexity(99.0));
+        assert!(measured_constraints(&cold).is_empty());
+        let mut simple = bare(99.0);
+        simple.complexity = Some(complexity(89.9));
+        assert!(measured_constraints(&simple).is_empty());
+        assert!(measured_constraints(&bare(99.0)).is_empty());
+    }
+
+    #[test]
+    fn churn_of_at_least_fifty_lines_with_a_tenth_rewritten_gets_the_churn_constraint() {
+        let mut file = bare(10.0);
+        file.churn = Some(LineChurn {
+            added: 50,
+            rewritten: 5,
+            ..LineChurn::default()
+        });
+        assert_eq!(
+            measured_constraints(&file),
+            vec!["10% of the 50 lines added here were rewritten within 14 active days: read the file's recent history before changing it.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn churn_below_the_thresholds_gets_nothing() {
+        let mut few = bare(10.0);
+        few.churn = Some(LineChurn {
+            added: 49,
+            rewritten: 20,
+            ..LineChurn::default()
+        });
+        let mut quiet = bare(10.0);
+        quiet.churn = Some(LineChurn {
+            added: 100,
+            rewritten: 9,
+            ..LineChurn::default()
+        });
+        assert!(measured_constraints(&few).is_empty());
+        assert!(measured_constraints(&quiet).is_empty());
+    }
+
+    #[test]
+    fn the_churn_share_rounds_to_the_nearest_percent_and_the_complexity_comes_first() {
+        let mut file = bare(95.0);
+        file.complexity = Some(complexity(95.0));
+        file.churn = Some(LineChurn {
+            added: 200,
+            rewritten: 25,
+            ..LineChurn::default()
+        });
+        let out = measured_constraints(&file);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].starts_with("Hot and complex"));
+        assert!(out[1].starts_with("13% of the 200 lines"));
     }
 
     proptest! {

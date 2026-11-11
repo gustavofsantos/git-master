@@ -36,8 +36,9 @@ pub use grep::{
     GrepResult, GrepScope,
 };
 pub use health::{
-    AGE_BUCKETS, CHURN_DAYS, ChurnSummary, Complexity, RemovedChurn, DormancyBreak, FileHealth, HealthProgress, HealthReport,
-    LineChurn, Ownership, Partner, SPARK_BARS, SURVIVAL_AGES, Trend, age_bucket,
+    AGE_BUCKETS, CHURN_DAYS, ChurnSummary, Complexity, DormancyBreak, FileHealth, HealthProgress,
+    HealthReport, LineChurn, Ownership, Partner, RemovedChurn, SPARK_BARS, SURVIVAL_AGES, Trend,
+    age_bucket,
 };
 pub use history::{
     CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History,

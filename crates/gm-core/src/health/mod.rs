@@ -7,6 +7,7 @@
 //! (`config`), so the same commit and configuration always give the same answer.
 
 pub mod churn;
+pub mod complexity;
 pub mod config;
 pub mod ingest;
 pub mod metrics;

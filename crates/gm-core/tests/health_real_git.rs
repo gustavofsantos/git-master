@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use gm_core::Engine;
 use gm_core::git::SubprocessGit;
@@ -712,4 +713,106 @@ fn ingest_hunks_keeps_the_hunks_of_each_first_parent_commit_and_reads_each_once(
     let progress = ingest_hunks(d, &mut store, "HEAD", 0, &cancel, &mut |p| again.push(p)).unwrap();
     assert_eq!(progress.indexed, 4);
     assert_eq!(again, vec![progress]);
+}
+
+#[test]
+fn a_deeply_indented_file_has_its_complexity_and_its_size() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let deep =
+        b"fn f() {\n\tif x {\n\t\tif y {\n\t\t\tloop {\n\t\t\t\tdo();\n\t\t\t}\n\t\t}\n\t}\n}\n";
+    write(dir.path(), "deep.rs", deep);
+    git_at(dir.path(), BOB, T0 + 8 * DAY, &["add", "."]);
+    git_at(
+        dir.path(),
+        BOB,
+        T0 + 8 * DAY,
+        &["commit", "-q", "-m", "deep"],
+    );
+    let mut engine = engine_on(dir.path());
+
+    let events = run(&mut engine, 2, load_health(None));
+
+    let report = loaded(&events);
+    assert!(report.complete);
+    let file = report.files.iter().find(|f| f.path == "deep.rs").unwrap();
+    assert_eq!(file.bytes, deep.len() as u64);
+    let complexity = file
+        .complexity
+        .as_ref()
+        .expect("a text file has complexity");
+    // Nine lines; levels 0 1 2 3 4 3 2 1 0: deepest 4, total 16, mean 16 / 9.
+    assert_eq!(complexity.lines, 9);
+    assert_eq!(complexity.indent_max, 4);
+    assert_eq!(complexity.indent_total, 16);
+    assert!((complexity.indent_mean - 1.78).abs() < 1e-9);
+    assert!((0.0..=100.0).contains(&complexity.percentile));
+    let a = report.files.iter().find(|f| f.path == "a.rs").unwrap();
+    assert_eq!(a.bytes, 3, "a.rs holds v5 and a newline");
+}
+
+#[test]
+fn a_deleted_file_keeps_its_churn_in_removed_churn() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let mut engine = engine_on(dir.path());
+
+    let events = run(&mut engine, 2, load_health(None));
+
+    let report = loaded(&events);
+    let gone: Vec<&str> = report
+        .removed_churn
+        .iter()
+        .map(|r| r.path.as_str())
+        .collect();
+    assert_eq!(
+        gone,
+        vec!["gone.rs"],
+        "only the deleted file, and no live one"
+    );
+    let churn = &report.removed_churn[0].churn;
+    let touched: u32 = churn.deaths.iter().chain(churn.alive.iter()).sum();
+    assert!(
+        touched > 0,
+        "the line of gone.rs was added and died in the window"
+    );
+}
+
+#[test]
+fn a_job_past_its_budget_answers_partially_and_the_engine_keeps_no_partial_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let mut engine = engine_on(dir.path());
+    engine.handle(
+        OperationId(2),
+        &OpCommand {
+            actor: Actor::Human,
+            kind: load_health(None),
+        },
+    );
+    let mut jobs = engine.take_health_jobs();
+    assert_eq!(jobs.len(), 1);
+    let mut job = jobs.remove(0);
+    job.deadline = Some(Instant::now());
+
+    let outcome = job.run(&mut |_| {});
+    let events = engine.health_report(outcome);
+
+    assert_eq!(final_state(&events).0, OperationState::Done);
+    let report = loaded(&events);
+    assert!(
+        !report.complete,
+        "nothing was indexed before the budget ran out"
+    );
+    assert!(report.files.is_empty());
+
+    // A partial answer is not cached: the same read starts a job again.
+    engine.handle(
+        OperationId(3),
+        &OpCommand {
+            actor: Actor::Human,
+            kind: load_health(None),
+        },
+    );
+    assert_eq!(engine.take_health_jobs().len(), 1);
 }

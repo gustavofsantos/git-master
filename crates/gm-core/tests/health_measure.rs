@@ -16,8 +16,10 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use gm_core::health::{DAY_SECS, HealthConfig, churn, config, ingest, metrics, store::HealthStore};
-use gm_schema::ChurnSummary;
+use gm_core::health::{
+    DAY_SECS, HealthConfig, churn, complexity, config, ingest, metrics, store::HealthStore,
+};
+use gm_schema::{ChurnSummary, Complexity, FileHealth};
 
 #[test]
 #[ignore = "measures a real repository named by GM_HEALTH_REPO"]
@@ -124,4 +126,50 @@ fn measure_health_on_a_real_repository() {
     );
     eprintln!("churn replay: {follow:.2?}");
     eprintln!("churn of the files at HEAD: {summary:?}");
+
+    measure_complexity(&root, &sha, &files, &stop);
+}
+
+/// The complexity of the hottest text files at `sha`, read as the index job reads them (D229).
+fn measure_complexity(root: &std::path::Path, sha: &str, files: &[FileHealth], stop: &AtomicBool) {
+    let tree = ingest::tree(root, sha).expect("tree");
+    let largest = u64::try_from(complexity::MAX_BYTES).unwrap_or(u64::MAX);
+    let hot: Vec<&str> = files
+        .iter()
+        .take(complexity::MEASURED_FILES)
+        .map(|file| file.path.as_str())
+        .collect();
+    let ids: Vec<Option<String>> = hot
+        .iter()
+        .map(|path| {
+            tree.blobs
+                .get(*path)
+                .filter(|blob| blob.bytes <= largest)
+                .map(|blob| blob.id.clone())
+        })
+        .collect();
+    let started = Instant::now();
+    let measured = complexity::read(root, &ids, stop).expect("complexity");
+    let read = started.elapsed();
+    let count = measured.iter().flatten().count();
+    eprintln!(
+        "complexity read: {read:.2?} for {} hot files ({count} measured)",
+        ids.len()
+    );
+    let mut deepest: Vec<(&str, &Complexity)> = hot
+        .iter()
+        .zip(measured.iter())
+        .filter_map(|(path, value)| value.as_ref().map(|value| (*path, value)))
+        .collect();
+    deepest.sort_by(|a, b| {
+        b.1.indent_total
+            .cmp(&a.1.indent_total)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    for (path, value) in deepest.iter().take(5) {
+        eprintln!(
+            "  {path}: total {} max {} mean {} lines {} percentile {}",
+            value.indent_total, value.indent_max, value.indent_mean, value.lines, value.percentile
+        );
+    }
 }

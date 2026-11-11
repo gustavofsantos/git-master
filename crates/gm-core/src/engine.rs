@@ -2222,7 +2222,11 @@ impl Engine {
             Some(active) if active.op.id == outcome.id => match outcome.result {
                 Ok(report) => {
                     let report = Arc::new(report);
-                    self.health_cache = Some(Arc::clone(&report));
+                    // A partial answer (its budget ran out, D229 (4)) is not kept: the next read
+                    // of the same commit starts again and continues the index.
+                    if report.complete {
+                        self.health_cache = Some(Arc::clone(&report));
+                    }
                     vec![
                         Self::operation_changed(&active.op, OperationState::Done, None),
                         Event::HealthLoaded {
@@ -3027,6 +3031,7 @@ impl Engine {
             config,
             config_hash,
             stop,
+            deadline: None,
         });
         Ok((superseded, None))
     }

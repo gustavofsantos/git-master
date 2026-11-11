@@ -2,6 +2,7 @@
 //! docs/guide/code-health.md, "Building the index"). Every call is a read of git:
 //! nothing is written to the repository, and no commit-graph is written (D32).
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -39,7 +40,8 @@ const HUNK_FLAGS: [&str; 11] = [
     "--format=%x01%H",
 ];
 
-fn git(root: &Path) -> Command {
+/// `git` in `root`, with the flags every health read uses (no lock, no quoted paths, C locale).
+pub(crate) fn git(root: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -633,11 +635,89 @@ fn report(total: usize, indexed: usize) -> HealthProgress {
     }
 }
 
+/// A blob of a commit: its id and its size in bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Blob {
+    pub id: String,
+    pub bytes: u64,
+}
+
+/// The paths of a commit and the blobs among them (`git ls-tree -r -z -l`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tree {
+    /// Every path the commit holds, a submodule's included (it holds no blob).
+    pub paths: HashSet<String>,
+    /// The blobs of the commit, by path.
+    pub blobs: HashMap<String, Blob>,
+}
+
+/// The paths and blobs of the commit `sha`.
+pub fn tree(root: &Path, sha: &str) -> Result<Tree, String> {
+    let output = git(root)
+        .args(["ls-tree", "-r", "-z", "-l", sha])
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot list the files of {sha}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_tree(&output.stdout)
+}
+
+/// Parses `git ls-tree -r -z -l`: each record is `<mode> SP <type> SP <object> SP+ <size> TAB
+/// <path> NUL`, and a submodule's size is `-`, so it is a path without a blob.
+pub fn parse_tree(bytes: &[u8]) -> Result<Tree, String> {
+    let mut tree = Tree::default();
+    for record in String::from_utf8_lossy(bytes)
+        .split('\0')
+        .filter(|record| !record.is_empty())
+    {
+        let Some((meta, path)) = record.split_once('\t') else {
+            return Err(format!("git ls-tree output: no path in {record:?}"));
+        };
+        tree.paths.insert(path.to_owned());
+        let fields: Vec<&str> = meta.split_whitespace().collect();
+        if let [_, "blob", id, size] = fields.as_slice()
+            && let Ok(bytes) = size.parse::<u64>()
+        {
+            tree.blobs.insert(
+                path.to_owned(),
+                Blob {
+                    id: (*id).to_owned(),
+                    bytes,
+                },
+            );
+        }
+    }
+    Ok(tree)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const EMPTY_AUTHOR: &str = "e3b0c44298fc1c14";
+
+    #[test]
+    fn ls_tree_gives_paths_and_blob_sizes_and_skips_submodule_sizes() {
+        let bytes = b"100644 blob 1111111111111111111111111111111111111111     12\ta.rs\0\
+160000 commit 2222222222222222222222222222222222222222       -\tvendor/lib\0\
+100644 blob 3333333333333333333333333333333333333333      7\tsrc/my file.rs\0";
+        let tree = parse_tree(bytes).unwrap();
+        assert_eq!(tree.paths.len(), 3);
+        assert!(tree.paths.contains("vendor/lib"));
+        assert_eq!(tree.blobs.len(), 2);
+        assert_eq!(tree.blobs["a.rs"].bytes, 12);
+        assert_eq!(tree.blobs["src/my file.rs"].id, "3".repeat(40));
+        assert!(!tree.blobs.contains_key("vendor/lib"));
+    }
+
+    #[test]
+    fn ls_tree_without_a_tab_is_an_error() {
+        assert!(parse_tree(b"100644 blob abc 1 a.rs\0").is_err());
+    }
 
     fn header(sha: &str, parents: &str, time: i64, email: &str) -> Vec<u8> {
         format!("\x01{sha}\0{parents}\0{time}\0{email}\0").into_bytes()

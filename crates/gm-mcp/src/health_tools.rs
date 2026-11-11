@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use gm_schema::{ChurnSummary, CommandKind, Event, FileHealth, HealthReport, SURVIVAL_AGES, Trend};
+use gm_schema::{
+    ChurnSummary, CommandKind, Complexity, Event, FileHealth, HealthReport, SURVIVAL_AGES, Trend,
+};
 use serde_json::{Value, json};
 
 use crate::session::Session;
@@ -34,7 +36,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
 fn health_context_definition() -> ToolDefinition {
     ToolDefinition {
         name: "health_context",
-        description: "Code health of the files you are about to change, from the history of the repository: how much each file changed recently (`heat`, with its `rank` among `of` files and its `percentile`), whether that is rising, steady or falling (`trend`), whether a quiet file has started to change (`dormancy_break`), which other files change in the same commits (`changes_together`), and how widely the file is owned (`ownership`: its authors, the share of commits made by the most frequent one, and how many occasional authors there are). Call it with every path you plan to change, BEFORE you edit. Treat each entry of `constraints` as a requirement of your change. For a file with a `dormancy_break`, explain its current behavior back before you change it. The numbers are computed at `rev` (default HEAD) under the configuration named by `config_hash`: they are deterministic and are context for the change, not a score to optimize. The first call in a repository builds the index from its history and can take a while in a very large one; `complete` false, with a `note`, means the answers are partial. A path with no change in the analysis window is `known: false`. Read-only.",
+        description: "Code health of the files you are about to change, from the history of the repository: how much each file changed recently (`heat`, with its `rank` among `of` files and its `percentile`), whether that is rising, steady or falling (`trend`), whether a quiet file has started to change (`dormancy_break`), which other files change in the same commits (`changes_together`), and how widely the file is owned (`ownership`: its authors, the share of commits made by the most frequent one, and how many occasional authors there are), how deeply its code is nested (`complexity`, read from indentation, for the hottest files) and how much of the code added to it was rewritten within 14 active days (`churn`). Call it with every path you plan to change, BEFORE you edit. Treat each entry of `constraints` as a requirement of your change. For a file with a `dormancy_break`, explain its current behavior back before you change it. The numbers are computed at `rev` (default HEAD) under the configuration named by `config_hash`: they are deterministic and are context for the change, not a score to optimize. A call reads history for at most 20 seconds; when the index is not complete by then, `complete` is false, a `note` says so, the answers are partial and the next call goes on reading. A path with no change in the analysis window is `known: false`. Read-only.",
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -165,13 +167,18 @@ pub(crate) fn churn_summary(session: &mut Session, args: &Value) -> Result<Value
     let scope = scope_arg(args)?;
     let rev = optional_text(args, "rev")?;
     let report = health_report(session, rev)?;
-    let churn = ChurnSummary::of(
-        report
-            .files
-            .iter()
-            .filter(|file| is_under(&file.path, &scope))
-            .filter_map(|file| file.churn.as_ref()),
-    );
+    // The churn of deleted files counts toward the folder they were in (D229 (3)).
+    let live = report
+        .files
+        .iter()
+        .filter(|file| is_under(&file.path, &scope))
+        .filter_map(|file| file.churn.as_ref());
+    let removed = report
+        .removed_churn
+        .iter()
+        .filter(|removed| is_under(&removed.path, &scope))
+        .map(|removed| &removed.churn);
+    let churn = ChurnSummary::of(live.chain(removed));
     let mut result = json!({
         "rev": report.rev,
         "config_hash": report.config_hash,
@@ -267,6 +274,17 @@ fn churn_json(churn: &ChurnSummary) -> Value {
     })
 }
 
+/// The complexity of a file (D229): its size, its nesting and its percentile.
+fn complexity_json(complexity: &Complexity) -> Value {
+    json!({
+        "lines": complexity.lines,
+        "indent_max": complexity.indent_max,
+        "indent_mean": complexity.indent_mean,
+        "indent_total": complexity.indent_total,
+        "percentile": complexity.percentile,
+    })
+}
+
 /// The offset a cursor names, when it was made for this report, this configuration and this scope.
 fn cursor_offset(cursor: &str, report: &HealthReport, scope: &str) -> Result<usize, String> {
     let mut parts = cursor.splitn(4, ':');
@@ -300,7 +318,13 @@ fn file_count(report: &HealthReport) -> u32 {
 /// indicators and no constraints.
 fn path_json(path: &str, file: Option<&FileHealth>, of: u32) -> Value {
     let Some(file) = file else {
-        return json!({ "path": path, "known": false, "constraints": [] });
+        return json!({
+            "path": path,
+            "known": false,
+            "complexity": null,
+            "churn": null,
+            "constraints": [],
+        });
     };
     json!({
         "path": path,
@@ -312,6 +336,16 @@ fn path_json(path: &str, file: Option<&FileHealth>, of: u32) -> Value {
             "value": round2(file.heat),
             "trend": trend_name(file.trend),
         },
+        "complexity": file.complexity.as_ref().map(complexity_json),
+        "churn": file
+            .churn
+            .as_ref()
+            .and_then(|churn| ChurnSummary::of([churn]))
+            .map(|summary| json!({
+                "lines_added": summary.lines_added,
+                "rewritten_14": summary.rewritten_14,
+                "rewritten_share": round2(summary.rewritten_share),
+            })),
         "dormancy_break": file.dormancy_break.as_ref().map(|dormancy| json!({
             "quiet_active_days": dormancy.quiet_active_days,
             "recent_active_days": dormancy.recent_active_days,

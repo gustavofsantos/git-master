@@ -12,7 +12,7 @@ mod session;
 mod tools;
 
 pub use protocol::serve;
-pub use session::Session;
+pub use session::{HEALTH_BUDGET, Session};
 pub use tools::{ToolDefinition, tools};
 
 use std::io::{BufRead, Write};

@@ -6,7 +6,9 @@ use std::process::Command as Process;
 
 use gm_core::Engine;
 use gm_core::git::SubprocessGit;
-use gm_mcp::Session;
+use std::time::Duration;
+
+use gm_mcp::{HEALTH_BUDGET, Session};
 use serde_json::{Value, json};
 
 const FILES: [&str; 6] = [
@@ -386,4 +388,142 @@ fn churn_summary_of_an_unknown_scope_has_no_churn() {
     assert_eq!(prefix["scope"], "src", "{prefix}");
     let bad = refusal(&repo, "churn_summary", &json!({ "scope": "../x" }));
     assert!(!bad.is_empty());
+}
+
+/// A session on `repo` whose code health reads have `budget` (`Session::set_health_budget`).
+fn session_with_budget(repo: &Path, budget: Duration, requests: &[Value]) -> Vec<Value> {
+    let engine = Engine::new(Box::new(SubprocessGit::default()));
+    let mut server = Session::open(engine, &repo.to_string_lossy()).expect("the repository opens");
+    server.set_health_budget(budget);
+    let input = requests
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut output = Vec::new();
+    gm_mcp::serve(&mut server, input.as_bytes(), &mut output).expect("the output is written");
+    String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_call_past_its_budget_is_partial_and_the_next_call_is_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    make_repo(dir.path());
+    let arguments = json!({ "paths": ["hot.rs"] });
+
+    let replies = session_with_budget(
+        dir.path(),
+        Duration::ZERO,
+        &[initialize(), call(2, "health_context", &arguments)],
+    );
+    let partial = result(&replies[1]);
+    assert_eq!(partial["complete"], false, "{partial}");
+    assert!(
+        partial["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("partial")),
+        "{partial}"
+    );
+
+    let replies = session_with_budget(
+        dir.path(),
+        HEALTH_BUDGET,
+        &[initialize(), call(2, "health_context", &arguments)],
+    );
+    let full = result(&replies[1]);
+    assert_eq!(full["complete"], true, "{full}");
+    assert!(full.get("note").is_none(), "{full}");
+    let file = &full["paths"][0];
+    assert_eq!(file["known"], true, "{file}");
+    assert!(
+        file["complexity"].is_object(),
+        "a text file has complexity: {file}"
+    );
+    assert!(
+        file["complexity"]["indent_total"].is_u64(),
+        "complexity carries its total: {file}"
+    );
+    assert!(
+        file["churn"].is_null() || file["churn"]["rewritten_share"].is_number(),
+        "churn is null or a summary: {file}"
+    );
+}
+
+/// Commits `args` in `dir` at `time`, as author and committer.
+fn git_at(dir: &Path, time: i64, args: &[&str]) {
+    let output = Process::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .env("GIT_AUTHOR_DATE", format!("@{time} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("@{time} +0000"))
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn churn_of_a_folder_whose_only_file_was_deleted_still_counts() {
+    const DAY_SECS: i64 = 86_400;
+    const START: i64 = 1_700_000_000;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(root.join("old")).unwrap();
+    std::fs::write(root.join("old/only.rs"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    git_at(root, START, &["add", "-A"]);
+    git_at(root, START, &["commit", "-q", "-m", "add"]);
+    // Fourteen more active days of the repository, so the first lines are old enough to count.
+    for day in 1..=20_i64 {
+        std::fs::write(root.join("other.txt"), format!("day {day}\n")).unwrap();
+        git_at(root, START + day * DAY_SECS, &["add", "-A"]);
+        git_at(
+            root,
+            START + day * DAY_SECS,
+            &["commit", "-q", "-m", "other"],
+        );
+        if day == 1 {
+            std::fs::write(root.join("old/only.rs"), "uno\ntwo\nthree\nfour\nfive\n").unwrap();
+            git_at(root, START + day * DAY_SECS, &["add", "-A"]);
+            git_at(
+                root,
+                START + day * DAY_SECS,
+                &["commit", "-q", "-m", "rewrite"],
+            );
+        }
+    }
+    git_at(root, START + 40 * DAY_SECS, &["rm", "-q", "old/only.rs"]);
+    git_at(
+        root,
+        START + 40 * DAY_SECS,
+        &["commit", "-q", "-m", "delete"],
+    );
+
+    let summary = ask(root, "churn_summary", &json!({ "scope": "old" }));
+
+    assert_eq!(summary["complete"], true, "{summary}");
+    assert_eq!(summary["scope"], "old");
+    assert!(
+        summary["churn"].is_object(),
+        "a deleted file keeps its churn: {summary}"
+    );
+    assert!(
+        summary["churn"]["lines_added"].as_u64().unwrap() > 0,
+        "{summary}"
+    );
 }
