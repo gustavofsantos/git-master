@@ -3,7 +3,6 @@
 //! open clone may use the contexts its id belongs to (D193 (4)). The commands are declared in
 //! `gm-schema`; `engine` routes them here. The file is `contexts.db` in the app data directory.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gm_schema::threads::Context;
@@ -494,20 +493,18 @@ fn workspace_contexts(
 }
 
 /// Marks each listed context as bound when `direct` names it, and counts the accepted memories it
-/// inherits: its own and its ancestors' (D222 (2)). The ancestors of a listed context are listed too,
-/// so their own counts are at hand.
+/// inherits: those a read of its name returns, its own, its ancestors' and its descendants' (D222
+/// (2)). Each memory is counted once, even when it is attached to several of those contexts.
 fn annotate(store: &ContextStore, contexts: &mut [Context], direct: &[i64]) -> Result<(), String> {
     let nodes = store.nodes().map_err(|e| e.to_string())?;
-    let own: BTreeMap<i64, u32> = contexts
-        .iter()
-        .map(|context| (context.id, context.accepted_memories))
-        .collect();
     for context in contexts.iter_mut() {
         context.bound = direct.contains(&context.id);
-        context.inherited_memories = visibility::visible_contexts(&nodes, &[context.id])
-            .iter()
-            .filter_map(|(id, _)| own.get(id))
-            .fold(0_u32, |sum, count| sum.saturating_add(*count));
+        let ids: Vec<i64> = visibility::scope_contexts(&nodes, context.id)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let rows = store.accepted_text_in(&ids).map_err(|e| e.to_string())?;
+        context.inherited_memories = crate::threads::memories::accepted_size(rows).0;
     }
     Ok(())
 }

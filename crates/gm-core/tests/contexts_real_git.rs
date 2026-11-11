@@ -707,6 +707,7 @@ struct Seen {
     contexts_read: bool,
     note: Option<String>,
     proposed_total: u32,
+    accepted_total: u32,
 }
 
 /// Lists the memories `actor` sees from the open repository in `scope`, one page at a time. A
@@ -745,6 +746,7 @@ fn search(
                 contexts_read,
                 note,
                 proposed_total,
+                accepted_total,
                 ..
             } => Some(Seen {
                 memories: memories.clone(),
@@ -752,6 +754,7 @@ fn search(
                 contexts_read: *contexts_read,
                 note: note.clone(),
                 proposed_total: *proposed_total,
+                accepted_total: *accepted_total,
             }),
             _ => None,
         })
@@ -936,9 +939,9 @@ fn the_scope_filter_names_the_repository_or_one_visible_context_and_refuses_the_
         ["Billing rule", "Platform rule"]
     );
     assert_eq!(
-        scoped(&mut api, "Platform"),
-        ["Platform rule"],
-        "a context does not take the memories of its sub-contexts"
+        sorted(scoped(&mut api, "Platform")),
+        ["Billing rule", "Platform rule"],
+        "a named context reads the memories of its sub-contexts too"
     );
     assert_eq!(scoped(&mut api, "all").len(), 3);
 
@@ -1917,9 +1920,11 @@ fn a_sub_context_reads_its_parents_memories_from_a_repository_bound_to_neither()
         "Billing and its ancestor, not Partners"
     );
     assert_eq!(
-        named_texts(&search(&mut portal, &agent(), "", Some("Platform"), 50, None).expect("read")),
-        ["Platform rule"],
-        "a parent does not take its child's memories"
+        sorted(named_texts(
+            &search(&mut portal, &agent(), "", Some("Platform"), 50, None).expect("read")
+        )),
+        ["Billing rule", "Platform rule"],
+        "a parent reads its child's memories too"
     );
 }
 
@@ -2049,4 +2054,144 @@ fn a_person_proposes_into_any_context_and_an_agent_only_into_one_the_repository_
         failure(&by_agent).is_some_and(|message| message.contains("is not a context this repository is bound to")),
         "{by_agent:?}"
     );
+}
+
+/// Builds Company > Fintech > {Scope A, Scope B > Scope B.1} and Company > IAM, binds `api` to Scope
+/// B.1 and writes one accepted memory in each of B.1, IAM, Company and Scope A, as the human. Returns
+/// the engine with `api` open.
+fn populate_subtree(world: &World) -> Engine {
+    let mut engine = engine_on(&world.path("api"), &world.db);
+    let company = create(&mut engine, "Company", None).id;
+    let fintech = create(&mut engine, "Fintech", Some(company)).id;
+    create(&mut engine, "Scope A", Some(fintech));
+    let scope_b = create(&mut engine, "Scope B", Some(fintech)).id;
+    let scope_b1 = create(&mut engine, "Scope B.1", Some(scope_b)).id;
+    create(&mut engine, "IAM", Some(company));
+    join(&mut engine, scope_b1, &world.path("api"));
+    for (context, text) in [
+        ("Scope B.1", "B.1 rule"),
+        ("IAM", "IAM rule"),
+        ("Company", "Company rule"),
+        ("Scope A", "Scope A rule"),
+    ] {
+        let events = propose_at(&mut engine, &Actor::Human, Some(context), text);
+        assert_eq!(
+            state_of(&events),
+            OperationState::Done,
+            "{text}: {events:?}"
+        );
+    }
+    engine
+}
+
+/// Every context of the tree with its `inherited_memories`, as `ListContexts` with `all` answers
+/// them, by name.
+fn inherited_by_name(engine: &mut Engine) -> Vec<(String, u32)> {
+    let events = send(
+        engine,
+        &Actor::Human,
+        CommandKind::ListContexts {
+            repo: true,
+            all: true,
+        },
+    );
+    assert_eq!(state_of(&events), OperationState::Done, "list: {events:?}");
+    let contexts = events
+        .iter()
+        .find_map(|event| match event {
+            Event::ContextsListed { contexts, .. } => Some(contexts.clone()),
+            _ => None,
+        })
+        .expect("contexts listed");
+    contexts
+        .into_iter()
+        .map(|context| (context.name, context.inherited_memories))
+        .collect()
+}
+
+#[test]
+fn the_default_reach_is_unchanged_by_the_subtree_of_a_named_scope() {
+    let world = World::new();
+    let mut engine = populate_subtree(&world);
+    let default = search(&mut engine, &agent(), "", None, 50, None).expect("default");
+    assert_eq!(texts(&default.memories), ["B.1 rule", "Company rule"]);
+    let bound = search(&mut engine, &agent(), "", Some("bound"), 50, None).expect("bound");
+    assert_eq!(texts(&bound.memories), ["B.1 rule", "Company rule"]);
+}
+
+#[test]
+fn naming_a_context_reads_its_ancestors_and_its_whole_subtree() {
+    let world = World::new();
+    let mut engine = populate_subtree(&world);
+    let company = search(&mut engine, &agent(), "", Some("Company"), 50, None).expect("company");
+    assert_eq!(
+        texts(&company.memories),
+        ["B.1 rule", "Company rule", "IAM rule", "Scope A rule"],
+        "Company reads every context under it"
+    );
+    let fintech = search(&mut engine, &agent(), "", Some("Fintech"), 50, None).expect("fintech");
+    assert_eq!(
+        texts(&fintech.memories),
+        ["B.1 rule", "Company rule", "Scope A rule"],
+        "Fintech reads its subtree and its ancestor Company, not IAM"
+    );
+    let iam = search(&mut engine, &agent(), "", Some("IAM"), 50, None).expect("iam");
+    assert_eq!(
+        texts(&iam.memories),
+        ["Company rule", "IAM rule"],
+        "IAM reads itself and Company only"
+    );
+}
+
+#[test]
+fn a_memory_read_through_a_named_ancestor_is_labelled_by_its_nearest_context_in_that_scope() {
+    let world = World::new();
+    let mut engine = populate_subtree(&world);
+    let company = search(&mut engine, &agent(), "", Some("Company"), 50, None).expect("company");
+    let label = |text: &str| {
+        company
+            .memories
+            .iter()
+            .find(|memory| memory.text == text)
+            .unwrap_or_else(|| panic!("{text} is listed"))
+            .scope
+            .clone()
+    };
+    assert_eq!(label("IAM rule"), "Company / IAM");
+    assert_eq!(label("B.1 rule"), "Company / Fintech / Scope B / Scope B.1");
+    assert_eq!(label("Company rule"), "Company");
+}
+
+#[test]
+fn the_accepted_total_of_a_named_ancestor_counts_its_subtree_once_each() {
+    let world = World::new();
+    let mut engine = populate_subtree(&world);
+    let company = search(&mut engine, &agent(), "", Some("Company"), 1, None).expect("company");
+    assert_eq!(company.memories.len(), 1, "a page of one");
+    assert_eq!(company.accepted_total, 4);
+    let default = search(&mut engine, &agent(), "", None, 50, None).expect("default");
+    assert_eq!(default.accepted_total, 2);
+}
+
+#[test]
+fn contexts_list_counts_match_what_naming_each_context_reads() {
+    let world = World::new();
+    let mut engine = populate_subtree(&world);
+    let counts = inherited_by_name(&mut engine);
+    let count_of = |name: &str| {
+        counts
+            .iter()
+            .find(|(context, _)| context == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .1
+    };
+    assert_eq!(count_of("Company"), 4, "every memory of the tree, once");
+    assert_eq!(count_of("IAM"), 2, "IAM and Company");
+    assert_eq!(count_of("Fintech"), 3, "Fintech's subtree and Company");
+    assert_eq!(count_of("Scope B.1"), 2, "B.1 and its ancestors");
+
+    for (name, expected) in [("Company", 4), ("IAM", 2), ("Fintech", 3), ("Scope B.1", 2)] {
+        let read = search(&mut engine, &agent(), "", Some(name), 50, None).expect("read");
+        assert_eq!(read.accepted_total, expected, "{name}");
+    }
 }

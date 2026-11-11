@@ -2,7 +2,7 @@
 //! "Visibility (pure)"; D191 (3), D193 (5)). Everything here is a function of the context tree and
 //! the repository's memberships, so it is tested without a database file.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 /// A context as the visibility rules see it: its id, its name and its parent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +31,40 @@ pub fn visible_contexts(nodes: &[ContextNode], member_of: &[i64]) -> Vec<(i64, u
     visible
 }
 
+/// Every context a named scope reads: context `id` at distance 1, its ancestors at 2, 3, ... (as
+/// `visible_contexts` gives them), and every descendant at 1 + its depth below `id` (a child at 2, a
+/// grandchild at 3). A context reached at two distances keeps the smaller one. Sorted by distance,
+/// then by id. Cycle-safe; an unknown `id` gives nothing.
+#[must_use]
+pub fn scope_contexts(nodes: &[ContextNode], id: i64) -> Vec<(i64, u32)> {
+    if !nodes.iter().any(|node| node.id == id) {
+        return Vec::new();
+    }
+    let mut best: BTreeMap<i64, u32> = BTreeMap::new();
+    for (step, node) in lineage(nodes, id).into_iter().enumerate() {
+        let distance = u32::try_from(step + 1).unwrap_or(u32::MAX);
+        best.entry(node.id)
+            .and_modify(|kept| *kept = (*kept).min(distance))
+            .or_insert(distance);
+    }
+    let mut seen = HashSet::from([id]);
+    let mut queue = VecDeque::from([(id, 1_u32)]);
+    while let Some((current, distance)) = queue.pop_front() {
+        let child_distance = distance.saturating_add(1);
+        for node in nodes.iter().filter(|node| node.parent == Some(current)) {
+            if seen.insert(node.id) {
+                best.entry(node.id)
+                    .and_modify(|kept| *kept = (*kept).min(child_distance))
+                    .or_insert(child_distance);
+                queue.push_back((node.id, child_distance));
+            }
+        }
+    }
+    let mut scope: Vec<(i64, u32)> = best.into_iter().collect();
+    scope.sort_by_key(|&(id, distance)| (distance, id));
+    scope
+}
+
 /// The names from the root down to context `id`, joined with ` / `. Empty when `id` is unknown.
 #[must_use]
 pub fn context_path(nodes: &[ContextNode], id: i64) -> String {
@@ -57,8 +91,10 @@ pub fn would_cycle(nodes: &[ContextNode], id: i64, new_parent: Option<i64>) -> b
 pub enum Scope {
     /// Every scope the repository sees: the default reach (`bound`).
     All,
-    /// One context, by id, with its ancestors: the memories of a sub-context include those of every
-    /// context above it (D222 (2)). The context need not be one the repository is bound to (D222 (3)).
+    /// One context, by id, with its ancestors and its descendants (`scope_contexts`): the memories of a
+    /// sub-context include those of every context above it (D222 (2)), and a named context reads every
+    /// context under it too, at any depth. The context need not be one the repository is bound to
+    /// (D222 (3)).
     Context(i64),
 }
 
@@ -381,5 +417,63 @@ mod tests {
     #[test]
     fn a_named_context_lists_itself_then_its_ancestors() {
         assert_eq!(visible_contexts(&tree(), &[2]), vec![(2, 1), (1, 2)]);
+    }
+
+    /// Company > Fintech > {Scope A, Scope B > Scope B.1}; Company > IAM. Ids follow the names.
+    fn company() -> Vec<ContextNode> {
+        vec![
+            node(1, "Company", None),
+            node(2, "Fintech", Some(1)),
+            node(3, "Scope A", Some(2)),
+            node(4, "Scope B", Some(2)),
+            node(5, "Scope B.1", Some(4)),
+            node(6, "IAM", Some(1)),
+        ]
+    }
+
+    #[test]
+    fn a_named_context_reads_its_ancestors_and_its_whole_subtree() {
+        assert_eq!(
+            scope_contexts(&company(), 1),
+            vec![(1, 1), (2, 2), (6, 2), (3, 3), (4, 3), (5, 4)],
+            "Company reads every context under it, at any depth"
+        );
+        assert_eq!(
+            scope_contexts(&company(), 2),
+            vec![(2, 1), (1, 2), (3, 2), (4, 2), (5, 3)],
+            "Fintech reads its ancestor Company and its subtree, not IAM"
+        );
+    }
+
+    #[test]
+    fn a_leaf_reads_its_ancestors_and_nothing_else_below() {
+        assert_eq!(scope_contexts(&company(), 6), vec![(6, 1), (1, 2)]);
+        assert_eq!(
+            scope_contexts(&company(), 5),
+            vec![(5, 1), (4, 2), (2, 3), (1, 4)],
+            "a sub-context reads its parents, nearest first"
+        );
+    }
+
+    #[test]
+    fn a_cycle_in_the_subtree_ends_the_walk() {
+        let nodes = vec![
+            node(1, "Root", None),
+            node(2, "Child", Some(1)),
+            node(3, "Grandchild", Some(2)),
+            node(4, "Loop", Some(3)),
+        ];
+        assert_eq!(
+            scope_contexts(&nodes, 2),
+            vec![(2, 1), (1, 2), (3, 2), (4, 3)],
+            "the walk terminates and each context appears once"
+        );
+        let looped = vec![node(1, "A", Some(2)), node(2, "B", Some(1))];
+        assert_eq!(scope_contexts(&looped, 1), vec![(1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn an_unknown_context_reads_nothing() {
+        assert_eq!(scope_contexts(&company(), 99), Vec::new());
     }
 }

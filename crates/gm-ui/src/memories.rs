@@ -65,13 +65,14 @@ pub const REASON_CHARS: usize = 200;
 pub const HUMAN_ACTOR: &str = "human";
 
 /// Which memories the list shows by scope (D223 (1)): the contexts this repository is bound to and
-/// those above them, by default, or every memory of one context, bound or not, by its path.
+/// those above them, by default, or the memories of one context, bound or not, by its path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Scope {
     /// The memories of the contexts the repository is bound to and of every context above them.
     #[default]
     Bound,
-    /// The memories of one context, by its path such as `Platform / Billing`, with what it inherits.
+    /// The memories of one context, by its path such as `Platform / Billing`: those of the context,
+    /// of every context above it and of every context under it, as the engine reads a named scope.
     Context(String),
 }
 

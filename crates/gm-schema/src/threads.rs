@@ -999,8 +999,8 @@ pub struct Context {
     /// directly, not through an ancestor. Set by `ListContexts`; false otherwise (D222 (3)).
     #[serde(default)]
     pub bound: bool,
-    /// The accepted memories this context holds and inherits: its own and its ancestors' (D222 (2)).
-    /// Set by `ListContexts`; zero otherwise.
+    /// The accepted memories a read of this context's name returns, each once: its own, its ancestors'
+    /// and its descendants' (D222 (2)). Set by `ListContexts`; zero otherwise.
     #[serde(default)]
     pub inherited_memories: u32,
 }

@@ -1054,8 +1054,8 @@ pub enum CommandKind {
     /// Lists the contexts (design/threads.md, "Contexts"; D191): every context, or with `repo`
     /// those the open repository sees, each with its path. With `all` every context is listed even
     /// with `repo` (D222 (3)), and each carries `bound` (the open repository, or a workspace or a
-    /// member of it, is bound to it directly) and `inherited_memories` (its accepted memories with its
-    /// ancestors'). A clone whose identity clashes with another clone lists none and names the other
+    /// member of it, is bound to it directly) and `inherited_memories` (the accepted memories a read of
+    /// its name returns: its own, its ancestors' and its descendants'). A clone whose identity clashes with another clone lists none and names the other
     /// one (D193 (4)). With no `contexts.db` the list is empty and no file is made. A read: never
     /// recorded (D28). Answers `ContextsListed`.
     ListContexts {

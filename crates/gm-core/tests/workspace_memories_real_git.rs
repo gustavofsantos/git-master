@@ -728,15 +728,13 @@ fn the_scope_names_a_context_by_path_or_name_and_refuses_the_retired_workspace_s
         scoped(&mut ws, "api"),
         vec![row("api note", "api"), row("api rule", "api")]
     );
-    assert_eq!(
-        scoped(&mut ws, "Platform"),
-        vec![row("platform policy", "Platform")]
-    );
-    // A sub-context inherits the memories of its parent (D222 (2)), whichever way it is named.
+    // A sub-context inherits the memories of its parent (D222 (2)), whichever way it is named, and a
+    // named context reads the sub-contexts under it too.
     let billing_and_platform = vec![
         row("billing rule", "Platform / Billing"),
         row("platform policy", "Platform"),
     ];
+    assert_eq!(scoped(&mut ws, "Platform"), billing_and_platform);
     assert_eq!(scoped(&mut ws, "Platform / Billing"), billing_and_platform);
     assert_eq!(scoped(&mut ws, "Billing"), billing_and_platform);
     // A context the workspace is not bound to is named all the same (D222 (3)).

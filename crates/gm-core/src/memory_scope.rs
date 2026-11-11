@@ -314,11 +314,12 @@ impl Reach {
     }
 
     /// The contexts a request's scope covers, with their distance, nearest first (D222 (2), (6)): the
-    /// default reach for `All` and `Repository`, and the named context and its ancestors for `Context`.
+    /// default reach for `All`, and for `Context` the named context, its ancestors and every context
+    /// under it (`visibility::scope_contexts`).
     fn reach_of(&self, scope: Scope) -> Vec<(i64, u32)> {
         match scope {
             Scope::All => self.visible.clone(),
-            Scope::Context(id) => visibility::visible_contexts(&self.nodes, &[id]),
+            Scope::Context(id) => visibility::scope_contexts(&self.nodes, id),
         }
     }
 
@@ -392,8 +393,8 @@ impl Reach {
             })
     }
 
-    /// The contexts a request's scope covers, each with the contexts above it: the default reach for
-    /// `All` and `Repository`, the named context and its ancestors for `Context` (D222 (2), (6)).
+    /// The contexts a request's scope covers: the default reach for `All`, the named context with its
+    /// ancestors and its descendants for `Context` (D222 (2), (6)).
     fn scope_ids(&self, scope: Scope) -> Vec<i64> {
         self.reach_of(scope).into_iter().map(|(id, _)| id).collect()
     }
@@ -703,7 +704,8 @@ fn includes_own(reach: &Reach, scope: Scope) -> bool {
     !reach.is_workspace() && matches!(scope, Scope::All)
 }
 
-/// Whether a scope covers contexts: the default reach, or one named context with its ancestors.
+/// Whether a scope covers contexts: the default reach, or one named context with its ancestors and
+/// descendants.
 fn reads_contexts(scope: Scope) -> bool {
     matches!(scope, Scope::All | Scope::Context(_))
 }

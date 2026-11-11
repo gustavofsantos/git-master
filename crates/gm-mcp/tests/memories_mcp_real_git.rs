@@ -1082,6 +1082,13 @@ fn names_of(listed: &Value) -> Vec<String> {
 }
 
 /// The `texts` of the memories of a search answer.
+/// The texts of a search answer, sorted, for a comparison that does not depend on the order.
+fn sorted_texts(found: &Value) -> Vec<String> {
+    let mut texts = texts_of(found);
+    texts.sort();
+    texts
+}
+
 fn texts_of(found: &Value) -> Vec<String> {
     found["memories"]
         .as_array()
@@ -1166,9 +1173,9 @@ fn a_search_reads_the_bound_contexts_with_what_they_inherit_and_names_an_unbound
         "a name reads an unbound context"
     );
     assert_eq!(
-        texts_of(result(&replies[3])),
-        ["platform rule"],
-        "a context does not take the memories of its sub-contexts"
+        sorted_texts(result(&replies[3])),
+        ["billing rule", "platform rule"],
+        "a named context reads the contexts under it too"
     );
 
     // A repository bound to no context reads the incident by its name, and its bound reach is empty.
@@ -1230,7 +1237,10 @@ fn contexts_list_gives_the_bound_contexts_and_with_all_every_one_with_what_each_
     );
     let platform_row = &bound["contexts"][1];
     assert_eq!(platform_row["bound"], false);
-    assert_eq!(platform_row["accepted_memories"], 1);
+    assert_eq!(
+        platform_row["accepted_memories"], 2,
+        "its own and Billing's, which a read of Platform returns"
+    );
 
     let every = result(&replies[2]);
     assert_eq!(names_of(every).len(), 3, "{every}");
@@ -1343,4 +1353,71 @@ fn memory_propose_has_no_member_argument_and_contexts_list_has_all() {
         .unwrap();
     assert!(scope.contains("bound"), "{scope}");
     assert!(!scope.contains("repository"), "{scope}");
+}
+
+#[test]
+fn a_named_context_reads_its_subtree_and_contexts_list_counts_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("a");
+    make_repo(&repo);
+    let db = tmp.path().join("contexts.db");
+
+    let mut a = engine_on(&repo, &db);
+    let company = create_context(&mut a, "Company");
+    let fintech = create_child(&mut a, "Fintech", company);
+    let scope_b = create_child(&mut a, "Scope B", fintech);
+    let scope_b1 = create_child(&mut a, "Scope B.1", scope_b);
+    create_child(&mut a, "IAM", company);
+    join(&mut a, scope_b1, &repo);
+    propose_as_human(&mut a, "b1 rule", "f.txt", Some("Scope B.1"));
+    propose_as_human(&mut a, "iam rule", "f.txt", Some("IAM"));
+    propose_as_human(&mut a, "company rule", "f.txt", Some("Company"));
+
+    let replies = session(
+        &repo,
+        &db,
+        &[
+            initialize(),
+            call(2, "memories_search", &json!({})),
+            call(3, "memories_search", &json!({ "scope": "Company" })),
+            call(4, "memories_search", &json!({ "scope": "IAM" })),
+            call(5, "contexts_list", &json!({ "all": true })),
+        ],
+    );
+
+    assert_eq!(
+        sorted_texts(result(&replies[1])),
+        ["b1 rule", "company rule"]
+    );
+    let company_read = result(&replies[2]);
+    assert_eq!(
+        sorted_texts(company_read),
+        ["b1 rule", "company rule", "iam rule"],
+        "Company reads every context under it"
+    );
+    let iam_hit = company_read["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|memory| memory["text"] == "iam rule")
+        .unwrap();
+    assert_eq!(iam_hit["scope"], "Company / IAM");
+    assert_eq!(
+        sorted_texts(result(&replies[3])),
+        ["company rule", "iam rule"]
+    );
+
+    let every = result(&replies[4]);
+    let count_of = |name: &str| {
+        every["contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|context| context["name"] == name)
+            .unwrap()["accepted_memories"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(count_of("Company"), 3, "the same count as its read");
+    assert_eq!(count_of("IAM"), 2);
 }
