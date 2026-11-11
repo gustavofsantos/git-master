@@ -430,6 +430,7 @@ mod tests {
                 minor_contributors: 0,
             },
             constraints: Vec::new(),
+            churn: None,
         }
     }
 

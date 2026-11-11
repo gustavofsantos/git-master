@@ -817,7 +817,7 @@ Requested by the author on 2026-11-11 for daily use on very large repositories a
 - **CH1c, the engine** (done 2026-11-11). `LoadHealth` command and its events, mirroring `ReadProvenance`; per-process cache per `(rev, config_hash)`; progress events while indexing.
 - **CH2, MCP** (done 2026-11-11). `health_context`, `hotspots_list`; `crates/gm-mcp/tests/health_mcp_real_git.rs`.
 - **CH3a, heat dots** in the Files tree (done 2026-11-11). **CH3b, the Health tab** (done 2026-11-11): dormancy breaks, virtualized hotspot list with sparkline, file details, filter, **Show Code Health** in the palette.
-- **CH4, churn.** The share of added lines rewritten or deleted within 14 active days and line survival, per folder, with no split by who wrote them (D227); `churn_summary` and the Health tab's churn panel. Needs line tracking across commits (blame of the parent, lazily, for the hot set), so measure the cost first.
+- **CH4, churn** (D227, D228). **CH4a, engine:** `health.db` v2 with the hunk headers of the first-parent commits, their ingest, the pure replay into a `LineChurn` per file, the job fills `FileHealth::churn`. **CH4b, front ends:** the Health tab's churn panel and the file's churn in the details, and `churn_summary` over MCP.
 - **CH5, the prepare skill** reads `health_context` (plugin, `ai` submodule; done 2026-11-11, plugin 0.7.0).
 - **CH6, the hotspot map** (treemap).
 - **Owed:** the backtest of the research doc on a large real repository before tuning any threshold.

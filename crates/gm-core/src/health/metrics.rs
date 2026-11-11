@@ -179,6 +179,7 @@ pub fn compute<S: std::hash::BuildHasher>(
                 changes_together,
                 ownership: s.ownership.clone(),
                 constraints,
+                churn: None,
             }
         })
         .collect()

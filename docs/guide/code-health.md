@@ -87,7 +87,23 @@ A map of the folder tree shows each file as a box, its size by the size of the f
 
 > **Planned.** Churn is not available in the app yet.
 
-For a folder, the tab shows its **churn**: the share of the lines added under it that were rewritten or deleted within 14 active days, and a curve of how long lines survive. Code that is rewritten soon after it is written was often wrong or incomplete when it landed. Churn counts every line the same way, whoever or whatever wrote it.
+Under the hotspots, the tab shows the **churn** of the folder in the filter box, or of the whole repository when the box is empty:
+
+- **Rewritten within 14 active days**: of the lines added under the folder in the analysis window, the share that a later commit deleted or changed within 14 active days of the repository. Lines added in the last 14 active days are not counted yet, since they have not had their 14 days.
+- **Line survival**: the share of those lines still alive 7, 14, 30, 60, 90 and 180 active days after they were added.
+
+Code that is rewritten soon after it is written was often wrong or incomplete when it landed. Churn counts every line the same way, whoever or whatever wrote it.
+
+The file details show the same two numbers for the selected file.
+
+#### How lines are followed
+
+GitMaster follows each line along the first-parent history of the commit you look at: the commits of your branch, with each merge counted as one change against the branch it merged into. Every change is read from Git's diff once and kept in the index. A changed line counts as deleted and added again, as Git's diff shows it. A line added on a side branch counts from the day it was merged.
+
+- Lines that existed before the analysis window are not counted, and their deletion is not churn.
+- A commit you ignore with `gitmaster.health.ignoreRev` moves lines but counts nothing: the lines it deletes leave the count, and the lines it adds are not counted.
+- Excluded paths and binary files are not counted.
+- Only files that exist at the commit you look at count toward a folder.
 
 ## Heat in the folder tree
 
