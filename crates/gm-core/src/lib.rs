@@ -19,6 +19,7 @@ pub mod file_index;
 mod files;
 pub mod git;
 pub mod grep;
+pub mod health;
 mod history;
 mod memory_scope;
 pub mod move_changes;

@@ -6,6 +6,7 @@ mod diff;
 pub mod features;
 mod files;
 mod grep;
+mod health;
 mod history;
 mod move_changes;
 mod operation;
@@ -33,6 +34,9 @@ pub use files::{
 pub use grep::{
     GREP_FILE_LIMIT, GREP_LINE_LIMIT, GREP_TOTAL_LIMIT, GrepFile, GrepLine, GrepOptions,
     GrepResult, GrepScope,
+};
+pub use health::{
+    DormancyBreak, FileHealth, HealthProgress, HealthReport, Ownership, Partner, SPARK_BARS, Trend,
 };
 pub use history::{
     CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History,
