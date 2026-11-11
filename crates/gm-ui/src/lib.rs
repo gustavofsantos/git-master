@@ -29,6 +29,7 @@ mod editor_theme;
 mod file_discard;
 mod fuzzy;
 mod gate_wait;
+mod health_page;
 mod history_graph;
 mod history_scope;
 mod hook_convert;

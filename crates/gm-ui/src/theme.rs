@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use gpui::{Hsla, SharedString, WindowAppearance, rgb};
 
+use crate::health_page::HeatBand;
+
 const UI_PREFERENCES: &[&str] = &[
     "IBM Plex Sans",
     "Inter",
@@ -72,6 +74,10 @@ pub struct Palette {
     pub unstaged: u32,
     pub untracked: u32,
     pub error: u32,
+    /// The heat dots of the Code page's tree: the hottest 1%, 5% and 10% of files (D225).
+    pub heat_top1: u32,
+    pub heat_top5: u32,
+    pub heat_top10: u32,
     /// The colours a worktree takes from its name (`LANE_COUNT` of them).
     pub lanes: [u32; LANE_COUNT],
     /// The colours of the history graph's lanes (`GRAPH_SLOTS` of them): the
@@ -123,6 +129,9 @@ pub const LIGHT: Palette = Palette {
     unstaged: 0x63_4e06,
     untracked: 0x00_6cbc,
     error: 0x89_323a,
+    heat_top1: 0xc2_410c,
+    heat_top5: 0xea_7a2c,
+    heat_top10: 0xf0_a868,
     lanes: [
         0x00_6cbc, 0x78_56c0, 0x00_7b2f, 0x8a_8882, 0x84_6600, 0xba_3e4b,
     ],
@@ -166,6 +175,9 @@ pub const DARK: Palette = Palette {
     unstaged: 0xdb_b855,
     untracked: 0x64_b2ff,
     error: 0xfe_a1a4,
+    heat_top1: 0xe0_803a,
+    heat_top5: 0xc9_6a2e,
+    heat_top10: 0x8a_5530,
     lanes: [
         0x64_b2ff, 0xb9_9cf0, 0x82_cc8e, 0x9d_9b92, 0xdb_b855, 0xfe_a1a4,
     ],
@@ -300,7 +312,20 @@ accessors!(
     unstaged,
     untracked,
     error,
+    heat_top1,
+    heat_top5,
+    heat_top10,
 );
+
+/// The colour of a heat dot in `band`.
+#[must_use]
+pub(crate) fn heat(band: HeatBand) -> Hsla {
+    match band {
+        HeatBand::Top1 => heat_top1(),
+        HeatBand::Top5 => heat_top5(),
+        HeatBand::Top10 => heat_top10(),
+    }
+}
 
 /// The colour of lane `index` (taken modulo `LANE_COUNT`) in the palette in use.
 #[must_use]

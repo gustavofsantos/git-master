@@ -17,6 +17,7 @@ use crate::conflict_resolver::ResolverState;
 use crate::contexts_model::ContextsModel;
 use crate::file_discard::Discarding;
 use crate::gate_wait::GateWait;
+use crate::health_page::HealthState;
 use crate::history_graph::{GraphLayout, StackMarks};
 use crate::history_scope::ScopeChoice;
 use crate::icon::Icon;
@@ -158,6 +159,8 @@ pub struct Model {
     pub quick_open: QuickOpen,
     /// The Code page: the folder tree and the file viewer (N2).
     pub code: CodePage,
+    /// The code health of HEAD (D225): the report, the index progress and the heat lookups.
+    pub health: HealthState,
     /// The text search page: the query, the options and the last answer (N3).
     pub text_search: TextSearch,
     /// Folders the Code page needs listed next; the window asks the engine.
@@ -1060,7 +1063,12 @@ impl Model {
                 if self.pending_open == Some(id) {
                     self.pending_open = None;
                 }
-                self.error = Some(detail.unwrap_or_else(|| "the operation failed".to_owned()));
+                let message = detail.unwrap_or_else(|| "the operation failed".to_owned());
+                // A failed health read shows under the tree, not in the status bar: it is asked
+                // again on every refresh, as in a repository with no commit yet.
+                if !self.health.failed(id, message.clone()) {
+                    self.error = Some(message);
+                }
                 self.loading = false;
                 self.settle(id, None, None)
             }
@@ -1259,6 +1267,15 @@ impl Model {
                 self.threads.read(id, *detail);
                 None
             }
+            // The code health keeps the answers to its read in flight; the tree's dots read them (D225).
+            Event::HealthProgress { id, progress } => {
+                self.health.progress(id, progress);
+                None
+            }
+            Event::HealthLoaded { id, report } => {
+                self.health.loaded(id, report);
+                None
+            }
             // The provenance panel keeps the answer to its read in flight; any other is dropped (P4).
             Event::ThreadProvenance { id, provenance } => {
                 self.provenance.answered(id, provenance);
@@ -1395,6 +1412,7 @@ impl Model {
                         .file_failed(id, detail.as_deref().unwrap_or("the file could not be read"));
                 }
                 if state == OperationState::Cancelled {
+                    self.health.cancelled(id);
                     self.commit.cancelled(id);
                     self.stash_commit.cancelled(id);
                     self.reflog_commit.cancelled(id);
@@ -1526,9 +1544,6 @@ impl Model {
             | Event::WorkflowMessageSuggested { .. }
             // A transform's answer is the composer's or the dialog's to place (`WF3d`).
             | Event::TransformFinished { .. }
-            // The code health view comes with its own slice; until then its answers are accepted, not shown.
-            | Event::HealthProgress { .. }
-            | Event::HealthLoaded { .. }
             // The view opens the conversion's dialog from the event (`WF3e`).
             | Event::HooksConverted { .. }
             // The wait is kept by `gate_wait` above; each surface reads it.
@@ -1708,6 +1723,7 @@ impl Model {
         self.thread_copy = MarkdownCopy::default();
         self.quick_open = QuickOpen::default();
         self.code.reset();
+        self.health.clear();
         self.text_search = TextSearch::default();
         self.wanted_listings.clear();
         self.files_indexed = false;
@@ -2028,7 +2044,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::{Actor, BranchInfo, Change};
+    use gm_schema::{Actor, BranchInfo, Change, HealthProgress, HealthReport};
 
     fn entry(path: &str) -> StatusEntry {
         StatusEntry {
@@ -2119,6 +2135,53 @@ mod tests {
         let _ = model.apply(failed(2, Some("not supported")));
         assert_eq!(model.error.as_deref(), Some("not supported"));
         assert!(!model.loading);
+    }
+
+    #[test]
+    fn a_failed_health_read_shows_its_own_text_and_leaves_the_status_bar_alone() {
+        let mut model = Model::default();
+        model.health.requested(OperationId(12));
+        let _ = model.apply(failed(12, Some("fatal: bad object")));
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model.health.status_text().as_deref(),
+            Some("Code health failed: fatal: bad object")
+        );
+    }
+
+    #[test]
+    fn health_answers_reach_the_state_only_for_the_read_in_flight() {
+        let mut model = Model::default();
+        model.health.requested(OperationId(13));
+        let _ = model.apply(Event::HealthProgress {
+            id: OperationId(14),
+            progress: HealthProgress {
+                indexed: 1,
+                total: 2,
+            },
+        });
+        let _ = model.apply(Event::HealthLoaded {
+            id: OperationId(14),
+            report: Box::new(HealthReport {
+                rev: "a1b2".to_owned(),
+                config_hash: "3fa9".to_owned(),
+                complete: true,
+                files: Vec::new(),
+            }),
+        });
+        assert!(model.health.pending());
+        assert_eq!(model.health.status_text(), None);
+        let _ = model.apply(Event::HealthProgress {
+            id: OperationId(13),
+            progress: HealthProgress {
+                indexed: 1,
+                total: 2,
+            },
+        });
+        assert_eq!(
+            model.health.status_text().as_deref(),
+            Some("Reading history: 1 of 2 commits")
+        );
     }
 
     #[test]

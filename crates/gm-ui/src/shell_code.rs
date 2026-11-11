@@ -15,11 +15,13 @@ use gpui::{
 
 use crate::action_registry::{Action, Args, CommentSpot};
 use crate::code_page::{Content, Piece, Shown, TreeRow, Viewer, styled};
+use crate::health_page::{HealthState, HeatBand};
 use crate::icon::{self, Icon};
 use crate::resize::{self};
 use crate::resize_handle::{self, Edge};
 use crate::theme;
 use crate::view::{Screen, StatusView};
+use crate::window_chrome;
 
 const TREE_ROW: f32 = 24.;
 const INDENT: f32 = 14.;
@@ -70,10 +72,23 @@ impl StatusView {
     pub(crate) fn show_code(&mut self, cx: &mut Context<Self>) {
         self.screen = Screen::Code;
         self.engine.dispatch(Actor::Human, CommandKind::IndexFiles);
+        self.request_health();
         if !self.model.code.has_root() {
             self.request_listing("");
         }
         cx.notify();
+    }
+
+    /// Asks the engine for the code health of HEAD (D225), unless a read is in flight. A read of
+    /// the same HEAD and configuration is answered at once from the engine's cache.
+    pub(crate) fn request_health(&mut self) {
+        if self.model.status().is_none() || self.model.health.pending() {
+            return;
+        }
+        let id = self
+            .engine
+            .dispatch(Actor::Human, CommandKind::LoadHealth { rev: None });
+        self.model.health.requested(id);
     }
 
     /// Opens the Code page on `path`, at `line` if given: the tree opens the
@@ -364,10 +379,20 @@ impl StatusView {
                          cx: &mut Context<StatusView>| {
                             let rows = this.model.code.rows();
                             let selected = this.model.code.selected.clone();
+                            let health = &this.model.health;
                             range
                                 .filter_map(|index| {
-                                    rows.get(index)
-                                        .map(|row| tree_row(row, index, selected.as_deref(), cx))
+                                    rows.get(index).map(|row| {
+                                        let heat = heat_of(health, row);
+                                        tree_row(
+                                            row,
+                                            index,
+                                            selected.as_deref(),
+                                            heat,
+                                            health.of(),
+                                            cx,
+                                        )
+                                    })
                                 })
                                 .collect()
                         },
@@ -378,7 +403,23 @@ impl StatusView {
                 .min_h(px(0.))
                 .into_any_element()
             })
+            .children(self.health_line())
             .child(width_strip)
+    }
+
+    /// The line about code health under the tree: while the history is read, when it is partial
+    /// or when the read failed (D225). Nothing when there is nothing to say.
+    fn health_line(&self) -> Option<Div> {
+        let text = self.model.health.status_text()?;
+        Some(
+            div()
+                .flex_none()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(text),
+        )
     }
 
     fn code_viewer(&self, cx: &mut Context<Self>) -> Div {
@@ -626,12 +667,23 @@ pub(crate) fn bytes_label(size: u64) -> String {
     }
 }
 
-/// One row of the tree: indent, a marker for a folder, the name. A click opens
-/// a folder or reads a file.
+/// The heat of a row: the file's band and rank, or for a folder the hottest file inside it.
+fn heat_of(health: &HealthState, row: &TreeRow) -> Option<(HeatBand, u32)> {
+    if row.is_dir {
+        health.folder_band(&row.path)
+    } else {
+        health.file_band(&row.path)
+    }
+}
+
+/// One row of the tree: indent, a marker for a folder, the name, and a heat dot when the row
+/// is in the hottest tenth (`heat`, out of `of` files). A click opens a folder or reads a file.
 fn tree_row(
     row: &TreeRow,
     index: usize,
     selected: Option<&str>,
+    heat: Option<(HeatBand, u32)>,
+    of: usize,
     cx: &Context<StatusView>,
 ) -> Stateful<Div> {
     let path = row.path.clone();
@@ -679,6 +731,7 @@ fn tree_row(
                 .when(is_dir, |name| name.font_weight(gpui::FontWeight::MEDIUM))
                 .child(row.name.clone()),
         )
+        .children(heat.map(|(band, rank)| heat_dot(index, band, rank, of, is_dir)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -689,6 +742,25 @@ fn tree_row(
                 }
             }),
         )
+}
+
+/// The heat dot after a row's name. Its tooltip gives the rank of the file, or of the hottest
+/// file inside the folder.
+fn heat_dot(index: usize, band: HeatBand, rank: u32, of: usize, is_dir: bool) -> Stateful<Div> {
+    let text = if is_dir {
+        format!("Hottest file inside: rank {rank} of {of}")
+    } else {
+        format!("Heat: rank {rank} of {of}")
+    };
+    div()
+        .id(("code-heat", index))
+        .flex_none()
+        .ml_1()
+        .w(px(6.))
+        .h(px(6.))
+        .rounded_full()
+        .bg(theme::heat(band))
+        .tooltip(window_chrome::hint(text))
 }
 
 /// The pieces of a line as one run of text with a color per piece that has a role.
