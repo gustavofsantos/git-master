@@ -244,8 +244,8 @@ impl StatusView {
             .children(self.provenance_panel(cx))
     }
 
-    /// The tab strip of the Code page and the text search, one page with two tabs: Files
-    /// and Search. The tab shown is underlined, as the Threads page's tabs are.
+    /// The tab strip of the Code page, the text search and the code health: one page with three
+    /// tabs: Files, Search and Health. The tab shown is underlined, as the Threads page's tabs are.
     pub(crate) fn code_tabs(&self, cx: &mut Context<Self>) -> Div {
         div()
             .flex_none()
@@ -265,6 +265,13 @@ impl StatusView {
                 "Search",
                 "code-tab-search",
                 Action::SearchText,
+                cx,
+            ))
+            .child(self.code_tab_button(
+                Screen::Health,
+                "Health",
+                "code-tab-health",
+                Action::ShowCodeHealth,
                 cx,
             ))
     }

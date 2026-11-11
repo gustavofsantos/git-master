@@ -73,6 +73,7 @@ mod script_completion;
 mod shell_code;
 mod shell_commit;
 mod shell_conflicts;
+mod shell_health;
 mod shell_history;
 mod shell_inbox;
 mod shell_labels;

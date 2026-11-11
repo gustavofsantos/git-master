@@ -54,6 +54,7 @@ use crate::resize;
 use crate::restack_dialog::{RestackDialog, Transition};
 use crate::review_composer::{InlineReply, ReviewDialog};
 use crate::shell_code::CodeView;
+use crate::shell_health::{self, HealthView};
 use crate::shell_history::CommitTexts;
 use crate::shell_labels::{self, LabelsView};
 use crate::shell_memories::{self, MemoriesView, ThreadsTab};
@@ -119,6 +120,8 @@ pub(crate) enum Screen {
     Code,
     /// The text search (N3).
     Search,
+    /// The Health tab of the Code page: the hotspots, the dormancy breaks and the file details.
+    Health,
     /// The stashes of the repository, with the selected stash's files and diffs (B2).
     Stashes,
     /// The entries of HEAD's reflog, with the selected entry's files and diffs (B3).
@@ -187,6 +190,8 @@ pub struct StatusView {
     pub(crate) code_view: CodeView,
     /// The text search page's boxes and scroll; its state is `model.text_search`.
     pub(crate) search_view: SearchView,
+    /// The Health tab's filter box and list scroll; its state is `model.health`.
+    pub(crate) health_view: HealthView,
     /// The Threads page's search box and list scroll; its state is `model.threads`.
     pub(crate) threads_view: ThreadsView,
     /// The Memories tab's search box, path box and edit; its state is `model.memories`.
@@ -351,6 +356,8 @@ impl StatusView {
         let search_paths = cx.new(|cx| {
             TextArea::new("Files to search: src crates/ui !docs  (empty: all)", cx).with_lines(1, 1)
         });
+        let health_query = cx
+            .new(|cx| TextArea::new("Filter by folder, such as src/billing", cx).with_lines(1, 1));
         let threads_query = cx.new(|cx| TextArea::new("Search the threads", cx).with_lines(1, 1));
         let memories_query = cx.new(|cx| TextArea::new("Search the memories", cx).with_lines(1, 1));
         let memory_path =
@@ -458,6 +465,7 @@ impl StatusView {
             &search_paths,
             cx,
         ));
+        subscriptions.extend(shell_health::subscriptions(&health_query, cx));
         subscriptions.extend(shell_threads::subscriptions(&threads_query, cx));
         subscriptions.extend(shell_memories::subscriptions(&memories_query, cx));
         subscriptions.extend(shell_labels::subscriptions(&labels_query, cx));
@@ -500,6 +508,7 @@ impl StatusView {
             quick_open_view: QuickOpenView::new(quick_open_input),
             code_view: CodeView::new(),
             search_view: SearchView::new(search_query, search_paths),
+            health_view: HealthView::new(health_query),
             threads_view: ThreadsView::new(threads_query),
             memories_view: MemoriesView::new(memories_query, memory_path, memory_mark_reason),
             threads_tab: ThreadsTab::default(),
@@ -882,6 +891,7 @@ impl StatusView {
             .children((self.screen == Screen::Workflows).then(|| self.workflows_page(cx)))
             .children((self.screen == Screen::Code).then(|| self.code_page(cx)))
             .children((self.screen == Screen::Search).then(|| self.search_page(cx)))
+            .children((self.screen == Screen::Health).then(|| self.health_page(cx)))
             .children((self.screen == Screen::Stashes).then(|| self.stashes_page(cx)))
             .children((self.screen == Screen::Reflog).then(|| self.reflog_page(cx)))
             .children((self.screen == Screen::Threads).then(|| self.threads_page(cx)))
@@ -914,7 +924,7 @@ impl StatusView {
         self.request_stacks();
         self.request_submodules();
         self.request_review_files();
-        if matches!(self.screen, Screen::Code | Screen::Search) {
+        if matches!(self.screen, Screen::Code | Screen::Search | Screen::Health) {
             self.request_health();
         }
         if self.head_name().as_deref() != head_before {
@@ -1149,8 +1159,15 @@ impl StatusView {
         if self.screen == Screen::Code {
             self.show_code(cx);
         }
-        // The boxes of the search belong to the repository left behind.
-        for area in [&self.search_view.query, &self.search_view.paths] {
+        if self.screen == Screen::Health {
+            self.request_health();
+        }
+        // The boxes of the search and the health filter belong to the repository left behind.
+        for area in [
+            &self.search_view.query,
+            &self.search_view.paths,
+            &self.health_view.query,
+        ] {
             area.update(cx, |area, cx| area.set_text("", cx));
         }
         self.remember(PathBuf::from(switched.root), cx);
@@ -1509,6 +1526,7 @@ impl StatusView {
             Ok(Effect::ShowWorkflows) => self.show_workflows(cx),
             Ok(Effect::OpenQuickOpen) => self.open_quick_open(window, cx),
             Ok(Effect::ShowCode) => self.show_code(cx),
+            Ok(Effect::ShowCodeHealth) => self.show_code_health(cx),
             Ok(Effect::ShowSearch) => self.show_search(window, cx),
             Ok(Effect::ViewFile { path, line }) => self.view_file(&path, line, cx),
             Ok(Effect::ShowProvenance(ask)) => self.show_provenance(&ask, cx),

@@ -1,0 +1,583 @@
+//! The Health tab of the Code page (docs/guide/code-health.md, "The Health tab"): a filter box
+//! above the hotspots, the dormancy breaks, the list of files by heat and the details of the
+//! selected file. The state and every computation are in `health_page.rs`; this file only draws
+//! it and sends the requests it plans. Rows are drawn by a `uniform_list`, so only the rows on
+//! screen are built.
+
+use std::ops::Range;
+
+use gm_schema::{FileHealth, Partner, SPARK_BARS, Trend};
+use gpui::{
+    Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, ScrollStrategy,
+    Stateful, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+};
+
+use crate::health_page::{self, DORMANT_SHOWN, HealthState, heat_share, spark_heights};
+use crate::icon::{self, Icon};
+use crate::text_area::TextArea;
+use crate::theme;
+use crate::view::{Screen, StatusView};
+
+/// A row of the hotspots list, as tall as a row of the file tree.
+const ROW_HEIGHT: f32 = 24.;
+/// The width of a heat bar's track.
+const BAR_TRACK: f32 = 80.;
+/// The width of the details panel.
+const DETAILS_WIDTH: f32 = 320.;
+/// The activity chart of a row: 40 px wide, 16 px tall.
+const ROW_SPARK_WIDTH: f32 = 40.;
+const ROW_SPARK_HEIGHT: u16 = 16;
+/// The activity chart of the details: the panel's content width, 48 px tall.
+const DETAIL_SPARK_WIDTH: f32 = DETAILS_WIDTH - 32.;
+const DETAIL_SPARK_HEIGHT: u16 = 48;
+
+/// The window's part of the Health tab: the filter box and the list's scroll. Its state is
+/// `model.health`.
+pub(crate) struct HealthView {
+    pub(crate) query: Entity<TextArea>,
+    pub(crate) list: UniformListScrollHandle,
+}
+
+impl HealthView {
+    pub(crate) fn new(query: Entity<TextArea>) -> Self {
+        Self {
+            query,
+            list: UniformListScrollHandle::new(),
+        }
+    }
+}
+
+/// The subscription that keeps the model's filter in step with the box. Made with the window.
+pub(crate) fn subscriptions(
+    query: &Entity<TextArea>,
+    cx: &mut Context<StatusView>,
+) -> Vec<Subscription> {
+    vec![cx.observe(query, |this, _, cx| this.on_health_edited(cx))]
+}
+
+impl StatusView {
+    /// Opens the Health tab and asks for the code health of HEAD.
+    pub(crate) fn show_code_health(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Health;
+        self.request_health();
+        cx.notify();
+    }
+
+    /// The filter box changed: the model takes the new folder and the list starts at its top.
+    fn on_health_edited(&mut self, cx: &mut Context<Self>) {
+        let text = self.health_view.query.read(cx).text().to_owned();
+        if text.contains('\n') {
+            // The box is one line; Enter is not a line break.
+            let first = text.lines().next().unwrap_or("").to_owned();
+            self.health_view
+                .query
+                .update(cx, |area, cx| area.set_text(&first, cx));
+            return;
+        }
+        if self.model.health.set_filter(&text) {
+            self.health_view.list.scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+        }
+    }
+
+    /// Shows the details of the file at `path`.
+    fn select_health_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.model.health.select(path);
+        cx.notify();
+    }
+
+    /// The page for the main area: the tabs and the filter, the status, the dormancy breaks,
+    /// then the hotspots beside the details of the selected file.
+    pub(crate) fn health_page(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .bg(theme::editor())
+            .child(self.health_header(cx))
+            .children(self.health_status())
+            .children(self.dormancy_section(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_row()
+                    .child(self.hotspots(cx))
+                    .children(self.health_details(cx)),
+            )
+    }
+
+    /// The tab strip and the filter box.
+    fn health_header(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_none()
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme::hairline())
+            .bg(theme::panel())
+            .child(self.code_tabs(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .border_1()
+                    .border_color(theme::hairline_strong())
+                    .rounded_sm()
+                    .child(icon::view(
+                        Icon::MagnifyingGlass,
+                        icon::SIZE,
+                        theme::muted(),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(self.health_view.query.clone()),
+                    ),
+            )
+    }
+
+    /// The line about the read, or that there is no code health yet. Nothing while a read runs
+    /// without progress to show.
+    fn health_status(&self) -> Option<Div> {
+        let health = &self.model.health;
+        let text = health.status_text().or_else(|| {
+            (!health.has_report() && !health.pending()).then(|| "No code health yet.".to_owned())
+        })?;
+        Some(
+            div()
+                .flex_none()
+                .px_4()
+                .py_2()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(text),
+        )
+    }
+
+    /// The dormancy breaks: the first few files, in rank order. Nothing when there are none.
+    fn dormancy_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let health = &self.model.health;
+        let dormant = health.dormant();
+        if dormant.is_empty() {
+            return None;
+        }
+        let rows = dormant
+            .iter()
+            .take(DORMANT_SHOWN)
+            .enumerate()
+            .filter_map(|(slot, &index)| Some(dormant_row(slot, health.file(index)?, cx)));
+        let more = dormant.len().saturating_sub(DORMANT_SHOWN);
+        Some(
+            div()
+                .flex_none()
+                .px_4()
+                .py_3()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .border_b_1()
+                .border_color(theme::hairline())
+                .child(section_title("Dormancy breaks"))
+                .children(rows)
+                .children((more > 0).then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(format!("and {more} more"))
+                })),
+        )
+    }
+
+    /// The hotspots: a heading, then the list of the rows under the filter.
+    fn hotspots(&self, cx: &mut Context<Self>) -> Div {
+        let health = &self.model.health;
+        let count = health.rows().len();
+        let body = if count == 0 {
+            div()
+                .flex_1()
+                .px_4()
+                .py_2()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(empty_text(health))
+                .into_any_element()
+        } else {
+            hotspot_list(count, self.health_view.list.clone(), cx).into_any_element()
+        };
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px_4()
+                    .pt_3()
+                    .pb_1()
+                    .child(section_title("Hotspots")),
+            )
+            .child(body)
+    }
+
+    /// The details of the selected file, or nothing when no file is selected.
+    fn health_details(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let health = &self.model.health;
+        let file = health.selected_file()?;
+        let path = file.path.clone();
+        Some(
+            div()
+                .id("health-details")
+                .flex_none()
+                .w(px(DETAILS_WIDTH))
+                .h_full()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .p_4()
+                .border_l_1()
+                .border_color(theme::hairline())
+                .bg(theme::panel())
+                .child(
+                    div()
+                        .font_family(theme::code_font())
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(file.path.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(health_page::rank_line(file, health.of())),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(spark_chart(
+                            &file.spark,
+                            DETAIL_SPARK_HEIGHT,
+                            DETAIL_SPARK_WIDTH,
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::muted())
+                                .child("Last 180 active days of the repository"),
+                        ),
+                )
+                .children(file.dormancy_break.as_ref().map(|dormancy| {
+                    div()
+                        .text_sm()
+                        .text_color(theme::warn_fg())
+                        .child(health_page::dormancy_text(dormancy))
+                }))
+                .child(partners_section(file, cx))
+                .child(ownership_section(file))
+                .child(constraints_section(file))
+                .child(
+                    div()
+                        .id("health-open")
+                        .flex_none()
+                        .h(px(26.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme::button_border())
+                        .text_xs()
+                        .cursor_pointer()
+                        .child("Open File")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                this.view_file(&path, None, cx);
+                            }),
+                        ),
+                ),
+        )
+    }
+}
+
+/// A small heading of a section.
+fn section_title(text: &'static str) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme::muted())
+        .child(text)
+}
+
+/// A section of the details: its heading, then what it holds.
+fn detail_section(title: &'static str) -> Div {
+    div().flex().flex_col().gap_1().child(section_title(title))
+}
+
+/// The line that says the empty list is empty, and why.
+fn empty_text(health: &HealthState) -> String {
+    if !health.has_report() {
+        String::new()
+    } else if health.of() == 0 {
+        "No file changed in the analysis window.".to_owned()
+    } else {
+        format!("No file under {}.", health.filter().trim())
+    }
+}
+
+/// The list of the hotspots: one row per file under the filter, drawn as they scroll into view.
+fn hotspot_list(count: usize, list: UniformListScrollHandle, cx: &mut Context<StatusView>) -> Div {
+    div().flex_1().min_h(px(0.)).flex().flex_col().child(
+        uniform_list(
+            "health-rows",
+            count,
+            cx.processor(
+                |this: &mut StatusView,
+                 range: Range<usize>,
+                 _window: &mut Window,
+                 cx: &mut Context<StatusView>| {
+                    let health = &this.model.health;
+                    let max_heat = health.max_heat();
+                    let selected = health.selected();
+                    health
+                        .rows()
+                        .get(range.clone())
+                        .unwrap_or_default()
+                        .iter()
+                        .zip(range)
+                        .filter_map(|(&index, row)| {
+                            let file = health.file(index)?;
+                            let chosen = selected == Some(file.path.as_str());
+                            Some(hotspot_row(file, row, health, max_heat, chosen, cx))
+                        })
+                        .collect::<Vec<_>>()
+                },
+            ),
+        )
+        .track_scroll(list)
+        .flex_1()
+        .min_h(px(0.)),
+    )
+}
+
+/// One hotspot: the rank, the path, the heat bar, the activity chart and the trend. A click
+/// shows the file's details.
+fn hotspot_row(
+    file: &FileHealth,
+    row: usize,
+    health: &HealthState,
+    max_heat: f64,
+    chosen: bool,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let path = file.path.clone();
+    let band = health.file_band(&file.path).map(|(band, _)| band);
+    let bar = band.map_or_else(theme::muted, theme::heat);
+    let bar_fill = Pixels::from(f64::from(BAR_TRACK) * heat_share(file.heat, max_heat));
+    let trend_color = if file.trend == Trend::Rising {
+        theme::heat_top1()
+    } else {
+        theme::muted()
+    };
+    div()
+        .id(("health-row", row))
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .px_3()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .cursor_pointer()
+        .when(chosen, |r| r.bg(theme::selected_row()))
+        .hover(|style| style.bg(theme::selected_row()))
+        .child(
+            div()
+                .flex_none()
+                .w(px(40.))
+                .flex()
+                .justify_end()
+                .font_family(theme::code_font())
+                .text_xs()
+                .text_color(theme::muted())
+                .child(file.rank.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(file.path.clone()),
+        )
+        .child(heat_bar(bar_fill, bar))
+        .child(spark_chart(&file.spark, ROW_SPARK_HEIGHT, ROW_SPARK_WIDTH))
+        .child(
+            div()
+                .flex_none()
+                .w(px(56.))
+                .text_xs()
+                .text_color(trend_color)
+                .child(health_page::trend_word(file.trend)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.select_health_file(&path, cx);
+            }),
+        )
+}
+
+/// A heat bar: a fixed track, filled to `fill` in `color`.
+fn heat_bar(fill: Pixels, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .w(px(BAR_TRACK))
+        .h(px(6.))
+        .rounded_sm()
+        .bg(theme::hairline())
+        .child(div().h_full().w(fill).rounded_sm().bg(color))
+}
+
+/// An activity chart: one bar per period, each as tall as its share of the busiest one.
+fn spark_chart(spark: &[u32; SPARK_BARS], height: u16, width: f32) -> Div {
+    let heights = spark_heights(spark, u32::from(height));
+    div()
+        .flex_none()
+        .w(px(width))
+        .h(px(f32::from(height)))
+        .flex()
+        .flex_row()
+        .items_end()
+        .gap(px(1.5))
+        .children(heights.into_iter().map(|bar| {
+            div()
+                .flex_1()
+                .h(Pixels::from(f64::from(bar)))
+                .bg(theme::muted())
+        }))
+}
+
+/// One dormancy break of the list: the path and what it says. A click shows the file.
+fn dormant_row(slot: usize, file: &FileHealth, cx: &Context<StatusView>) -> Stateful<Div> {
+    let path = file.path.clone();
+    let sentence = file
+        .dormancy_break
+        .as_ref()
+        .map(health_page::dormancy_text)
+        .unwrap_or_default();
+    div()
+        .id(("health-dormant", slot))
+        .flex()
+        .flex_col()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme::selected_row()))
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .font_family(theme::code_font())
+                .child(file.path.clone()),
+        )
+        .child(div().text_xs().text_color(theme::muted()).child(sentence))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.select_health_file(&path, cx);
+            }),
+        )
+}
+
+/// The files the selected file changes with, strongest first, or what says there are none.
+fn partners_section(file: &FileHealth, cx: &Context<StatusView>) -> Div {
+    let section = detail_section("Changes together with");
+    if file.changes_together.is_empty() {
+        return section.child(note("No file changes with it often enough."));
+    }
+    section.children(
+        file.changes_together
+            .iter()
+            .enumerate()
+            .map(|(slot, partner)| partner_row(slot, partner, cx)),
+    )
+}
+
+/// One partner: its path and how strongly it changes with the file. A click shows the partner.
+fn partner_row(slot: usize, partner: &Partner, cx: &Context<StatusView>) -> Stateful<Div> {
+    let path = partner.path.clone();
+    div()
+        .id(("health-partner", slot))
+        .flex()
+        .flex_col()
+        .cursor_pointer()
+        .hover(|style| style.bg(theme::selected_row()))
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .font_family(theme::code_font())
+                .child(partner.path.clone()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(health_page::partner_text(partner)),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.select_health_file(&path, cx);
+            }),
+        )
+}
+
+/// The ownership of the file: counts and shares, never a name.
+fn ownership_section(file: &FileHealth) -> Div {
+    health_page::ownership_lines(&file.ownership)
+        .into_iter()
+        .fold(detail_section("Ownership"), |section, line| {
+            section.child(note(&line))
+        })
+}
+
+/// The constraints an agent is told before it changes the file.
+fn constraints_section(file: &FileHealth) -> Div {
+    if file.constraints.is_empty() {
+        return detail_section("What an agent is told").child(note("No constraints."));
+    }
+    file.constraints
+        .iter()
+        .fold(detail_section("What an agent is told"), |section, line| {
+            section.child(note(line))
+        })
+}
+
+/// A line of text in the details, wrapped to the panel.
+fn note(text: &str) -> Div {
+    div()
+        .text_xs()
+        .text_color(theme::muted())
+        .child(text.to_owned())
+}

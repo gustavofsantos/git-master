@@ -9,7 +9,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gm_schema::{FileHealth, HealthProgress, HealthReport, OperationId};
+use gm_schema::{
+    DormancyBreak, FileHealth, HealthProgress, HealthReport, OperationId, Ownership, Partner,
+    SPARK_BARS, Trend,
+};
 
 /// The band of a file's heat dot: the hottest 1%, 5% or 10% of the files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +39,11 @@ impl HeatBand {
     }
 }
 
-/// What the Code page shows of code health: the report, the index progress, the error.
+/// The dormancy breaks the Health tab lists before it says how many more there are.
+pub(crate) const DORMANT_SHOWN: usize = 5;
+
+/// What the Code page shows of code health: the report, the index progress, the error, and the
+/// Health tab's filter and selection.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct HealthState {
     report: Option<Arc<HealthReport>>,
@@ -48,6 +55,16 @@ pub(crate) struct HealthState {
     paths: HashMap<String, usize>,
     /// For each folder, the band and rank of the hottest banded file inside it.
     folders: HashMap<String, (HeatBand, u32)>,
+    /// The folder the Health tab's list is limited to, as typed.
+    filter: String,
+    /// The path of the file the Health tab's details show.
+    selected: Option<String>,
+    /// The indices of the files under the filter, in rank order. Kept by `refresh`.
+    rows: Vec<usize>,
+    /// The indices of the filtered files with a dormancy break, in rank order. Kept by `refresh`.
+    dormant: Vec<usize>,
+    /// The heat of the hottest file of the report. Kept by `refresh`.
+    max_heat: f64,
 }
 
 impl HealthState {
@@ -76,6 +93,7 @@ impl HealthState {
         self.paths = paths;
         self.folders = folders;
         self.report = Some(Arc::new(*report));
+        self.refresh();
         if complete {
             self.pending = None;
             self.progress = None;
@@ -149,10 +167,207 @@ impl HealthState {
         None
     }
 
+    /// Whether a complete or partial report is held.
+    #[must_use]
+    pub(crate) fn has_report(&self) -> bool {
+        self.report.is_some()
+    }
+
+    /// The file at `index` of the report, in rank order.
+    #[must_use]
+    pub(crate) fn file(&self, index: usize) -> Option<&FileHealth> {
+        self.report.as_ref()?.files.get(index)
+    }
+
+    /// The folder the list is limited to, as typed.
+    #[must_use]
+    pub(crate) fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Limits the list to the folder `text` names. Returns whether the filter changed; a changed
+    /// filter recomputes the rows, an unchanged one costs nothing.
+    pub(crate) fn set_filter(&mut self, text: &str) -> bool {
+        if self.filter == text {
+            return false;
+        }
+        text.clone_into(&mut self.filter);
+        self.refresh();
+        true
+    }
+
+    /// The indices of the files under the filter, hottest first. Empty filter: every file.
+    #[must_use]
+    pub(crate) fn rows(&self) -> &[usize] {
+        &self.rows
+    }
+
+    /// The indices of the files under the filter that have a dormancy break, hottest first.
+    #[must_use]
+    pub(crate) fn dormant(&self) -> &[usize] {
+        &self.dormant
+    }
+
+    /// The heat of the hottest file of the report: the full scale of the heat bars.
+    #[must_use]
+    pub(crate) fn max_heat(&self) -> f64 {
+        self.max_heat
+    }
+
+    /// The path of the file the details show.
+    #[must_use]
+    pub(crate) fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    /// Shows the details of the file at `path`.
+    pub(crate) fn select(&mut self, path: &str) {
+        self.selected = Some(path.to_owned());
+    }
+
+    /// The file the details show, when it is in the report.
+    #[must_use]
+    pub(crate) fn selected_file(&self) -> Option<&FileHealth> {
+        let index = *self.paths.get(self.selected.as_deref()?)?;
+        self.file(index)
+    }
+
+    /// Recomputes what the list keeps from the report and the filter, and the heat scale.
+    fn refresh(&mut self) {
+        self.rows.clear();
+        self.dormant.clear();
+        self.max_heat = 0.0;
+        let Some(report) = self.report.as_deref() else {
+            return;
+        };
+        let scope = scope_of(&self.filter);
+        self.max_heat = report
+            .files
+            .iter()
+            .map(|file| file.heat)
+            .fold(0.0, f64::max);
+        self.rows = report
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| is_under(&file.path, scope))
+            .map(|(index, _)| index)
+            .collect();
+        self.dormant = self
+            .rows
+            .iter()
+            .copied()
+            .filter(|&index| report.files[index].dormancy_break.is_some())
+            .collect();
+        self.dormant.sort_by_key(|&index| report.files[index].rank);
+    }
+
     /// Forgets everything: another repository opened.
     pub(crate) fn clear(&mut self) {
         *self = Self::default();
     }
+}
+
+/// The folder a filter names: surrounding spaces and slashes left out. Empty for no folder.
+#[must_use]
+pub(crate) fn scope_of(filter: &str) -> &str {
+    filter.trim().trim_matches('/')
+}
+
+/// Whether `path` is `scope` or lies under it, on a segment boundary: `src/billing` holds
+/// `src/billing/a.rs` but not `src/billing2/a.rs`. An empty scope holds every path.
+#[must_use]
+pub(crate) fn is_under(path: &str, scope: &str) -> bool {
+    scope.is_empty()
+        || path == scope
+        || path
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A file's heat as a share of the hottest file's, 0 to 1, for the width of its heat bar.
+#[must_use]
+pub(crate) fn heat_share(heat: f64, max_heat: f64) -> f64 {
+    if max_heat > 0.0 {
+        (heat / max_heat).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The heights in pixels of a file's activity bars: each share of the file's own busiest bar,
+/// `max_px` for that bar. A bar with commits is at least one pixel high.
+#[must_use]
+pub(crate) fn spark_heights(spark: &[u32; SPARK_BARS], max_px: u32) -> [u32; SPARK_BARS] {
+    let mut heights = [0; SPARK_BARS];
+    let top = spark.iter().copied().max().unwrap_or(0);
+    if top == 0 {
+        return heights;
+    }
+    for (height, &commits) in heights.iter_mut().zip(spark) {
+        if commits > 0 {
+            let scaled = u64::from(commits) * u64::from(max_px) / u64::from(top);
+            *height = u32::try_from(scaled).unwrap_or(max_px).max(1);
+        }
+    }
+    heights
+}
+
+/// The word for a trend.
+#[must_use]
+pub(crate) fn trend_word(trend: Trend) -> &'static str {
+    match trend {
+        Trend::Rising => "rising",
+        Trend::Steady => "steady",
+        Trend::Falling => "falling",
+    }
+}
+
+/// A share as a whole percentage, rounded to the nearest.
+#[must_use]
+pub(crate) fn percent_round(share: f64) -> String {
+    format!("{}", (share * 100.0).round())
+}
+
+/// The rank line of the details: the rank, the report's size and the percentile.
+#[must_use]
+pub(crate) fn rank_line(file: &FileHealth, of: usize) -> String {
+    // From the rank, not the rounded percentile, so the hottest file never claims 100%.
+    let colder = of.saturating_sub(usize::try_from(file.rank).unwrap_or(of));
+    let share = (colder * 100).checked_div(of).unwrap_or(0);
+    format!("Rank {} of {of} · hotter than {share}% of files", file.rank)
+}
+
+/// What a dormancy break says, in the list and in the details.
+#[must_use]
+pub(crate) fn dormancy_text(dormancy: &DormancyBreak) -> String {
+    format!(
+        "Quiet {} active days, now changing on {} of the last 30",
+        dormancy.quiet_active_days, dormancy.recent_active_days
+    )
+}
+
+/// A file that changes with the one shown: its degree and how many commits it shares with it.
+#[must_use]
+pub(crate) fn partner_text(partner: &Partner) -> String {
+    format!(
+        "degree {:.2} · {} shared commits",
+        partner.degree, partner.shared_commits
+    )
+}
+
+/// The three lines of a file's ownership: its authors, its top author's share, its occasional
+/// authors. Counts and shares only.
+#[must_use]
+pub(crate) fn ownership_lines(ownership: &Ownership) -> [String; 3] {
+    [
+        format!("{} authors", ownership.authors),
+        format!(
+            "Top author: {}% of commits",
+            percent_round(ownership.top_author_share)
+        ),
+        format!("{} occasional authors", ownership.minor_contributors),
+    ]
 }
 
 /// The index of each file by path, and for each folder the hottest banded file inside it.
@@ -415,5 +630,249 @@ mod tests {
         assert_eq!(grouped(1_000), "1,000");
         assert_eq!(grouped(12_340), "12,340");
         assert_eq!(grouped(1_234_567), "1,234,567");
+    }
+
+    fn paths(state: &HealthState, indices: &[usize]) -> Vec<String> {
+        indices
+            .iter()
+            .map(|&index| state.file(index).unwrap().path.clone())
+            .collect()
+    }
+
+    fn dormant(path: &str, rank: u32) -> FileHealth {
+        let mut file = file(path, rank, 99.0);
+        file.dormancy_break = Some(gm_schema::DormancyBreak {
+            quiet_active_days: 150,
+            recent_active_days: 4,
+        });
+        file
+    }
+
+    #[test]
+    fn an_empty_filter_keeps_every_file_in_rank_order() {
+        let state = sample();
+        assert_eq!(state.filter(), "");
+        assert_eq!(state.rows(), &[0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_folder_filter_matches_on_a_segment_boundary() {
+        let mut state = sample();
+        assert!(state.set_filter("a"));
+        assert_eq!(
+            paths(&state, state.rows()),
+            ["a/b/d.rs", "a/x.rs", "a/b/c.rs"]
+        );
+        assert!(state.set_filter("a/b"));
+        assert_eq!(paths(&state, state.rows()), ["a/b/d.rs", "a/b/c.rs"]);
+        assert!(state.set_filter("ab"));
+        assert_eq!(paths(&state, state.rows()), ["ab/z.rs"]);
+    }
+
+    #[test]
+    fn a_filter_that_names_a_file_keeps_that_file_and_nothing_else() {
+        let mut state = sample();
+        state.set_filter("cold.rs");
+        assert_eq!(paths(&state, state.rows()), ["cold.rs"]);
+        state.set_filter("missing");
+        assert!(state.rows().is_empty());
+    }
+
+    #[test]
+    fn the_filter_ignores_surrounding_slashes_and_spaces() {
+        assert_eq!(scope_of("/src/billing/"), "src/billing");
+        assert_eq!(scope_of("  src/billing  "), "src/billing");
+        assert_eq!(scope_of("/"), "");
+        assert_eq!(scope_of(""), "");
+        let mut state = sample();
+        state.set_filter("/a/b/");
+        assert_eq!(paths(&state, state.rows()), ["a/b/d.rs", "a/b/c.rs"]);
+    }
+
+    #[test]
+    fn is_under_needs_the_folder_and_a_slash() {
+        assert!(is_under("src/billing/a.rs", "src/billing"));
+        assert!(is_under("src/billing", "src/billing"));
+        assert!(!is_under("src/billing2/a.rs", "src/billing"));
+        assert!(!is_under("src/bill", "src/billing"));
+        assert!(is_under("anything", ""));
+    }
+
+    #[test]
+    fn a_changed_filter_says_so_and_an_unchanged_one_does_not() {
+        let mut state = sample();
+        assert!(state.set_filter("a"));
+        assert!(!state.set_filter("a"));
+        assert_eq!(state.filter(), "a");
+    }
+
+    #[test]
+    fn dormant_files_are_listed_in_rank_order_under_the_filter() {
+        let mut state = HealthState::default();
+        state.requested(OperationId(20));
+        state.loaded(
+            OperationId(20),
+            Box::new(report(
+                vec![
+                    file("src/a.rs", 1, 99.0),
+                    dormant("src/b.rs", 2),
+                    dormant("docs/c.md", 3),
+                    dormant("src/d.rs", 4),
+                ],
+                true,
+            )),
+        );
+        assert_eq!(
+            paths(&state, state.dormant()),
+            ["src/b.rs", "docs/c.md", "src/d.rs"]
+        );
+        state.set_filter("src");
+        assert_eq!(paths(&state, state.dormant()), ["src/b.rs", "src/d.rs"]);
+        state.set_filter("nothing");
+        assert!(state.dormant().is_empty());
+    }
+
+    #[test]
+    fn the_heat_scale_is_the_hottest_file_of_the_whole_report() {
+        let mut state = HealthState::default();
+        let mut hot = file("hot.rs", 1, 99.0);
+        hot.heat = 8.0;
+        let mut warm = file("warm.rs", 2, 98.0);
+        warm.heat = 2.0;
+        state.requested(OperationId(21));
+        state.loaded(OperationId(21), Box::new(report(vec![hot, warm], true)));
+        assert!((state.max_heat() - 8.0).abs() < f64::EPSILON);
+        state.set_filter("warm");
+        assert!((state.max_heat() - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_selection_shows_its_file_and_survives_a_filter() {
+        let mut state = sample();
+        assert!(state.selected_file().is_none());
+        state.select("a/x.rs");
+        assert_eq!(state.selected(), Some("a/x.rs"));
+        assert_eq!(state.selected_file().unwrap().rank, 2);
+        state.set_filter("cold");
+        assert_eq!(state.selected_file().unwrap().path, "a/x.rs");
+    }
+
+    #[test]
+    fn a_selection_of_a_file_not_in_the_report_shows_nothing() {
+        let mut state = sample();
+        state.select("gone.rs");
+        assert_eq!(state.selected(), Some("gone.rs"));
+        assert!(state.selected_file().is_none());
+    }
+
+    #[test]
+    fn each_answer_refreshes_the_rows() {
+        let mut state = HealthState::default();
+        state.set_filter("src");
+        assert!(state.rows().is_empty());
+        state.requested(OperationId(22));
+        state.loaded(
+            OperationId(22),
+            Box::new(report(vec![file("src/a.rs", 1, 99.0)], false)),
+        );
+        assert_eq!(state.rows(), &[0]);
+        state.loaded(
+            OperationId(22),
+            Box::new(report(
+                vec![file("src/a.rs", 1, 99.0), file("src/b.rs", 2, 98.0)],
+                true,
+            )),
+        );
+        assert_eq!(state.rows(), &[0, 1]);
+    }
+
+    #[test]
+    fn clear_forgets_the_filter_and_the_selection() {
+        let mut state = sample();
+        state.set_filter("a");
+        state.select("a/x.rs");
+        state.clear();
+        assert_eq!(state.filter(), "");
+        assert_eq!(state.selected(), None);
+        assert!(state.rows().is_empty());
+        assert!(!state.has_report());
+    }
+
+    #[test]
+    fn heat_bars_scale_to_the_hottest_file() {
+        assert!((heat_share(2.0, 8.0) - 0.25).abs() < f64::EPSILON);
+        assert!((heat_share(9.0, 8.0) - 1.0).abs() < f64::EPSILON);
+        assert!(heat_share(1.0, 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn spark_bars_are_proportional_to_the_busiest_bar() {
+        let mut spark = [0; SPARK_BARS];
+        spark[0] = 10;
+        spark[1] = 5;
+        spark[2] = 1;
+        let heights = spark_heights(&spark, 16);
+        assert_eq!(heights[0], 16);
+        assert_eq!(heights[1], 8);
+        assert_eq!(heights[2], 1, "a bar with a commit is never empty");
+        assert_eq!(heights[3], 0);
+        assert_eq!(spark_heights(&[0; SPARK_BARS], 16), [0; SPARK_BARS]);
+    }
+
+    #[test]
+    fn trends_are_words() {
+        assert_eq!(trend_word(Trend::Rising), "rising");
+        assert_eq!(trend_word(Trend::Steady), "steady");
+        assert_eq!(trend_word(Trend::Falling), "falling");
+    }
+
+    #[test]
+    fn shares_round_to_the_nearest_and_the_hottest_file_never_claims_all() {
+        let first = file("a.rs", 1, 99.97);
+        assert_eq!(
+            rank_line(&first, 3604),
+            "Rank 1 of 3604 · hotter than 99% of files"
+        );
+        assert_eq!(percent_round(0.18), "18");
+        assert_eq!(percent_round(0.995), "100");
+    }
+
+    #[test]
+    fn a_partner_says_its_degree_and_its_shared_commits() {
+        let partner = Partner {
+            path: "src/billing/Ledger.java".to_owned(),
+            degree: 0.724,
+            shared_commits: 23,
+        };
+        assert_eq!(partner_text(&partner), "degree 0.72 · 23 shared commits");
+    }
+
+    #[test]
+    fn the_detail_sentences_read_as_the_brief_words_them() {
+        let mut hot = file("src/billing/Invoice.java", 3, 99.8);
+        hot.dormancy_break = None;
+        assert_eq!(
+            rank_line(&hot, 1240),
+            "Rank 3 of 1240 · hotter than 99% of files"
+        );
+        assert_eq!(
+            dormancy_text(&gm_schema::DormancyBreak {
+                quiet_active_days: 140,
+                recent_active_days: 5,
+            }),
+            "Quiet 140 active days, now changing on 5 of the last 30"
+        );
+        assert_eq!(
+            ownership_lines(&Ownership {
+                authors: 14,
+                top_author_share: 0.18,
+                minor_contributors: 9,
+            }),
+            [
+                "14 authors",
+                "Top author: 18% of commits",
+                "9 occasional authors"
+            ]
+        );
     }
 }

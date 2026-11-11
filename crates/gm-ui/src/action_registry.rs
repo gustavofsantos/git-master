@@ -216,6 +216,8 @@ pub enum Effect {
     OpenQuickOpen,
     /// Opens the Code page (N2).
     ShowCode,
+    /// Opens the Health tab of the Code page and asks for the code health.
+    ShowCodeHealth,
     /// Opens the text search page and puts the cursor in its box (N3).
     ShowSearch,
     /// Opens the Code page on a file of the worktree, at a line if given.
@@ -521,7 +523,7 @@ pub struct MemoryRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 121] = [
+const SPECS: [Spec; 122] = [
     spec(
         "file.stage",
         "Stage File",
@@ -918,6 +920,13 @@ const SPECS: [Spec; 121] = [
     spec(
         "code.show",
         "Show Code",
+        None,
+        ArgKind::None,
+        Category::Repository,
+    ),
+    spec(
+        "code.health",
+        "Show Code Health",
         None,
         ArgKind::None,
         Category::Repository,
@@ -1443,6 +1452,7 @@ pub enum Action {
     DeleteMergedBranches,
     QuickOpen,
     ShowCode,
+    ShowCodeHealth,
     ViewFile,
     MoveFileToBranch,
     MoveFileToWorktree,
@@ -1562,6 +1572,7 @@ fn navigation_effect(action: Action, args: &Args) -> Effect {
     match (action, args) {
         (Action::QuickOpen, _) => Effect::OpenQuickOpen,
         (Action::ShowCode, _) => Effect::ShowCode,
+        (Action::ShowCodeHealth, _) => Effect::ShowCodeHealth,
         (Action::SearchText, _) => Effect::ShowSearch,
         (Action::ViewFile, Args::File(path)) => Effect::ViewFile {
             path: path.clone(),
@@ -2022,7 +2033,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 121] = [
+    pub const ALL: [Action; 122] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -2081,6 +2092,7 @@ impl Action {
         Action::DeleteMergedBranches,
         Action::QuickOpen,
         Action::ShowCode,
+        Action::ShowCodeHealth,
         Action::ViewFile,
         Action::MoveFileToBranch,
         Action::MoveFileToWorktree,
@@ -2248,6 +2260,7 @@ impl Action {
             Action::ShowHistory
                 | Action::QuickOpen
                 | Action::ShowCode
+                | Action::ShowCodeHealth
                 | Action::SearchText
                 | Action::ViewFile
                 | Action::ShowWorkflows
@@ -2486,6 +2499,7 @@ impl Action {
             | Action::ShowHistory
             | Action::QuickOpen
             | Action::ShowCode
+            | Action::ShowCodeHealth
             | Action::SearchText
             | Action::ShowWorkflows
             | Action::ShowReflog
@@ -4303,7 +4317,7 @@ mod tests {
             root: None,
             ..ctx(&[], "")
         };
-        for action in [Action::QuickOpen, Action::ShowCode] {
+        for action in [Action::QuickOpen, Action::ShowCode, Action::ShowCodeHealth] {
             assert_eq!(
                 action.enabled(&Args::None, &closed),
                 Err("No repository is open.")
@@ -4312,6 +4326,13 @@ mod tests {
         assert_eq!(Action::QuickOpen.id(), "files.quick_open");
         assert_eq!(Action::QuickOpen.spec().shortcut, Some("⌘P"));
         assert_eq!(Action::ShowCode.id(), "code.show");
+        assert_eq!(
+            Action::ShowCodeHealth.plan(&Args::None, &ctx(&[], "")),
+            Ok(Effect::ShowCodeHealth)
+        );
+        assert_eq!(Action::ShowCodeHealth.id(), "code.health");
+        assert_eq!(Action::ShowCodeHealth.spec().title, "Show Code Health");
+        assert_eq!(Action::ShowCodeHealth.spec().shortcut, None);
         assert_eq!(
             Action::SearchText.plan(&Args::None, &ctx(&[], "")),
             Ok(Effect::ShowSearch)

@@ -61,7 +61,7 @@ impl Page {
             Screen::WorkingCopy | Screen::Conflicts => Some(Page::Changes),
             Screen::LocalReview => Some(Page::Review),
             Screen::History => Some(Page::History),
-            Screen::Code | Screen::Search => Some(Page::Code),
+            Screen::Code | Screen::Search | Screen::Health => Some(Page::Code),
             Screen::Threads | Screen::Labels => Some(Page::Agents),
             Screen::Workflows | Screen::Stashes | Screen::Reflog => None,
         }
@@ -143,13 +143,14 @@ pub(crate) struct Counts {
 mod tests {
     use super::*;
 
-    const SCREENS: [Screen; 12] = [
+    const SCREENS: [Screen; 13] = [
         Screen::Inbox,
         Screen::WorkingCopy,
         Screen::History,
         Screen::Workflows,
         Screen::Code,
         Screen::Search,
+        Screen::Health,
         Screen::Stashes,
         Screen::Reflog,
         Screen::Threads,
@@ -181,6 +182,7 @@ mod tests {
     #[test]
     fn search_is_part_of_code_and_labels_of_agents() {
         assert_eq!(Page::of(Screen::Search), Some(Page::Code));
+        assert_eq!(Page::of(Screen::Health), Some(Page::Code));
         assert_eq!(Page::of(Screen::Labels), Some(Page::Agents));
         assert_eq!(Page::of(Screen::Conflicts), Some(Page::Changes));
     }
