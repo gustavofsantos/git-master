@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-smoke/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-smoke/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette x-convert-hooks r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette x-convert-hooks r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor n-code-health)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -67,6 +67,13 @@ MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: t
 WF_EDITOR_X=982; WF_EDITOR_Y=650            # the blank area under the script's last line (window 900,600): a click there puts the caret at the end
 WF_TAB_RUNS_X=500; WF_TAB_RUNS_Y=180        # the Runs tab of the Workflows page (Script tab is the default)
 WF_FIRST_RUN_X=600; WF_FIRST_RUN_Y=240      # the first row of the Runs list
+HEALTH_CODE_X=120; HEALTH_CODE_Y=227        # "Code" row in the sidebar (window y 177)
+HEALTH_TAB_X=466; HEALTH_TAB_Y=108          # "Health" tab of the Code page (window 384,58)
+HEALTH_ROW_X=420; HEALTH_ROW_Y=217          # first hotspot row, src/hot.rs (rows 24 px apart, window y 167)
+HEALTH_MAP_X=1013; HEALTH_MAP_Y=188         # "Map" with the details panel open (window 931,138)
+HEALTH_LIST_X=973; HEALTH_LIST_Y=188        # "List" with the details panel open (window 891,138)
+HEALTH_LIST_CROP="720x540+240+116"          # the hotspots list or map, window-relative, panel open
+HEALTH_DETAIL_CROP="320x660+960+116"        # the file details panel, window-relative, opens on a selection
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -1119,6 +1126,12 @@ run_scenario() {
     echo "PASS  $LABEL"
     return
   fi
+  if [ "$base" = n-code-health ]; then
+    make_health_repo "$RUN_DIR/health"
+    scenario_code_health "$theme"
+    echo "PASS  $LABEL"
+    return
+  fi
   if [ "$base" = w-script-editor ]; then
     # A Lua workflow in the user's folder, written before the app lists them. Its shortcut runs it.
     write_script_fixture "$RUN_DIR/xdg-config/gitmaster/workflows"
@@ -1598,6 +1611,106 @@ scenario_commit_diff_split() {
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -lt 2000 ] || fail "the split layout was not kept across a restart ($differing pixels changed)"
+  stop_app
+}
+
+# --- 3n. Code health: the Health tab over thirty commits -----------------------
+# Thirty commits on consecutive days, ending yesterday, by two authors. src/hot.rs
+# changes in most of them, src/pair_a.rs and src/pair_b.rs change together in six,
+# docs/cold.md changes once at the start and src/deep.rs is deeply indented.
+make_health_repo() {
+  local repo="$1" i day author email
+  rm -rf "$repo"
+  mkdir -p "$repo/src" "$repo/docs"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.name "gm smoke"
+  git -C "$repo" config user.email "smoke@example.invalid"
+  git -C "$repo" config commit.gpgsign false
+  for i in $(seq 0 29); do
+    day="$(date -d "-$((30 - i)) days" +%Y-%m-%dT12:00:00)"
+    author="gm smoke"; email="smoke@example.invalid"
+    if [ $((i % 3)) -eq 1 ]; then author="gm smoke two"; email="smoke2@example.invalid"; fi
+    if [ "$i" -eq 0 ]; then
+      printf '# cold\n' > "$repo/docs/cold.md"
+      printf 'pub fn hot() {}\n' > "$repo/src/hot.rs"
+      printf 'fn deep() {\n\tif a {\n\t\tif b {\n\t\t\tif c {\n\t\t\t\tif d {\n\t\t\t\t\tif e {\n\t\t\t\t\t\tf();\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n' > "$repo/src/deep.rs"
+    fi
+    if [ $((i % 6)) -ne 5 ]; then
+      printf 'pub fn hot_%s() {}\n' "$i" >> "$repo/src/hot.rs"
+    else
+      printf '\t\t\t\t\t\t\t// step %s\n' "$i" >> "$repo/src/deep.rs"
+    fi
+    case " 3 9 14 20 25 28 " in
+      *" $i "*)
+        printf 'pub fn pair_a_%s() {}\n' "$i" >> "$repo/src/pair_a.rs"
+        printf 'pub fn pair_b_%s() {}\n' "$i" >> "$repo/src/pair_b.rs"
+        ;;
+    esac
+    git -C "$repo" add -A
+    GIT_AUTHOR_DATE="$day" GIT_COMMITTER_DATE="$day" \
+      git -C "$repo" -c user.name="$author" -c user.email="$email" commit -q -m "change $i"
+  done
+}
+
+# How many pixels differ inside one crop of two window screenshots.
+crop_changed() {
+  # $1, $2: window screenshots, $3: crop geometry (window-relative).
+  local differing
+  convert "$1" -crop "$3" +repage "$RUN_DIR/crop-a.png"
+  convert "$2" -crop "$3" +repage "$RUN_DIR/crop-b.png"
+  differing="$(compare -metric AE "$RUN_DIR/crop-a.png" "$RUN_DIR/crop-b.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  echo "$differing"
+}
+
+scenario_code_health() {
+  local repo="$RUN_DIR/health" theme="$1" tries status differing
+  local db="$repo/.git/gitmaster/health.db"
+  local list="$SMOKE_OUT/n-health-list-$theme.png" selected="$SMOKE_OUT/n-health-selected-$theme.png"
+  launch_app "$theme" "$repo"
+  xdotool mousemove "$HEALTH_CODE_X" "$HEALTH_CODE_Y" click 1; sleep 1
+  xdotool mousemove "$HEALTH_TAB_X" "$HEALTH_TAB_Y" click 1; sleep 1.5
+
+  # Opening the tab builds the index in the background: it is on disk within 20 s.
+  tries=0
+  until [ -s "$db" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 40 ] || fail "the code health index was not written to $db within 20 s"
+    sleep 0.5
+  done
+  status="$(git -C "$repo" status --porcelain)"
+  [ -z "$status" ] || fail "the Health tab wrote to the working tree:
+$status"
+
+  xdotool mousemove "$LIST_EMPTY_X" "$LIST_EMPTY_Y"; sleep 0.5
+  shoot "$list"
+
+  # The first hotspot row selects its file: the details panel fills in.
+  xdotool mousemove "$HEALTH_ROW_X" "$HEALTH_ROW_Y" click 1; sleep 1.5
+  shoot "$selected"
+  convert "$selected" -crop "$HEALTH_DETAIL_CROP" +repage "$SMOKE_OUT/n-health-detail-$theme.png"
+  differing="$(crop_changed "$list" "$selected" "$HEALTH_DETAIL_CROP")"
+  [ "$differing" -gt 2000 ] || fail "selecting the first hotspot did not fill the details panel ($differing pixels changed)"
+
+  # Map shows the same hotspots as boxes: the hotspot region must change.
+  xdotool mousemove "$HEALTH_MAP_X" "$HEALTH_MAP_Y" click 1; sleep 1.5
+  shoot "$SMOKE_OUT/n-health-map-$theme.png"
+  differing="$(crop_changed "$selected" "$SMOKE_OUT/n-health-map-$theme.png" "$HEALTH_LIST_CROP")"
+  [ "$differing" -gt 20000 ] || fail "Map did not replace the hotspot list ($differing pixels changed)"
+
+  # List comes back with the same selection; a click on the first row focuses the list,
+  # and Down selects the next file, so the details panel changes again.
+  xdotool mousemove "$HEALTH_LIST_X" "$HEALTH_LIST_Y" click 1; sleep 1.5
+  xdotool mousemove "$HEALTH_ROW_X" "$HEALTH_ROW_Y" click 1; sleep 1
+  shoot "$RUN_DIR/health-back.png"
+  differing="$(crop_changed "$selected" "$RUN_DIR/health-back.png" "$HEALTH_LIST_CROP")"
+  [ "$differing" -lt 2000 ] || fail "List did not come back to the same hotspots ($differing pixels changed)"
+
+  xdotool key Down; sleep 1
+  shoot "$RUN_DIR/health-down.png"
+  differing="$(crop_changed "$selected" "$RUN_DIR/health-down.png" "$HEALTH_DETAIL_CROP")"
+  [ "$differing" -gt 2000 ] || fail "Down did not select another file in the list ($differing pixels changed)"
   stop_app
 }
 
