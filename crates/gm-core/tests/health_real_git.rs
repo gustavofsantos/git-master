@@ -6,12 +6,14 @@ use std::sync::atomic::AtomicBool;
 
 use gm_core::Engine;
 use gm_core::git::SubprocessGit;
-use gm_core::health::ingest::{ingest, read_commits, resolve, window};
+use gm_core::health::ingest::{
+    first_parent_window, ingest, ingest_hunks, read_commits, resolve, window,
+};
 use gm_core::health::store::{HealthStore, db_path};
-use gm_core::health::{CommitRecord, FileChange};
+use gm_core::health::{CommitRecord, FileChange, Hunk};
 use gm_schema::{
-    Actor, Command as OpCommand, CommandKind, Event, HealthProgress, HealthReport, OperationId,
-    OperationState,
+    Actor, ChurnSummary, Command as OpCommand, CommandKind, Event, HealthProgress, HealthReport,
+    LineChurn, OperationId, OperationState,
 };
 use sha2::{Digest, Sha256};
 
@@ -519,4 +521,195 @@ fn a_bad_rev_fails_the_operation_with_a_message() {
             .iter()
             .all(|e| !matches!(e, Event::HealthLoaded { .. }))
     );
+}
+
+/// Commits a change (or nothing, with `--allow-empty`) as `ALICE` on day `day` after `T0`.
+fn commit_on_day(dir: &Path, day: i64, message: &str) {
+    git_at(
+        dir,
+        ALICE,
+        T0 + day * DAY,
+        &["commit", "-q", "--allow-empty", "-m", message],
+    );
+}
+
+/// `f.txt` of ten lines is added on day 0, two empty commits follow on days 1 and 2, then on day 3
+/// lines 4 to 6 are rewritten, and empty commits go on to day 16. The active days are the commits'
+/// days in order, so day 3 is the third active day after day 0 and "now" is day 16 (index 16).
+#[test]
+fn a_rewritten_line_is_counted_as_rewritten_and_the_others_are_alive_by_age() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(d)
+        .status()
+        .unwrap();
+    let original = (0..10)
+        .map(|i| format!("line {i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    write(d, "f.txt", original.as_bytes());
+    git_at(d, ALICE, T0, &["add", "f.txt"]);
+    commit_on_day(d, 0, "add f");
+    commit_on_day(d, 1, "filler 1");
+    commit_on_day(d, 2, "filler 2");
+
+    let rewritten: String = (0..10)
+        .map(|i| {
+            if (3..6).contains(&i) {
+                format!("new {i}\n")
+            } else {
+                format!("line {i}\n")
+            }
+        })
+        .collect();
+    write(d, "f.txt", rewritten.as_bytes());
+    git_at(d, ALICE, T0 + 3 * DAY, &["add", "f.txt"]);
+    git_at(
+        d,
+        ALICE,
+        T0 + 3 * DAY,
+        &["commit", "-q", "-m", "rewrite lines 4 to 6"],
+    );
+    for day in 4..=16 {
+        commit_on_day(d, day, &format!("filler {day}"));
+    }
+
+    let mut engine = engine_on(d);
+    let report = loaded(&run(&mut engine, 2, load_health(None))).clone();
+    assert!(report.complete);
+    let file = report.files.iter().find(|f| f.path == "f.txt").unwrap();
+    // The ten lines of day 0 are 16 active days old now, so all count as added. Three of them
+    // died on day 3, 3 active days after they were added: rewritten. The three lines of day 3
+    // are 13 days old, not yet 14: they are alive but not counted as added.
+    // Deaths: three at age 3 (bucket 0). Alive: three at age 13 (bucket 1), seven at age 16
+    // (bucket 2).
+    assert_eq!(
+        file.churn,
+        Some(LineChurn {
+            added: 10,
+            rewritten: 3,
+            deaths: [3, 0, 0, 0, 0, 0, 0],
+            alive: [0, 3, 7, 0, 0, 0, 0],
+        })
+    );
+    let summary = ChurnSummary::of(report.files.iter().filter_map(|f| f.churn.as_ref())).unwrap();
+    assert_eq!((summary.lines_added, summary.rewritten_14), (10, 3));
+    assert!((summary.rewritten_share - 0.3).abs() < 1e-9);
+    // Survival at 7 days: 13 lines were born, 3 died at age 3, so 10 of 13 are still alive.
+    assert!(
+        (summary.survival[0] - 10.0 / 13.0).abs() < 1e-9,
+        "{summary:?}"
+    );
+}
+
+#[test]
+fn a_side_branch_is_born_on_the_day_it_is_merged() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(d)
+        .status()
+        .unwrap();
+    write(d, "a.txt", b"a\n");
+    git_at(d, ALICE, T0, &["add", "a.txt"]);
+    git_at(d, ALICE, T0, &["commit", "-q", "-m", "root"]);
+    git_at(d, ALICE, T0 + DAY, &["checkout", "-q", "-b", "side"]);
+    write(d, "g.txt", b"g1\ng2\ng3\ng4\n");
+    git_at(d, ALICE, T0 + DAY, &["add", "g.txt"]);
+    git_at(d, ALICE, T0 + DAY, &["commit", "-q", "-m", "side work"]);
+    git_at(d, ALICE, T0 + 2 * DAY, &["checkout", "-q", "main"]);
+    commit_on_day(d, 2, "main work");
+    git_at(
+        d,
+        ALICE,
+        T0 + 3 * DAY,
+        &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+    );
+
+    // The side commit is not on the first-parent history: its lines are born on the merge day,
+    // which is the last active day (index 2: days 0, 2 and 3), so they are alive at age 0.
+    let mut engine = engine_on(d);
+    let report = loaded(&run(&mut engine, 2, load_health(None))).clone();
+    let g = report.files.iter().find(|f| f.path == "g.txt").unwrap();
+    assert_eq!(
+        g.churn,
+        Some(LineChurn {
+            added: 0,
+            rewritten: 0,
+            deaths: [0; 7],
+            alive: [4, 0, 0, 0, 0, 0, 0],
+        })
+    );
+}
+
+#[test]
+fn ingest_hunks_keeps_the_hunks_of_each_first_parent_commit_and_reads_each_once() {
+    let dir = fixture();
+    let d = dir.path();
+    let mut store = HealthStore::open(&db_path(&d.join(".git"))).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut calls = Vec::new();
+    let progress = ingest_hunks(d, &mut store, "HEAD", 0, &cancel, &mut |p| calls.push(p)).unwrap();
+    assert_eq!(
+        progress,
+        HealthProgress {
+            indexed: 4,
+            total: 4
+        }
+    );
+    assert_eq!(calls.last(), Some(&progress));
+
+    // The first-parent history of the merge: merge, bob edits spaced, bob edits a, root.
+    let shas = first_parent_window(d, "HEAD", 0).unwrap();
+    assert_eq!(shas.len(), 4);
+    let records = store.load_hunks(&shas).unwrap();
+    let by_subject = |text: &str| {
+        records
+            .iter()
+            .find(|c| subject(d, &c.sha) == text)
+            .unwrap_or_else(|| panic!("no commit {text}"))
+    };
+
+    // The merge against its first parent: the side's rename, with its content change.
+    let merge = by_subject("merge side");
+    let renamed = merge
+        .hunks
+        .iter()
+        .find(|h| h.path == "renamed.txt")
+        .expect("the rename");
+    assert_eq!(renamed.old_path.as_deref(), Some("a.txt"));
+
+    // Bob added one line after line 2 of a.txt: an insertion with no removed line.
+    let bob = by_subject("bob edits a");
+    assert_eq!(
+        bob.hunks,
+        vec![Hunk {
+            path: "a.txt".to_owned(),
+            old_path: None,
+            old_start: 2,
+            old_count: 0,
+            new_start: 3,
+            new_count: 1,
+        }]
+    );
+
+    // A binary file is a marker that forgets its lines; the root commit's diff is read.
+    let root = by_subject("root");
+    assert!(root.hunks.contains(&Hunk {
+        path: "logo.bin".to_owned(),
+        old_path: None,
+        old_start: 0,
+        old_count: 0,
+        new_start: 0,
+        new_count: 0,
+    }));
+    assert!(root.hunks.iter().any(|h| h.path == "my file.txt"));
+
+    let mut again = Vec::new();
+    let progress = ingest_hunks(d, &mut store, "HEAD", 0, &cancel, &mut |p| again.push(p)).unwrap();
+    assert_eq!(progress.indexed, 4);
+    assert_eq!(again, vec![progress]);
 }

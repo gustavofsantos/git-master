@@ -2,16 +2,16 @@
 //! filled and the indicators computed on a thread of its own, as the provenance blame is (D144).
 //! Its answer is dropped by `id` when the read was superseded.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use gm_schema::{HealthProgress, HealthReport, OperationId};
+use gm_schema::{HealthProgress, HealthReport, LineChurn, OperationId};
 
 use crate::health::store::HealthStore;
-use crate::health::{DAY_SECS, HealthConfig, ingest, metrics};
+use crate::health::{CommitRecord, DAY_SECS, HealthConfig, churn, ingest, metrics};
 
 /// The newest days of the window are indexed first, so the report of the recent commits comes
 /// early; the rest of the window follows (see `HealthJob::run`).
@@ -88,6 +88,16 @@ impl HealthJob {
                 },
             )?;
         }
+        ingest::ingest_hunks(
+            &self.root,
+            &mut store,
+            &self.sha,
+            since,
+            &self.stop,
+            &mut |progress| {
+                update(HealthUpdate::Progress(progress));
+            },
+        )?;
         self.report(&store)
     }
 
@@ -102,13 +112,43 @@ impl HealthJob {
         let window = ingest::window(&self.root, &self.sha, self.since())?;
         let commits = store.load(&window)?;
         let live = self.live_files()?;
-        let files = metrics::compute(&commits, &self.config, Some(&live));
+        let mut files = metrics::compute(&commits, &self.config, Some(&live));
+        if let Some(churn) = self.churn(store, &commits)? {
+            for file in &mut files {
+                file.churn = churn.get(&file.path).cloned();
+            }
+        }
         Ok(HealthReport {
             rev: self.sha.clone(),
             config_hash: self.config_hash.clone(),
             complete: commits.len() == window.len(),
             files,
         })
+    }
+
+    /// The churn of each file, from the hunks of the first-parent window (D228). `None` until the
+    /// index holds the hunks of every commit of that window, so a partial report has no churn.
+    fn churn(
+        &self,
+        store: &HealthStore,
+        commits: &[CommitRecord],
+    ) -> Result<Option<HashMap<String, LineChurn>>, String> {
+        let fp = ingest::first_parent_window(&self.root, &self.sha, self.since())?;
+        if !store.missing_hunks(&fp)?.is_empty() {
+            return Ok(None);
+        }
+        let mut hunks = store.load_hunks(&fp)?;
+        hunks.reverse();
+        let times: HashMap<&str, i64> = commits.iter().map(|c| (c.sha.as_str(), c.day())).collect();
+        let mut kept = Vec::with_capacity(hunks.len());
+        let mut days = Vec::with_capacity(hunks.len());
+        for commit in hunks {
+            if let Some(&day) = times.get(commit.sha.as_str()) {
+                days.push(day);
+                kept.push(commit);
+            }
+        }
+        Ok(Some(churn::follow(&kept, &days, &self.config)))
     }
 
     /// The paths of the files the commit holds (`git ls-tree`).

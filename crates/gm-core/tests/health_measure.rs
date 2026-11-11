@@ -1,4 +1,4 @@
-//! Measures code health on a real repository (slice 6h). Ignored by default; run it in a
+//! Measures code health on a real repository (slice 6h, D228). Ignored by default; run it in a
 //! release build against any repository:
 //!
 //! ```sh
@@ -6,13 +6,18 @@
 //! ```
 //!
 //! It indexes the window of HEAD into a temporary `health.db` (the repository is only read),
-//! then times a second, incremental pass, the load of the window and the indicators.
+//! then times a second, incremental pass, the load of the window and the indicators. Then it
+//! indexes the hunks of the first-parent window, times a second pass, the replay of the lines
+//! (`churn::follow`) and prints the churn of the files that exist at HEAD.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use gm_core::health::{DAY_SECS, HealthConfig, config, ingest, metrics, store::HealthStore};
+use gm_core::health::{DAY_SECS, HealthConfig, churn, config, ingest, metrics, store::HealthStore};
+use gm_schema::ChurnSummary;
 
 #[test]
 #[ignore = "measures a real repository named by GM_HEALTH_REPO"]
@@ -63,4 +68,60 @@ fn measure_health_on_a_real_repository() {
             file.rank, file.heat, file.trend, file.path
         );
     }
+
+    // Churn (D228): the hunks of the first-parent window, replayed.
+    let started = Instant::now();
+    let hunks_progress =
+        ingest::ingest_hunks(&root, &mut store, &sha, since, &stop, &mut |_| {}).expect("hunks");
+    let hunks_cold = started.elapsed();
+
+    let started = Instant::now();
+    ingest::ingest_hunks(&root, &mut store, &sha, since, &stop, &mut |_| {}).expect("hunks again");
+    let hunks_warm = started.elapsed();
+
+    let fp = ingest::first_parent_window(&root, &sha, since).expect("first-parent window");
+    let mut hunks = store.load_hunks(&fp).expect("load hunks");
+    hunks.reverse();
+    let days: HashMap<&str, i64> = commits.iter().map(|c| (c.sha.as_str(), c.day())).collect();
+    let mut kept = Vec::with_capacity(hunks.len());
+    let mut kept_days = Vec::with_capacity(hunks.len());
+    for commit in hunks {
+        if let Some(&day) = days.get(commit.sha.as_str()) {
+            kept_days.push(day);
+            kept.push(commit);
+        }
+    }
+    let hunk_count: usize = kept.iter().map(|c| c.hunks.len()).sum();
+
+    let started = Instant::now();
+    let followed = churn::follow(&kept, &kept_days, &config);
+    let follow = started.elapsed();
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-tree", "-r", "-z", "--name-only", &sha])
+        .output()
+        .expect("git ls-tree");
+    let live: HashSet<String> = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let at_head = followed
+        .iter()
+        .filter(|(path, _)| live.contains(path.as_str()));
+    let summary = ChurnSummary::of(at_head.map(|(_, churn)| churn));
+
+    eprintln!(
+        "hunks: {} first-parent commits, {hunk_count} hunks, {} files followed",
+        fp.len(),
+        followed.len()
+    );
+    eprintln!(
+        "hunks cold index: {hunks_cold:.2?}; incremental pass: {hunks_warm:.2?} ({} commits in the window)",
+        hunks_progress.total
+    );
+    eprintln!("churn replay: {follow:.2?}");
+    eprintln!("churn of the files at HEAD: {summary:?}");
 }

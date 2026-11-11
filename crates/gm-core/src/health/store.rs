@@ -12,10 +12,12 @@ use std::time::Duration;
 
 use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
 
-use super::{CommitRecord, FileChange};
+use super::{CommitRecord, FileChange, FirstParentCommit, Hunk};
 
-/// Schema version written to `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+/// Schema version written to `PRAGMA user_version`. Version 1 holds the commits and their
+/// changes; version 2 adds the hunk headers of the first-parent commits (D228); version 3 adds
+/// the binary marker to those hunks, so version 2's hunks are emptied and read again.
+const SCHEMA_VERSION: i64 = 3;
 /// How long a writer waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Keys per query. Well under SQLite's bound-parameter limit.
@@ -37,6 +39,24 @@ CREATE TABLE changes (
     deleted INTEGER
 );
 CREATE INDEX changes_by_sha ON changes(sha);
+";
+
+/// Added by version 2: the first-parent commits whose hunks are stored (a row counts even
+/// when the commit has none), and their hunk headers in order (`seq`). `parent` is written
+/// as NULL: the replay needs no parent, and the column is kept for a later need.
+const SCHEMA_V2: &str = "
+CREATE TABLE fp_commits (sha TEXT PRIMARY KEY, parent TEXT) WITHOUT ROWID;
+CREATE TABLE hunks (
+    sha TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    path_id INTEGER NOT NULL,
+    old_path_id INTEGER,
+    old_start INTEGER NOT NULL,
+    old_count INTEGER NOT NULL,
+    new_start INTEGER NOT NULL,
+    new_count INTEGER NOT NULL
+);
+CREATE INDEX hunks_by_sha ON hunks(sha);
 ";
 
 /// The index file of a repository: `<common_dir>/gitmaster/health.db`.
@@ -131,7 +151,7 @@ impl HealthStore {
 
     /// The shas of `shas` that the index does not hold, in the input order.
     pub fn missing(&self, shas: &[String]) -> Result<Vec<String>, String> {
-        let known = self.known(shas)?;
+        let known = self.known("commits", shas)?;
         Ok(shas
             .iter()
             .filter(|sha| !known.contains(sha.as_str()))
@@ -218,14 +238,141 @@ impl HealthStore {
             .collect())
     }
 
-    /// The shas of `shas` that the index holds, as a set.
-    fn known(&self, shas: &[String]) -> Result<HashSet<String>, String> {
+    /// Inserts the first-parent commits that the index does not hold yet, with their hunks,
+    /// in one transaction. A commit already held keeps the hunks it has. Returns how many
+    /// commits were new.
+    pub fn insert_hunks(&mut self, commits: &[FirstParentCommit]) -> Result<usize, String> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let mut paths = HashMap::new();
+        let mut new = 0;
+        for commit in commits {
+            let inserted = tx
+                .prepare_cached("INSERT OR IGNORE INTO fp_commits (sha, parent) VALUES (?1, NULL)")
+                .map_err(|e| e.to_string())?
+                .execute([&commit.sha])
+                .map_err(|e| e.to_string())?;
+            if inserted == 0 {
+                continue;
+            }
+            new += 1;
+            for (seq, hunk) in commit.hunks.iter().enumerate() {
+                let seq = i64::try_from(seq).map_err(|e| e.to_string())?;
+                let path_id = intern(&tx, &mut paths, &hunk.path)?;
+                let old_path_id = hunk
+                    .old_path
+                    .as_deref()
+                    .map(|old| intern(&tx, &mut paths, old))
+                    .transpose()?;
+                tx.prepare_cached(
+                    "INSERT INTO hunks (sha, seq, path_id, old_path_id, old_start, old_count,
+                                        new_start, new_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .map_err(|e| e.to_string())?
+                .execute(params![
+                    commit.sha,
+                    seq,
+                    path_id,
+                    old_path_id,
+                    i64::from(hunk.old_start),
+                    i64::from(hunk.old_count),
+                    i64::from(hunk.new_start),
+                    i64::from(hunk.new_count),
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(new)
+    }
+
+    /// The shas of `shas` whose hunks the index does not hold, in the input order.
+    pub fn missing_hunks(&self, shas: &[String]) -> Result<Vec<String>, String> {
+        let known = self.known("fp_commits", shas)?;
+        Ok(shas
+            .iter()
+            .filter(|sha| !known.contains(sha.as_str()))
+            .cloned()
+            .collect())
+    }
+
+    /// The first-parent commits of `shas` that the index holds, in the input order, each with
+    /// its hunks in order. Unknown shas are skipped.
+    pub fn load_hunks(&self, shas: &[String]) -> Result<Vec<FirstParentCommit>, String> {
+        let known = self.known("fp_commits", shas)?;
+        let mut present: Vec<String> = shas
+            .iter()
+            .filter(|sha| known.contains(sha.as_str()))
+            .cloned()
+            .collect();
+        present.sort_unstable();
+        present.dedup();
+        let mut hunks: HashMap<String, Vec<Hunk>> = HashMap::new();
+        for chunk in present.chunks(CHUNK) {
+            let mut stmt = self
+                .conn
+                .prepare_cached(&format!(
+                    "{} ORDER BY h.seq",
+                    in_list(
+                        "SELECT h.sha, p.path, o.path, h.old_start, h.old_count,
+                                h.new_start, h.new_count
+                         FROM hunks h
+                         JOIN paths p ON p.id = h.path_id
+                         LEFT JOIN paths o ON o.id = h.old_path_id
+                         WHERE h.sha IN",
+                        chunk.len(),
+                    )
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        [
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ],
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (sha, path, old_path, [old_start, old_count, new_start, new_count]) =
+                    row.map_err(|e| e.to_string())?;
+                hunks.entry(sha).or_default().push(Hunk {
+                    path,
+                    old_path,
+                    old_start: hunk_number(old_start)?,
+                    old_count: hunk_number(old_count)?,
+                    new_start: hunk_number(new_start)?,
+                    new_count: hunk_number(new_count)?,
+                });
+            }
+        }
+        Ok(shas
+            .iter()
+            .filter(|sha| known.contains(sha.as_str()))
+            .map(|sha| FirstParentCommit {
+                sha: sha.clone(),
+                hunks: hunks.get(sha).cloned().unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// The shas of `shas` that `table` (`commits` or `fp_commits`) holds, as a set.
+    fn known(&self, table: &str, shas: &[String]) -> Result<HashSet<String>, String> {
         let mut known = HashSet::new();
         for chunk in shas.chunks(CHUNK) {
             let mut stmt = self
                 .conn
                 .prepare_cached(&in_list(
-                    "SELECT sha FROM commits WHERE sha IN",
+                    &format!("SELECT sha FROM {table} WHERE sha IN"),
                     chunk.len(),
                 ))
                 .map_err(|e| e.to_string())?;
@@ -245,6 +392,11 @@ impl HealthStore {
 /// A stored line count: `NULL` for a binary file.
 fn count(value: Option<i64>) -> Option<u32> {
     value.and_then(|v| u32::try_from(v).ok())
+}
+
+/// A stored hunk number, which is never negative.
+fn hunk_number(value: i64) -> Result<u32, String> {
+    u32::try_from(value).map_err(|_| format!("the index holds a hunk number of {value}"))
 }
 
 /// The id of `path` in `paths`, added when new. `cache` spares the lookups of one insert.
@@ -276,8 +428,9 @@ fn prepare(conn: &mut Connection) -> Result<(), String> {
     migrate(conn)
 }
 
-/// Creates the schema of a new file. Runs in an immediate transaction, so two processes
-/// opening a new file create it once.
+/// Creates the schema of a new file, or brings an older one up to `SCHEMA_VERSION` and keeps
+/// its rows. Runs in an immediate transaction, so two processes opening the same file migrate
+/// it once.
 fn migrate(conn: &mut Connection) -> Result<(), String> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -285,18 +438,26 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
     let version: i64 = tx
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
-    match version {
-        0 => {
-            tx.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(|e| e.to_string())?;
-        }
-        SCHEMA_VERSION => {}
-        other => {
-            return Err(format!(
-                "the health index has schema version {other}; this build reads {SCHEMA_VERSION}"
-            ));
-        }
+    if !(0..=SCHEMA_VERSION).contains(&version) {
+        return Err(format!(
+            "the health index has schema version {version}; this build reads {SCHEMA_VERSION}"
+        ));
+    }
+    if version < 1 {
+        tx.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    }
+    if version < 2 {
+        tx.execute_batch(SCHEMA_V2).map_err(|e| e.to_string())?;
+    }
+    if version == 2 {
+        // Hunks read before the binary marker existed lack it: they are read again. The
+        // numstat rows are kept.
+        tx.execute_batch("DELETE FROM hunks; DELETE FROM fp_commits;")
+            .map_err(|e| e.to_string())?;
+    }
+    if version != SCHEMA_VERSION {
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())
 }
@@ -460,5 +621,114 @@ mod tests {
         assert_eq!(loaded.len(), 200_000);
         assert!(loaded.iter().all(|c| c.changes.len() == 5));
         assert!(elapsed < Duration::from_secs(20), "load took {elapsed:?}");
+    }
+
+    fn hunk(path: &str, old_start: u32, old_count: u32, new_count: u32) -> Hunk {
+        Hunk {
+            path: path.to_owned(),
+            old_path: None,
+            old_start,
+            old_count,
+            new_start: old_start,
+            new_count,
+        }
+    }
+
+    fn first_parent(i: usize, hunks: Vec<Hunk>) -> FirstParentCommit {
+        FirstParentCommit { sha: sha(i), hunks }
+    }
+
+    #[test]
+    fn first_parent_hunks_round_trip_in_order_with_renames_and_empty_commits() {
+        let mut store = HealthStore::open_in_memory().unwrap();
+        let rename_only = Hunk {
+            old_path: Some("old name.txt".to_owned()),
+            ..hunk("new name.txt", 0, 0, 0)
+        };
+        let renamed = Hunk {
+            old_path: Some("a.txt".to_owned()),
+            ..hunk("b.txt", 2, 1, 3)
+        };
+        let first = first_parent(1, vec![hunk("ünï/x.rs", 0, 0, 4), rename_only, renamed]);
+        let empty = first_parent(2, Vec::new());
+        assert_eq!(
+            store.insert_hunks(&[first.clone(), empty.clone()]).unwrap(),
+            2
+        );
+
+        assert!(store.missing_hunks(&[sha(1), sha(2)]).unwrap().is_empty());
+        assert_eq!(
+            store.missing_hunks(&[sha(3), sha(2), sha(1)]).unwrap(),
+            vec![sha(3)]
+        );
+        let loaded = store.load_hunks(&[sha(2), sha(9), sha(1)]).unwrap();
+        assert_eq!(loaded, vec![empty, first]);
+    }
+
+    #[test]
+    fn inserting_hunks_again_keeps_the_first_ones() {
+        let mut store = HealthStore::open_in_memory().unwrap();
+        let first = first_parent(1, vec![hunk("a.txt", 1, 2, 3)]);
+        assert_eq!(store.insert_hunks(std::slice::from_ref(&first)).unwrap(), 1);
+        let again = first_parent(1, vec![hunk("a.txt", 5, 5, 5), hunk("b.txt", 1, 1, 1)]);
+        assert_eq!(store.insert_hunks(&[again, first.clone()]).unwrap(), 0);
+        assert_eq!(store.load_hunks(&[sha(1)]).unwrap(), vec![first]);
+        assert_eq!(row_count(&store, "hunks"), 1);
+    }
+
+    #[test]
+    fn a_version_one_file_migrates_to_version_two_and_keeps_its_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let record = commit(1, vec![change("a.txt"), change("b.txt")]);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            let mut old = HealthStore { conn };
+            assert_eq!(old.insert(std::slice::from_ref(&record)).unwrap(), 1);
+        }
+
+        let store = HealthStore::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(store.load(&[sha(1)]).unwrap(), vec![record]);
+        assert_eq!(store.missing(&[sha(1)]).unwrap(), Vec::<String>::new());
+        assert_eq!(store.missing_hunks(&[sha(1)]).unwrap(), vec![sha(1)]);
+        assert!(store.load_hunks(&[sha(1)]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_version_two_file_keeps_its_commits_and_empties_its_hunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let record = commit(1, vec![change("a.txt")]);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            let mut old = HealthStore { conn };
+            old.insert(std::slice::from_ref(&record)).unwrap();
+            old.insert_hunks(&[first_parent(1, vec![hunk("a.txt", 0, 0, 1)])])
+                .unwrap();
+            assert_eq!(row_count(&old, "hunks"), 1);
+        }
+
+        let store = HealthStore::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        assert_eq!(store.load(&[sha(1)]).unwrap(), vec![record]);
+        assert_eq!(row_count(&store, "hunks"), 0);
+        assert_eq!(row_count(&store, "fp_commits"), 0);
+        assert_eq!(store.missing_hunks(&[sha(1)]).unwrap(), vec![sha(1)]);
     }
 }

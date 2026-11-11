@@ -6,6 +6,7 @@
 //! a pure function of the commits of the window and the effective configuration
 //! (`config`), so the same commit and configuration always give the same answer.
 
+pub mod churn;
 pub mod config;
 pub mod ingest;
 pub mod metrics;
@@ -25,6 +26,32 @@ pub struct FileChange {
     pub added: Option<u32>,
     /// Lines deleted; `None` for a binary file.
     pub deleted: Option<u32>,
+}
+
+/// One hunk header of a diff, as `git log -p -U0 -M` reports it (D228). A rename with no
+/// content change is one hunk with all four numbers 0 and `old_path` set. A hunk with all four
+/// numbers 0 and `old_path` None is a marker: the file was binary on one side of this commit;
+/// its known lines are forgotten.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hunk {
+    /// The path after the commit.
+    pub path: String,
+    /// The path before the commit, when it differs from `path`.
+    pub old_path: Option<String>,
+    /// 1-based first line of the removed range; with `old_count` 0, the line after which
+    /// the new lines go (0 for the top of the file).
+    pub old_start: u32,
+    pub old_count: u32,
+    /// 1-based first line of the added range.
+    pub new_start: u32,
+    pub new_count: u32,
+}
+
+/// The hunks of one first-parent commit against its first parent, in diff order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirstParentCommit {
+    pub sha: String,
+    pub hunks: Vec<Hunk>,
 }
 
 /// One commit of the index. A merge commit has no `changes` (D225 (3)).
