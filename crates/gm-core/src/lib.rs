@@ -37,6 +37,7 @@ mod restack_session;
 pub mod review;
 mod review_session;
 pub mod review_store;
+mod revision_range;
 mod runner;
 pub mod scorecards;
 pub mod script;

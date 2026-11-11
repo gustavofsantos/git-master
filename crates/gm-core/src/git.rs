@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
     BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
-    FileDiff, Hunk, HunkId, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate, RecordedResolution,
-    ReflogEntry, RepoStatus, StageTarget, StashEntry, StatusEntry, SubmoduleDetail, WorktreeEntry,
-    WorktreeMode,
+    FileDiff, Hunk, HunkId, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate, RangeMode,
+    RecordedResolution, ReflogEntry, RepoStatus, RevisionRange, StageTarget, StashEntry,
+    StatusEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
 };
 
 use crate::blame;
@@ -32,7 +32,7 @@ use crate::grep::{self, Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::port::{
     BlameRead, CommitPresence, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs,
-    RemoteRun, Rewrite, ScriptRemote, StackRead,
+    RangeRead, RemoteRun, Rewrite, ScriptRemote, StackRead,
 };
 use crate::port::{
     ConfigScope, ConfigValue, DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge,
@@ -40,6 +40,7 @@ use crate::port::{
 use crate::reflog;
 use crate::remote;
 use crate::restack::{ReplayKind, Replayed};
+use crate::revision_range;
 use crate::stack::{self, EdgeFacts, StackLink};
 use crate::stage_math;
 use crate::stash;
@@ -198,6 +199,18 @@ impl SubprocessGit {
         args: &[&str],
         stop: &AtomicBool,
     ) -> Result<Vec<u8>, GitError> {
+        self.run_stoppable_codes(root, args, stop, &[0])
+    }
+
+    /// `run_stoppable` for a command whose exit codes in `ok_codes` are all answers
+    /// (`merge-base` exits 1 when there is no common ancestor).
+    fn run_stoppable_codes(
+        &self,
+        root: &Path,
+        args: &[&str],
+        stop: &AtomicBool,
+        ok_codes: &[i32],
+    ) -> Result<Vec<u8>, GitError> {
         const POLL: Duration = Duration::from_millis(5);
         let superseded = || GitError("the commit read was superseded".into());
         if stop.load(Ordering::SeqCst) {
@@ -234,7 +247,33 @@ impl SubprocessGit {
             stdout: out.join().unwrap_or_default(),
             stderr: err.join().unwrap_or_default(),
         };
-        Self::checked(output, &[0])
+        Self::checked(output, ok_codes)
+    }
+
+    /// The full id of revision `rev`, as the commit it names. `side` (`from` or `to`)
+    /// is put before git's message when the revision does not resolve.
+    fn resolve_revision(
+        &self,
+        root: &Path,
+        side: &str,
+        rev: &str,
+        stop: &AtomicBool,
+    ) -> Result<String, GitError> {
+        let spec = format!("{rev}^{{commit}}");
+        let raw = self
+            .run_stoppable(
+                root,
+                &["rev-parse", "--verify", "--end-of-options", &spec],
+                stop,
+            )
+            .map_err(|error| GitError(format!("{side}: {}", error.0)))?;
+        revision_range::one_id(&raw)
+    }
+
+    /// The abbreviated id Git prints for the full id `oid`.
+    fn short_id(&self, root: &Path, oid: &str, stop: &AtomicBool) -> Result<String, GitError> {
+        let raw = self.run_stoppable(root, &["rev-parse", "--short", oid], stop)?;
+        revision_range::one_id(&raw)
     }
 
     /// The gitlinks of the index: the submodules of the repository (D175). Read
@@ -2124,6 +2163,114 @@ impl GitPort for SubprocessGit {
                 oid.as_str(),
             ];
             let raw = git.run_stoppable(&root, &args, stop)?;
+            commit_diff::parse_stack(&files, &raw)
+        }))
+    }
+
+    /// The changes between revisions `from` and `to` (D231). Both resolve to full ids
+    /// first; the base is `from` or the merge base of the two; one `git diff` of the
+    /// base to `to` lists the files, and the totals cover all of them. Revisions that
+    /// are empty or start with `-` are refused before git runs. Stoppable, and not
+    /// logged (D28).
+    fn revision_range(
+        &self,
+        root: &Path,
+        from: &str,
+        to: &str,
+        mode: RangeMode,
+    ) -> Result<RangeRead, GitError> {
+        revision_range::check_revision("from", from)?;
+        revision_range::check_revision("to", to)?;
+        let git = self.clone();
+        let root = root.to_path_buf();
+        let from = from.to_owned();
+        let to = to.to_owned();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            let from_oid = git.resolve_revision(&root, "from", &from, stop)?;
+            let to_oid = git.resolve_revision(&root, "to", &to, stop)?;
+            let from_short = git.short_id(&root, &from_oid, stop)?;
+            let to_short = git.short_id(&root, &to_oid, stop)?;
+            let merge_base = match mode {
+                RangeMode::Direct => None,
+                // Git exits 1, and prints nothing, when the two share no history.
+                RangeMode::SinceCommonAncestor => {
+                    let raw = git.run_stoppable_codes(
+                        &root,
+                        &["merge-base", &from_oid, &to_oid],
+                        stop,
+                        &[0, 1],
+                    )?;
+                    revision_range::merge_base_from(&raw)?
+                }
+            };
+            let base = revision_range::base_of(mode, &from, &to, &from_oid, merge_base)?;
+            let raw = git.run_stoppable(
+                &root,
+                &[
+                    "diff",
+                    "--raw",
+                    "-z",
+                    "--numstat",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "-M",
+                    "--end-of-options",
+                    &base,
+                    &to_oid,
+                ],
+                stop,
+            )?;
+            let listed = revision_range::listing(commit_detail::parse_all_files(&raw)?);
+            Ok(RevisionRange {
+                from_oid,
+                to_oid: to_oid.clone(),
+                from_short,
+                to_short,
+                base,
+                tip: to_oid,
+                files: listed.files,
+                more_files: listed.more_files,
+                added: listed.added,
+                deleted: listed.deleted,
+            })
+        }))
+    }
+
+    /// The diffs of the files between the full ids `base` and `tip` (D231 (4)), in one
+    /// `git diff` with the flags of `commit_stack`. The patch lists the files in the
+    /// order of the listing `revision_range` made, so `commit_diff::parse_stack` pairs
+    /// them by position. Stoppable, and not logged (D28).
+    fn revision_stack(
+        &self,
+        root: &Path,
+        base: &str,
+        tip: &str,
+        files: &[CommitFile],
+    ) -> Result<StackRead, GitError> {
+        require_commit_id(base)?;
+        require_commit_id(tip)?;
+        let git = self.clone();
+        let root = root.to_path_buf();
+        let base = base.to_owned();
+        let tip = tip.to_owned();
+        let files = files.to_vec();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            let raw = git.run_stoppable(
+                &root,
+                &[
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--histogram",
+                    "-U3",
+                    "--patch",
+                    "-M",
+                    "--end-of-options",
+                    &base,
+                    &tip,
+                ],
+                stop,
+            )?;
             commit_diff::parse_stack(&files, &raw)
         }))
     }

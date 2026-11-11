@@ -18,6 +18,7 @@ use crate::files::{
 use crate::health_session::{HealthJob, HealthOutcome, HealthUpdate};
 use crate::history::HistoryReport;
 use crate::remote::RemoteReport;
+use crate::revision_range::RangeReport;
 use crate::script::run::ScriptEvent;
 use crate::script_session::{EffectRequest, ScriptLink, ScriptReport};
 use crate::threads_session::{ProvenanceJob, ProvenanceReport};
@@ -32,6 +33,10 @@ enum Message {
     History(HistoryReport),
     Detail(DetailReport),
     Stack(StackReport),
+    /// A revision range was read (D231). Its answer goes to the engine as the others do.
+    Range(RangeReport),
+    /// The diffs of a revision range were read (D231 (4)).
+    RevisionStack(StackReport),
     Remote(RemoteReport),
     /// The file list was read. The sender is for the search that waited for it.
     Index(IndexReport, Sender<Message>),
@@ -227,6 +232,14 @@ fn run(
                 let events = engine.stack_report(report);
                 broadcast(events, &mut subscribers);
             }
+            Message::Range(report) => {
+                let events = engine.range_report(report);
+                broadcast(events, &mut subscribers);
+            }
+            Message::RevisionStack(report) => {
+                let events = engine.revision_stack_report(report);
+                broadcast(events, &mut subscribers);
+            }
             Message::Remote(report) => {
                 let events = engine.remote_report(report);
                 broadcast(events, &mut subscribers);
@@ -301,6 +314,26 @@ fn spawn_read_jobs(engine: &mut Engine, reports: &Sender<Message>) {
                 let _ = reports.send_blocking(Message::Stack(report));
             })
             .expect("spawn a stack thread");
+    }
+    for job in engine.take_range_jobs() {
+        let reports = reports.clone();
+        std::thread::Builder::new()
+            .name("gm-range".into())
+            .spawn(move || {
+                let report = job.run();
+                let _ = reports.send_blocking(Message::Range(report));
+            })
+            .expect("spawn a range thread");
+    }
+    for job in engine.take_revision_stack_jobs() {
+        let reports = reports.clone();
+        std::thread::Builder::new()
+            .name("gm-revision-stack".into())
+            .spawn(move || {
+                let report = job.run();
+                let _ = reports.send_blocking(Message::RevisionStack(report));
+            })
+            .expect("spawn a revision stack thread");
     }
     for job in engine.take_remote_jobs() {
         let reports = reports.clone();

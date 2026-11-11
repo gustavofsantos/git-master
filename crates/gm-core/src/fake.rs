@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, CommitSummary, ConflictFileRead, FileDiff, GrepResult,
-    History, ReflogEntry, RepoStatus, StashEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
+    History, RangeMode, ReflogEntry, RepoStatus, RevisionRange, StashEntry, SubmoduleDetail,
+    WorktreeEntry, WorktreeMode,
 };
 
 use crate::blame::BlameLine;
@@ -14,7 +15,8 @@ use crate::file_index::FileIndex;
 use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
 use crate::port::{
-    BlameRead, CommitPresence, DetailRead, FileListRead, GrepRead, HistoryRevs, Rewrite, StackRead,
+    BlameRead, CommitPresence, DetailRead, FileListRead, GrepRead, HistoryRevs, RangeRead, Rewrite,
+    StackRead,
 };
 use crate::stack::{EdgeFacts, StackLink};
 use crate::{GitError, GitPort};
@@ -39,6 +41,7 @@ pub struct FakeGit {
     history: Arc<Mutex<Result<History, GitError>>>,
     detail: Arc<Mutex<Result<CommitDetail, GitError>>>,
     stack: Arc<Mutex<Result<Vec<FileDiff>, GitError>>>,
+    range: Arc<Mutex<Result<RevisionRange, GitError>>>,
     files: Arc<Mutex<Result<Vec<String>, GitError>>>,
     grep: Arc<Mutex<Result<GrepResult, GitError>>>,
     /// The text searches git was asked for, in order.
@@ -84,6 +87,7 @@ impl FakeGit {
             history: Arc::new(Mutex::new(Ok(History::default()))),
             detail: Arc::new(Mutex::new(Ok(CommitDetail::default()))),
             stack: Arc::new(Mutex::new(Ok(Vec::new()))),
+            range: Arc::new(Mutex::new(Ok(RevisionRange::default()))),
             files: Arc::new(Mutex::new(Ok(Vec::new()))),
             grep: Arc::new(Mutex::new(Ok(GrepResult::default()))),
             greps: Arc::new(Mutex::new(Vec::new())),
@@ -271,6 +275,15 @@ impl FakeGit {
     /// If another thread panicked while holding the stack lock.
     pub fn set_stack(&self, diffs: Result<Vec<FileDiff>, GitError>) {
         *self.stack.lock().unwrap() = diffs;
+    }
+
+    /// What the next revision range read answers.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the range lock.
+    pub fn set_range(&self, range: Result<RevisionRange, GitError>) {
+        *self.range.lock().unwrap() = range;
     }
 
     /// The writes git was asked for, in order. Empty for a read-only session.
@@ -490,6 +503,40 @@ impl GitPort for FakeGit {
         Ok(Box::new(move |stop: &AtomicBool| {
             if stop.load(Ordering::SeqCst) {
                 return Err(GitError("the commit read was superseded".into()));
+            }
+            diffs
+        }))
+    }
+
+    fn revision_range(
+        &self,
+        _root: &Path,
+        from: &str,
+        to: &str,
+        _mode: RangeMode,
+    ) -> Result<RangeRead, GitError> {
+        crate::revision_range::check_revision("from", from)?;
+        crate::revision_range::check_revision("to", to)?;
+        let range = self.range.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the range read was superseded".into()));
+            }
+            range
+        }))
+    }
+
+    fn revision_stack(
+        &self,
+        _root: &Path,
+        _base: &str,
+        _tip: &str,
+        _files: &[CommitFile],
+    ) -> Result<StackRead, GitError> {
+        let diffs = self.stack.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the revision read was superseded".into()));
             }
             diffs
         }))

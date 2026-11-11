@@ -1532,7 +1532,10 @@ impl Model {
             // An inspection nobody asked for is dropped; pruning's preview is shown by its
             // dialog (W6), not here yet.
             // A plan nobody asked for in this window. The restack resolver is not shown yet (D154).
-            Event::RestackPlanned { .. }
+            // The revision reads are not shown yet; a later slice (CR2) routes them to the Changes page.
+            Event::RevisionRangeLoaded { .. }
+            | Event::RevisionStackLoaded { .. }
+            | Event::RestackPlanned { .. }
             | Event::RestackResolutionStarted { .. }
             | Event::RestackResolutionFinished { .. }
             | Event::RestackResolutionCancelled { .. }
@@ -1960,6 +1963,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::HistoryLoaded { id, .. }
         | Event::CommitDetailLoaded { id, .. }
         | Event::CommitStackLoaded { id, .. }
+        | Event::RevisionRangeLoaded { id, .. }
+        | Event::RevisionStackLoaded { id, .. }
         | Event::FilesFound { id, .. }
         | Event::DirectoryListed { id, .. }
         | Event::FileRead { id, .. }

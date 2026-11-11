@@ -76,10 +76,18 @@ pub fn parse_header(raw: &[u8]) -> Result<CommitDetail, GitError> {
 }
 
 /// Parses `git show --raw -z --numstat --format= --diff-merges=first-parent -M`.
-/// Git prints the raw entries first, then one numstat entry per file, in the
-/// same order. Returns the first `DETAIL_FILE_LIMIT` files and how many more
-/// there are.
+/// Returns the first `DETAIL_FILE_LIMIT` files and how many more there are.
 pub fn parse_files(raw: &[u8]) -> Result<(Vec<CommitFile>, usize), GitError> {
+    let mut files = parse_all_files(raw)?;
+    let more = files.len().saturating_sub(DETAIL_FILE_LIMIT);
+    files.truncate(DETAIL_FILE_LIMIT);
+    Ok((files, more))
+}
+
+/// Parses the listing of every changed file of a `git show` or `git diff` run
+/// with `--raw -z --numstat -M`. Git prints the raw entries first, then one
+/// numstat entry per file, in the same order. No limit applies.
+pub fn parse_all_files(raw: &[u8]) -> Result<Vec<CommitFile>, GitError> {
     let text = String::from_utf8_lossy(raw);
     let mut fields: Vec<&str> = text.split('\0').collect();
     // Every entry ends with a NUL, so the split leaves an empty field at the end.
@@ -123,11 +131,9 @@ pub fn parse_files(raw: &[u8]) -> Result<(Vec<CommitFile>, usize), GitError> {
             counts.len()
         )));
     }
-    let more = changes.len().saturating_sub(DETAIL_FILE_LIMIT);
-    let files = changes
+    changes
         .into_iter()
         .zip(counts)
-        .take(DETAIL_FILE_LIMIT)
         .map(|((change, path, old_path), (added, deleted))| {
             let binary = added == "-";
             Ok(CommitFile {
@@ -139,8 +145,7 @@ pub fn parse_files(raw: &[u8]) -> Result<(Vec<CommitFile>, usize), GitError> {
                 binary,
             })
         })
-        .collect::<Result<Vec<_>, GitError>>()?;
-    Ok((files, more))
+        .collect()
 }
 
 fn change_of(letter: Option<char>) -> Result<Change, GitError> {

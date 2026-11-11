@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::compare::{RangeMode, RevisionRange};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
@@ -147,6 +148,24 @@ pub enum CommandKind {
     /// is superseded by the next one.
     LoadCommitStack {
         oid: String,
+        files: Vec<CommitFile>,
+    },
+    /// Reads the changes between revisions `from` and `to` (D231): each is any
+    /// expression Git resolves, and `mode` picks whether the diff starts at `from`
+    /// or at the merge base of the two. Never recorded in the command log (D28). A
+    /// request in flight is superseded by the next one.
+    LoadRevisionRange {
+        from: String,
+        to: String,
+        mode: RangeMode,
+    },
+    /// Reads the diffs of the files between the full ids `base` and `tip` (D231
+    /// (4)): one patch for the range, cut into the listed files in their order.
+    /// Never recorded in the command log (D28). A request in flight is superseded
+    /// by the next one.
+    LoadRevisionStack {
+        base: String,
+        tip: String,
         files: Vec<CommitFile>,
     },
     /// Reads `REFLOG_PAGE` entries of the reflog of HEAD (B3, D95), newest
@@ -1355,6 +1374,16 @@ pub enum Event {
     },
     /// Answers `LoadCommitStack`: one diff per listed file, in the same order.
     CommitStackLoaded {
+        id: OperationId,
+        diffs: Vec<FileDiff>,
+    },
+    /// Answers `LoadRevisionRange`.
+    RevisionRangeLoaded {
+        id: OperationId,
+        range: RevisionRange,
+    },
+    /// Answers `LoadRevisionStack`: one diff per listed file, in the same order.
+    RevisionStackLoaded {
         id: OperationId,
         diffs: Vec<FileDiff>,
     },

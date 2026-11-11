@@ -1,6 +1,7 @@
 //! Types shared by the UI and the MCP server: commands going in,
 //! events coming out, and the repository status they carry.
 
+mod compare;
 mod conflict;
 mod diff;
 pub mod features;
@@ -23,6 +24,7 @@ pub mod threads;
 mod workflow;
 mod workspace;
 
+pub use compare::{RangeMode, RevisionRange};
 pub use conflict::{
     ConflictFileRead, ConflictOperation, ConflictSide, ConflictSite, HunkOrigin, RecordedResolution,
 };

@@ -10,8 +10,8 @@ use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
     ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, HealthReport, History,
     MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
-    RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment,
-    ReviewStatus, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, ScorecardCommentInput,
+    RangeMode, RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange,
+    ReviewComment, ReviewStatus, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, ScorecardCommentInput,
     ScorecardStatus, ScorecardSummary, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
     WorktreeInspection,
 };
@@ -44,6 +44,7 @@ use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession, review_store};
 use crate::review_store::{AgentThread, NewScorecard, NewScorecardComment, Reply, ReviewStore};
+use crate::revision_range::{RangeJob, RangeReport};
 use crate::scorecards;
 use crate::script::builtins;
 use crate::script::dry;
@@ -115,6 +116,14 @@ pub struct Engine {
     stack: Option<ActiveDetail>,
     /// Commit stack reads accepted since the last call; see `take_stack_jobs`.
     stack_jobs: Vec<StackJob>,
+    /// The changes between two revisions in flight (D231), if any.
+    range: Option<ActiveDetail>,
+    /// Range reads accepted since the last call; see `take_range_jobs`.
+    range_jobs: Vec<RangeJob>,
+    /// The file diffs of a revision range in flight (D231 (4)), if any.
+    revision_stack: Option<ActiveDetail>,
+    /// Revision stack reads accepted since the last call; see `take_revision_stack_jobs`.
+    revision_stack_jobs: Vec<StackJob>,
     /// The file list of the open repository (N1, N2).
     files: Option<FilesSession>,
     /// Reads of the file list accepted since the last call; see `take_index_jobs`.
@@ -355,6 +364,10 @@ impl Engine {
             detail_jobs: Vec::new(),
             stack: None,
             stack_jobs: Vec::new(),
+            range: None,
+            range_jobs: Vec::new(),
+            revision_stack: None,
+            revision_stack_jobs: Vec::new(),
             files: None,
             index_jobs: Vec::new(),
             files_search: None,
@@ -531,6 +544,18 @@ impl Engine {
     /// thread and passes its report to `stack_report`.
     pub fn take_stack_jobs(&mut self) -> Vec<StackJob> {
         std::mem::take(&mut self.stack_jobs)
+    }
+
+    /// The revision range reads accepted since the last call. The caller runs each
+    /// on a thread and passes its report to `range_report`.
+    pub fn take_range_jobs(&mut self) -> Vec<RangeJob> {
+        std::mem::take(&mut self.range_jobs)
+    }
+
+    /// The revision stack reads accepted since the last call. The caller runs each
+    /// on a thread and passes its report to `revision_stack_report`.
+    pub fn take_revision_stack_jobs(&mut self) -> Vec<StackJob> {
+        std::mem::take(&mut self.revision_stack_jobs)
     }
 
     /// The remote operations accepted since the last call. The caller runs each
@@ -2036,6 +2061,56 @@ impl Engine {
         events
     }
 
+    /// Turns the answer of a revision range read into events. A report for a read
+    /// that was superseded, or for a repository that was left, is dropped.
+    pub fn range_report(&mut self, report: RangeReport) -> Vec<Event> {
+        match self.range.take() {
+            Some(active) if active.op.id == report.id => {
+                let (state, detail) = match &report.outcome {
+                    Ok(_) => (OperationState::Done, None),
+                    Err(message) => (OperationState::Failed, Some(message.clone())),
+                };
+                let mut events = vec![Self::operation_changed(&active.op, state, detail)];
+                if let Ok(range) = report.outcome {
+                    events.push(Event::RevisionRangeLoaded {
+                        id: report.id,
+                        range,
+                    });
+                }
+                events
+            }
+            other => {
+                self.range = other;
+                Vec::new()
+            }
+        }
+    }
+
+    /// Turns the answer of a revision stack read into events. A report for a read
+    /// that was superseded, or for a repository that was left, is dropped.
+    pub fn revision_stack_report(&mut self, report: StackReport) -> Vec<Event> {
+        match self.revision_stack.take() {
+            Some(active) if active.op.id == report.id => {
+                let (state, detail) = match &report.outcome {
+                    Ok(_) => (OperationState::Done, None),
+                    Err(message) => (OperationState::Failed, Some(message.clone())),
+                };
+                let mut events = vec![Self::operation_changed(&active.op, state, detail)];
+                if let Ok(diffs) = report.outcome {
+                    events.push(Event::RevisionStackLoaded {
+                        id: report.id,
+                        diffs,
+                    });
+                }
+                events
+            }
+            other => {
+                self.revision_stack = other;
+                Vec::new()
+            }
+        }
+    }
+
     /// Turns the answer of a file diff read into events. A report for a read that
     /// was superseded, or for a repository that was left, is dropped.
     pub fn stack_report(&mut self, report: StackReport) -> Vec<Event> {
@@ -2411,6 +2486,12 @@ impl Engine {
             }
             CommandKind::LoadCommitStack { oid, files } => {
                 self.start_stack(id, actor, kind, oid, files)
+            }
+            CommandKind::LoadRevisionRange { from, to, mode } => {
+                self.start_range(id, actor, kind, from, to, *mode)
+            }
+            CommandKind::LoadRevisionStack { base, tip, files } => {
+                self.start_revision_stack(id, actor, kind, base, tip, files)
             }
             CommandKind::LoadCommitDetail { oid } => self.start_detail(id, actor, kind, oid),
             CommandKind::SearchFiles { query } => self.start_files_search(id, actor, kind, query),
@@ -2832,6 +2913,96 @@ impl Engine {
         };
         active.stop.store(true, Ordering::SeqCst);
         vec![self.finish_op(&active.op, OperationState::Cancelled, None)]
+    }
+
+    /// Starts the changes between two revisions (D231). A read in flight is
+    /// superseded: it is stopped and cancelled. Returns the events of that cancellation.
+    /// Not logged (D28), so the cancellation carries no log entry either.
+    fn start_range(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        from: &str,
+        to: &str,
+        mode: RangeMode,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let read = self
+            .git
+            .revision_range(&root, from, to, mode)
+            .map_err(|e| e.0)?;
+        // The read is built before the old one is stopped, so a refusal keeps the old one.
+        let superseded = self.drop_range();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.range = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.range_jobs.push(RangeJob { id, read, stop });
+        Ok(superseded)
+    }
+
+    /// Starts the file diffs of the range between two full ids (D231 (4)). A read in
+    /// flight is superseded. Returns the events of that cancellation.
+    fn start_revision_stack(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        base: &str,
+        tip: &str,
+        files: &[CommitFile],
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let read = self
+            .git
+            .revision_stack(&root, base, tip, files)
+            .map_err(|e| e.0)?;
+        let superseded = self.drop_revision_stack();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.revision_stack = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.revision_stack_jobs.push(StackJob { id, read, stop });
+        Ok(superseded)
+    }
+
+    /// Ends the revision range read: it is stopped, and a request still in flight is
+    /// cancelled.
+    fn drop_range(&mut self) -> Vec<Event> {
+        let Some(active) = self.range.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![Self::operation_changed(
+            &active.op,
+            OperationState::Cancelled,
+            None,
+        )]
+    }
+
+    /// Ends the revision stack read: it is stopped, and a request still in flight is
+    /// cancelled.
+    fn drop_revision_stack(&mut self) -> Vec<Event> {
+        let Some(active) = self.revision_stack.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![Self::operation_changed(
+            &active.op,
+            OperationState::Cancelled,
+            None,
+        )]
     }
 
     /// The file list of the open repository, started afresh when `root` is not
@@ -4045,6 +4216,8 @@ impl Engine {
         events.extend(self.drop_history());
         events.extend(self.drop_detail());
         events.extend(self.drop_stack());
+        events.extend(self.drop_range());
+        events.extend(self.drop_revision_stack());
         events.extend(self.drop_files());
         events.extend(self.drop_provenance());
         events.extend(self.drop_health());
@@ -5855,6 +6028,8 @@ impl Engine {
                 | CommandKind::ListWorkflows
                 | CommandKind::ListHookSections
                 | CommandKind::LoadReflog { .. }
+                | CommandKind::LoadRevisionRange { .. }
+                | CommandKind::LoadRevisionStack { .. }
                 | CommandKind::LoadSubmodule { .. }
                 | CommandKind::ListMembers
                 | CommandKind::ListRepoBranches { .. }
@@ -6744,6 +6919,244 @@ mod tests {
             detail: Some("fatal: bad object".into()),
         }));
     }
+    /// An engine on a repository whose range read answers one changed file, `a.txt`.
+    fn range_engine() -> (Engine, FakeGit) {
+        let status = RepoStatus {
+            root: "/r".into(),
+            ..RepoStatus::default()
+        };
+        let git = FakeGit::new("/r", status);
+        git.set_range(Ok(gm_schema::RevisionRange {
+            from_oid: "a".repeat(40),
+            to_oid: "b".repeat(40),
+            from_short: "aaaaaaa".into(),
+            to_short: "bbbbbbb".into(),
+            base: "a".repeat(40),
+            tip: "b".repeat(40),
+            files: vec![CommitFile {
+                path: "a.txt".into(),
+                old_path: None,
+                change: gm_schema::Change::Modified,
+                added: 1,
+                deleted: 1,
+                binary: false,
+            }],
+            more_files: 0,
+            added: 1,
+            deleted: 1,
+        }));
+        git.set_stack(Ok(vec![gm_schema::FileDiff {
+            path: "a.txt".into(),
+            old_path: None,
+            binary: false,
+            hunks: Vec::new(),
+        }]));
+        (Engine::new(Box::new(git.clone())), git)
+    }
+
+    fn load_range(from: &str, to: &str) -> CommandKind {
+        CommandKind::LoadRevisionRange {
+            from: from.into(),
+            to: to.into(),
+            mode: gm_schema::RangeMode::Direct,
+        }
+    }
+
+    fn load_revision_stack(base: &str, tip: &str) -> CommandKind {
+        CommandKind::LoadRevisionStack {
+            base: base.into(),
+            tip: tip.into(),
+            files: vec![CommitFile {
+                path: "a.txt".into(),
+                old_path: None,
+                change: gm_schema::Change::Modified,
+                added: 1,
+                deleted: 1,
+                binary: false,
+            }],
+        }
+    }
+
+    /// Runs every range job the engine accepted, as the runner's threads do.
+    fn run_range_jobs(engine: &mut Engine) -> Vec<Event> {
+        engine
+            .take_range_jobs()
+            .into_iter()
+            .flat_map(|job| engine.range_report(job.run()))
+            .collect()
+    }
+
+    /// Runs every revision stack job the engine accepted, as the runner's threads do.
+    fn run_revision_stack_jobs(engine: &mut Engine) -> Vec<Event> {
+        engine
+            .take_revision_stack_jobs()
+            .into_iter()
+            .flat_map(|job| engine.revision_stack_report(job.run()))
+            .collect()
+    }
+
+    #[test]
+    fn a_revision_range_answers_once_it_is_read() {
+        let (mut engine, _) = range_engine();
+        engine.handle(OperationId(1), &open());
+        let started = engine.handle(OperationId(2), &command(load_range("v1", "main")));
+        assert!(
+            !started
+                .iter()
+                .any(|e| matches!(e, Event::RevisionRangeLoaded { .. }))
+        );
+
+        let events = run_range_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionRangeLoaded { id: OperationId(2), range }
+                if range.from_short == "aaaaaaa" && range.files[0].path == "a.txt"
+        )));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }));
+    }
+
+    #[test]
+    fn a_superseded_revision_range_is_cancelled_stopped_and_dropped() {
+        let (mut engine, _) = range_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_range("v1", "main")));
+        let superseding = engine.handle(OperationId(3), &command(load_range("v1", "v2")));
+        assert!(superseding.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+
+        let mut jobs = engine.take_range_jobs().into_iter();
+        let stale = jobs.next().unwrap();
+        assert!(stale.stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(engine.range_report(stale.run()).is_empty());
+
+        let current = jobs.next().unwrap();
+        assert!(!current.stop.load(std::sync::atomic::Ordering::SeqCst));
+        let events = engine.range_report(current.run());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionRangeLoaded {
+                id: OperationId(3),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_revision_range_and_a_revision_stack_do_not_supersede_each_other() {
+        let (mut engine, _) = range_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_range("v1", "main")));
+        let stack = engine.handle(
+            OperationId(3),
+            &command(load_revision_stack(&"a".repeat(40), &"b".repeat(40))),
+        );
+        assert!(!stack.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+
+        let events = run_range_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionRangeLoaded {
+                id: OperationId(2),
+                ..
+            }
+        )));
+        let events = run_revision_stack_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionStackLoaded {
+                id: OperationId(3),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_revision_stack_answers_once_it_is_read() {
+        let (mut engine, _) = range_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(
+            OperationId(2),
+            &command(load_revision_stack(&"a".repeat(40), &"b".repeat(40))),
+        );
+        let events = run_revision_stack_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionStackLoaded { id: OperationId(2), diffs } if diffs[0].path == "a.txt"
+        )));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }));
+    }
+
+    #[test]
+    fn a_failed_revision_range_fails_with_gits_message() {
+        let (mut engine, git) = range_engine();
+        git.set_range(Err(GitError("to: fatal: bad revision 'v9'".into())));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_range("v1", "v9")));
+        let events = run_range_jobs(&mut engine);
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("to: fatal: bad revision 'v9'".into()),
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::RevisionRangeLoaded { .. }))
+        );
+    }
+
+    #[test]
+    fn a_revision_starting_with_a_dash_is_refused_before_any_read_starts() {
+        let (mut engine, _) = range_engine();
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(OperationId(2), &command(load_range("--output=x", "main")));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("from: \"--output=x\" is not a revision".into()),
+        }));
+        assert!(engine.take_range_jobs().is_empty());
+    }
+
+    #[test]
+    fn a_revision_range_is_not_in_the_command_log() {
+        let (mut engine, _) = range_engine();
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_range("v1", "main")));
+        run_range_jobs(&mut engine);
+        engine.handle(
+            OperationId(3),
+            &command(load_revision_stack(&"a".repeat(40), &"b".repeat(40))),
+        );
+        run_revision_stack_jobs(&mut engine);
+
+        assert!(!engine.log().iter().any(|entry| matches!(
+            entry.kind,
+            CommandKind::LoadRevisionRange { .. } | CommandKind::LoadRevisionStack { .. }
+        )));
+    }
+
     #[test]
     fn a_superseded_commit_detail_is_cancelled_stopped_and_dropped() {
         let mut engine = detail_engine();

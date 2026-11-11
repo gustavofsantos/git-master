@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
     BranchEntry, CommitDetail, CommitFile, ConflictFileRead, ConflictOperation, DiffSide, FileDiff,
-    GrepResult, HunkId, MergedBranch, PruneCandidate, ReflogEntry, RepoStatus, StageTarget,
-    StashEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
+    GrepResult, HunkId, MergedBranch, PruneCandidate, RangeMode, ReflogEntry, RepoStatus,
+    RevisionRange, StageTarget, StashEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
 };
 
 use crate::blame::BlameLine;
@@ -101,6 +101,10 @@ pub struct RefMove {
 /// The read of every file's diff in a commit, started by `GitPort::commit_stack`.
 /// It stops the same way a `DetailRead` does (H4c).
 pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitError> + Send>;
+
+/// The read of the changes between two revisions, started by `GitPort::revision_range`
+/// (D231). It runs on a thread of its own and stops like a `DetailRead` once `stop` is set.
+pub type RangeRead = Box<dyn FnOnce(&AtomicBool) -> Result<RevisionRange, GitError> + Send>;
 
 /// The read of the worktree's file list, started by `GitPort::file_list`. It
 /// runs on a thread of its own and stops like a `DetailRead` (N1).
@@ -388,6 +392,38 @@ pub trait GitPort: Send {
     ) -> Result<StackRead, GitError> {
         Err(GitError(
             "commit diffs are not supported by this adapter".into(),
+        ))
+    }
+
+    /// Starts the read of the changes between revisions `from` and `to` (D231). Each
+    /// is any expression Git resolves; `mode` decides whether the diff starts at
+    /// `from` or at the merge base. Refuses an empty revision or one that starts
+    /// with `-`, and starts nothing else. Never records anything (D28).
+    fn revision_range(
+        &self,
+        _root: &Path,
+        _from: &str,
+        _to: &str,
+        _mode: RangeMode,
+    ) -> Result<RangeRead, GitError> {
+        Err(GitError(
+            "revision range is not supported by this adapter".into(),
+        ))
+    }
+
+    /// Starts the read of the diffs of the files between the full ids `base` and
+    /// `tip` (D231 (4)), in one patch. The answer has one diff per entry of `files`,
+    /// in its order. Validates the ids and starts nothing else. Never records
+    /// anything (D28).
+    fn revision_stack(
+        &self,
+        _root: &Path,
+        _base: &str,
+        _tip: &str,
+        _files: &[CommitFile],
+    ) -> Result<StackRead, GitError> {
+        Err(GitError(
+            "revision diffs are not supported by this adapter".into(),
         ))
     }
 
