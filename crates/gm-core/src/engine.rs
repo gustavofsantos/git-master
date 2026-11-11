@@ -7266,7 +7266,7 @@ mod tests {
     #[test]
     fn a_failed_revision_range_fails_with_gits_message() {
         let (mut engine, git) = range_engine();
-        git.set_range(Err(GitError("to: fatal: bad revision 'v9'".into())));
+        git.set_range(Err(GitError("unknown revision `v9`".into())));
         engine.handle(OperationId(1), &open());
         engine.handle(OperationId(2), &command(load_range("v1", "v9")));
         let events = run_range_jobs(&mut engine);
@@ -7274,7 +7274,7 @@ mod tests {
             id: OperationId(2),
             actor: Actor::Human,
             state: OperationState::Failed,
-            detail: Some("to: fatal: bad revision 'v9'".into()),
+            detail: Some("unknown revision `v9`".into()),
         }));
         assert!(
             !events

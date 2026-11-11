@@ -393,6 +393,12 @@ impl CompareState {
         self.stack_request = None;
     }
 
+    /// Whether `id` is the range read in flight on either tab.
+    #[must_use]
+    pub fn awaits_range(&self, id: OperationId) -> bool {
+        self.branch_view.awaits(id) || self.compare_view.awaits(id)
+    }
+
     /// Routes git's message for a failed read to the view that awaits `id`, and
     /// drops a tag read that failed. `false` when neither awaits `id`.
     pub fn failed(&mut self, id: OperationId, message: String) -> bool {

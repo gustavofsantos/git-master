@@ -250,12 +250,11 @@ impl SubprocessGit {
         Self::checked(output, ok_codes)
     }
 
-    /// The full id of revision `rev`, as the commit it names. `side` (`from` or `to`)
-    /// is put before git's message when the revision does not resolve.
+    /// The full id of revision `rev`, as the commit it names. A revision git does not
+    /// resolve is named as typed; a read that was superseded keeps its own error.
     fn resolve_revision(
         &self,
         root: &Path,
-        side: &str,
         rev: &str,
         stop: &AtomicBool,
     ) -> Result<String, GitError> {
@@ -266,7 +265,13 @@ impl SubprocessGit {
                 &["rev-parse", "--verify", "--end-of-options", &spec],
                 stop,
             )
-            .map_err(|error| GitError(format!("{side}: {}", error.0)))?;
+            .map_err(|error| {
+                if stop.load(Ordering::SeqCst) {
+                    error
+                } else {
+                    GitError(format!("unknown revision `{rev}`"))
+                }
+            })?;
         revision_range::one_id(&raw)
     }
 
@@ -2186,8 +2191,8 @@ impl GitPort for SubprocessGit {
         let from = from.to_owned();
         let to = to.to_owned();
         Ok(Box::new(move |stop: &AtomicBool| {
-            let from_oid = git.resolve_revision(&root, "from", &from, stop)?;
-            let to_oid = git.resolve_revision(&root, "to", &to, stop)?;
+            let from_oid = git.resolve_revision(&root, &from, stop)?;
+            let to_oid = git.resolve_revision(&root, &to, stop)?;
             let from_short = git.short_id(&root, &from_oid, stop)?;
             let to_short = git.short_id(&root, &to_oid, stop)?;
             let merge_base = match mode {

@@ -1076,6 +1076,12 @@ impl Model {
                 let revisions = detail
                     .clone()
                     .unwrap_or_else(|| "git could not read the revisions".to_owned());
+                // A failed range read leaves no list to pick a file from, so the diff of the
+                // previous result goes too. A superseded read is not awaited and changes nothing.
+                if self.compare.awaits_range(id) {
+                    self.compare.forget_stack();
+                    self.compare_stack.close();
+                }
                 self.compare.failed(id, revisions);
                 self.reflog_stack.failed(id, diff.clone());
                 self.stash_stack.failed(id, diff);
@@ -4542,6 +4548,74 @@ mod compare_tests {
         assert!(model.compare_stack.is_shown());
         assert!(model.commit_stack.is_open());
         assert!(!model.commit_stack.is_shown());
+    }
+
+    /// A compare tab with `a.txt` shown and its diff open in the stack; the pending
+    /// stack request of the range is taken, so only a later one can be pending.
+    fn compare_model_with_stack_open() -> Model {
+        let mut model = Model::default();
+        model.request_compare_view(OperationId(1));
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(1),
+            range: range(&["a.txt"]),
+        });
+        let _ = model.compare.take_stack_request();
+        model
+            .compare_stack
+            .request(OperationId(9), 0, Vec::new(), 0);
+        let _ = model.apply(Event::RevisionStackLoaded {
+            id: OperationId(9),
+            diffs: vec![diff("a.txt")],
+        });
+        assert!(model.compare_stack.is_shown());
+        model
+    }
+
+    #[test]
+    fn a_failed_range_read_closes_the_stack_and_drops_its_pending_request() {
+        let mut model = compare_model_with_stack_open();
+        // A new result with files leaves a stack request pending for the next answer.
+        model.request_compare_view(OperationId(2));
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(2),
+            range: range(&["b.txt"]),
+        });
+        model.request_compare_view(OperationId(3));
+        let _ = model.apply(failed(3, Some("unknown revision `v9`")));
+        assert!(!model.compare_stack.is_open());
+        assert_eq!(model.compare.take_stack_request(), None);
+        assert_eq!(
+            model.compare.compare_view,
+            RangeView::Failed("unknown revision `v9`".into())
+        );
+    }
+
+    #[test]
+    fn a_late_failure_of_a_superseded_range_read_keeps_the_stack() {
+        let mut model = compare_model_with_stack_open();
+        model.request_compare_view(OperationId(2));
+        model.request_compare_view(OperationId(3));
+        let _ = model.apply(failed(2, Some("unknown revision `v9`")));
+        assert!(model.compare_stack.is_shown());
+        assert!(matches!(
+            model.compare.compare_view,
+            RangeView::Loading { .. }
+        ));
+    }
+
+    #[test]
+    fn a_late_answer_of_a_superseded_range_read_does_not_reopen_a_failed_stack() {
+        let mut model = compare_model_with_stack_open();
+        model.request_compare_view(OperationId(2));
+        model.request_compare_view(OperationId(3));
+        let _ = model.apply(failed(3, Some("unknown revision `v9`")));
+        assert!(!model.compare_stack.is_open());
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(2),
+            range: range(&["b.txt"]),
+        });
+        assert!(!model.compare_stack.is_open());
+        assert_eq!(model.compare.take_stack_request(), None);
     }
 
     #[test]

@@ -37,7 +37,7 @@ The tab compares the tip of the branch with the **merge base** of the branch and
 
 ## Compare two revisions
 
-> **Planned.** A field that Git cannot resolve is not marked yet, and a failed read clears the list instead of keeping the last result: the message appears under the fields.
+> **Planned.** A field that Git cannot resolve is not marked yet; the message appears under the fields.
 
 The **Compare** tab shows the changes between two revisions you name. A revision is anything Git accepts: a branch, a remote branch such as `origin/main`, a tag, a full or short commit hash, `HEAD`, or an expression such as `HEAD~3` or `v1.2^`.
 
@@ -56,7 +56,7 @@ The **Mode** selector chooses what is compared:
 
 **Direct** is the default. The header shows what was resolved, such as `v1.4.0 (a1b2c3d) → main (e4f5a6b)`, so a moving branch name is tied to the commit it pointed at when the tab was read.
 
-When a revision cannot be resolved, the field is marked and the message of Git appears under it, for example **unknown revision `v9`**. The list keeps the last result until both fields are valid. The tab never changes your repository, so a wrong name costs nothing.
+When a revision cannot be resolved, the message appears under the fields, for example **unknown revision `v9`**. A failed read clears the list and the diff, so no result from earlier revisions stays on screen. The tab never changes your repository, so a wrong name costs nothing.
 
 Comparing a revision with itself shows **No changes between these revisions.**
 

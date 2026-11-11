@@ -422,9 +422,19 @@ impl StatusView {
     pub(crate) fn compare_diff_area(&self) -> Div {
         let stack = &self.model.compare_stack;
         let loading = !stack.is_shown();
+        // With no range on screen there is no file to pick, so "Select a file" would mislead.
+        let range_shown = self
+            .model
+            .compare
+            .tab_view()
+            .and_then(RangeView::range)
+            .is_some();
         let notice = match (stack.failure(), stack.is_open()) {
             (Some(message), _) => Some((theme::error(), message.to_owned())),
-            (None, false) => Some((theme::muted(), "Select a file to see its diff.".to_owned())),
+            (None, false) if range_shown => {
+                Some((theme::muted(), "Select a file to see its diff.".to_owned()))
+            }
+            (None, false) => Some((theme::muted(), "Nothing to show.".to_owned())),
             (None, true) if loading => Some((theme::muted(), "Loading the diff…".to_owned())),
             (None, true) => None,
         };

@@ -206,16 +206,15 @@ fn the_stack_of_a_range_has_one_diff_per_listed_file_in_order() {
 }
 
 #[test]
-fn an_unknown_revision_fails_with_gits_message_naming_its_side() {
+fn an_unknown_revision_fails_naming_it_as_typed() {
     let dir = two_tags();
     let path = dir.path();
 
     let to_unknown = range(path, "v1", "no-such-tag", RangeMode::Direct).unwrap_err();
-    assert!(to_unknown.0.starts_with("to: "), "{}", to_unknown.0);
-    assert!(to_unknown.0.len() > "to: ".len());
+    assert_eq!(to_unknown.0, "unknown revision `no-such-tag`");
 
     let from_unknown = range(path, "no-such-tag", "v2", RangeMode::Direct).unwrap_err();
-    assert!(from_unknown.0.starts_with("from: "), "{}", from_unknown.0);
+    assert_eq!(from_unknown.0, "unknown revision `no-such-tag`");
 }
 
 #[test]
