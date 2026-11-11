@@ -45,7 +45,7 @@ The **Compare** tab shows the changes between two revisions you name. A revision
 2. Type the older revision in **From** and the newer one in **To**. Each field suggests branches and tags as you type. Press `Enter` or click a suggestion to take it.
 3. Read the file list and the diff.
 
-The two fields start as the default branch and HEAD. **Swap** exchanges them, to read the same change backwards.
+**To** starts as `HEAD` and **From** starts empty. Until you fill **From**, the tab says **Type the older revision in From.** **Swap** exchanges the two fields, to read the same change backwards.
 
 The **Mode** selector chooses what is compared:
 
