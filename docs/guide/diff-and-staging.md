@@ -68,6 +68,19 @@ Each line shows its line number. Both layouts scroll sideways (in Split, both si
 
 The layout you choose is saved for your user account as `gitmaster.diffLayout` in `~/.gitconfig`. The Working Copy diff and the commit diff share the choice, so changing it in one changes both. A repository can override it with `git config gitmaster.diffLayout split`. If the key is missing or has another value, Unified is used. See [Configuration](../reference/configuration.md#preferences).
 
+## Open the file
+
+> **Planned.** The **Open File** button and its shortcut are not available in the app yet.
+
+Every diff view has an **Open File** button in the header of a file: the Working Copy diff, the stacked diff of a commit, and the diffs of the **Branch** and **Compare** tabs described in [Compare changes](compare-changes.md). Click it, or press `Ctrl+Shift+O` (`⇧⌘O` on macOS), to read the whole file where you are looking.
+
+The file opens in the read-only viewer of the [Code](code-navigation.md#view-file) page, with the first line you see in the diff marked and shown near the top. The line is the one of the new side of the diff. In a stacked diff, the file is the one at the top of the view, and each file header has its own button. When the first row you see has no line on the new side, such as a removed line, the nearest line on the new side after it is used, or the last one before it when there is none.
+
+The viewer shows the file as it is on disk. This has two consequences:
+
+- In the **Unstaged** diff the line numbers are those of the file on disk. In the **Staged** diff, and in the diff of a commit or of a revision, they are the numbers of that version. When the file changed since, the marked line can be a few lines off.
+- A file the diff deletes is not on disk. The button is disabled and says **The file is deleted in the working tree.** A binary file has no lines to show, and its button is disabled too.
+
 ## Binary files
 
 A binary file shows the notice **Binary file (n/a)** in the Working Copy diff, instead of lines. In the stacked diff of a commit, the notice is **Binary file: its contents are not shown.**
@@ -120,6 +133,7 @@ The diff views have no single-letter shortcuts. Every letter shortcut uses `Ctrl
 | `Ctrl+Shift+A` (`⇧⌘A` on macOS) | Stage or unstage the chunk at the cursor. |
 | `Ctrl+Shift+S` (`⇧⌘S` on macOS) | Stage the selected lines. |
 | `Ctrl+Shift+I` (`⇧⌘I` on macOS) | Unstage the selected lines. |
+| `Ctrl+Shift+O` (`⇧⌘O` on macOS) | Open the file at the first line in view. |
 | `Esc` | Clear the selection. |
 
 ### Stacked commit diff
@@ -129,4 +143,5 @@ The diff views have no single-letter shortcuts. Every letter shortcut uses `Ctrl
 | Up, Down | Scroll one row. |
 | PageUp, PageDown | Scroll one page. |
 | `Ctrl+Shift+N`, `Ctrl+Shift+P` (`⇧⌘N`, `⇧⌘P` on macOS) | Next and previous file. Both wrap around at the first and last file. |
+| `Ctrl+Shift+O` (`⇧⌘O` on macOS) | Open the file at the top of the view, at its first line in view. |
 | `Esc` | Return to the commit. |

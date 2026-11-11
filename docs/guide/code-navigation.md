@@ -177,6 +177,13 @@ From the command palette:
 2. Type **View File**.
 3. Press `Tab` and choose the file.
 
+From a diff:
+
+> **Planned.** Opening a file from a diff is not available in the app yet.
+
+1. Click **Open File** in the header of a file in any diff, or press `Ctrl+Shift+O` (`⇧⌘O` on macOS).
+2. The viewer opens at the first line you saw in the diff. See [Open the file](diff-and-staging.md#open-the-file).
+
 ## Search text
 
 The **Search** tab of the **Code** page finds text in the files of the active worktree. Press `Ctrl+Shift+F` (`⇧⌘F` on macOS), or choose **Search Text…** in the command palette, to open it. Choose the **Files** tab to return to the folder tree and the viewer.

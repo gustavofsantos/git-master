@@ -844,6 +844,13 @@ Requested by the author on 2026-11-11: the Changes page gets tabs for the branch
 - **CR3, UI view:** the tab bar, the pickers, the file list and the read-only stacked diff, reusing the commit view's rows; the refresh after a status refresh.
 - **CR4, close:** a UI smoke scenario in both themes, the docs `status` and markers, this entry.
 
+## Open the file from a diff (planned 2026-11-11; D232)
+
+Requested by the author on 2026-11-11. Behavior: `docs/guide/diff-and-staging.md#open-the-file`, `Planned`. Sub-slices use the prefix DV.
+
+- **DV0, docs and decision** (done 2026-11-11): the pages above, D232, this entry.
+- **DV1, the button and the shortcut:** the pure row-to-line function in `diff_rows.rs`, the pane's event, the button in every file header of `diff_pane.rs`, `Ctrl+Shift+O`, and the window's call to `view_file`. Starts after CR3a, which edits the same files.
+
 ## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
 
 Requested by the author on 2026-11-09. Behavior in `docs/guide/memories.md` and `docs/reference/mcp-tools.md` (`Planned`). Order: as the author chose on 2026-11-09, after the review workflows of slice 8s (S4); D219 replaces the gates of slice 8r that it was planned after.

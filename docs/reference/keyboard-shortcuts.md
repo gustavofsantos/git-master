@@ -45,6 +45,7 @@ Actions without a shortcut on this page can be run from the [command palette](..
 | Unstage the selected lines | `Ctrl+Shift+I` | `⇧⌘I` | Implemented |
 | Clear the selection | `Esc` | `Esc` | Implemented |
 | Comment on the selected lines | `Ctrl+Shift+M` | `⇧⌘M` | Implemented |
+| Open the file at the first line in view | `Ctrl+Shift+O` | `⇧⌘O` | Planned |
 
 ## Commit diff (stacked)
 
@@ -55,6 +56,7 @@ Actions without a shortcut on this page can be run from the [command palette](..
 | Move to the next file | `Ctrl+Shift+N` | `⇧⌘N` | Implemented |
 | Move to the previous file | `Ctrl+Shift+P` | `⇧⌘P` | Implemented |
 | Comment on the selected lines | `Ctrl+Shift+M` | `⇧⌘M` | Implemented |
+| Open the file at the first line in view | `Ctrl+Shift+O` | `⇧⌘O` | Planned |
 | Go back to the commit | `Esc` | `Esc` | Implemented |
 
 Next file and previous file wrap around at the first and the last file.
