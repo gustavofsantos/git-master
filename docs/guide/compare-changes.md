@@ -42,7 +42,7 @@ The tab compares the tip of the branch with the **merge base** of the branch and
 The **Compare** tab shows the changes between two revisions you name. A revision is anything Git accepts: a branch, a remote branch such as `origin/main`, a tag, a full or short commit hash, `HEAD`, or an expression such as `HEAD~3` or `v1.2^`.
 
 1. Open the **Compare** tab, or run **Compare Revisions…** from the command palette.
-2. Type the older revision in **From** and the newer one in **To**. Each field suggests branches, tags and recent commits as you type. Press `Enter` or click a suggestion to take it.
+2. Type the older revision in **From** and the newer one in **To**. Each field suggests branches and tags as you type. Press `Enter` or click a suggestion to take it.
 3. Read the file list and the diff.
 
 The two fields start as the default branch and HEAD. **Swap** exchanges them, to read the same change backwards.
