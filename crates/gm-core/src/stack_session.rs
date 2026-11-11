@@ -207,8 +207,8 @@ pub(crate) fn history_revs(
 }
 
 /// The default branch, by the rule of `ListMergedBranches` without the current
-/// branch as the last resort.
-fn default_branch(
+/// branch as the last resort (`branch::merge_base` with no current branch).
+pub(crate) fn default_branch(
     git: &dyn GitPort,
     root: &Path,
     locals: &[String],

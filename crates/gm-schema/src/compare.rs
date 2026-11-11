@@ -28,6 +28,11 @@ pub struct RevisionRange {
     pub from_short: String,
     /// The abbreviated `to_oid`.
     pub to_short: String,
+    /// The name the header shows for `from`: the revision as typed, or the base branch.
+    pub from_name: String,
+    /// The name the header shows for `to`: the revision as typed, the current branch,
+    /// or `HEAD (detached)`.
+    pub to_name: String,
     /// The full id the diff starts from: `from_oid` for `Direct`, the merge base for
     /// `SinceCommonAncestor`.
     pub base: String,

@@ -106,6 +106,10 @@ pub type StackRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<FileDiff>, GitErr
 /// (D231). It runs on a thread of its own and stops like a `DetailRead` once `stop` is set.
 pub type RangeRead = Box<dyn FnOnce(&AtomicBool) -> Result<RevisionRange, GitError> + Send>;
 
+/// The listing of the tags, started by `GitPort::list_tags` (D231 (4b)). It runs on a
+/// thread of its own and stops like a `DetailRead` once `stop` is set.
+pub type TagsRead = Box<dyn FnOnce(&AtomicBool) -> Result<Vec<String>, GitError> + Send>;
+
 /// The read of the worktree's file list, started by `GitPort::file_list`. It
 /// runs on a thread of its own and stops like a `DetailRead` (N1).
 pub type FileListRead = Box<dyn FnOnce(&AtomicBool) -> Result<FileIndex, GitError> + Send>;
@@ -409,6 +413,12 @@ pub trait GitPort: Send {
         Err(GitError(
             "revision range is not supported by this adapter".into(),
         ))
+    }
+
+    /// Starts the listing of the tags, newest first, at most 500 (D231 (4b)). Starts
+    /// nothing else. Never records anything (D28).
+    fn list_tags(&self, _root: &Path) -> Result<TagsRead, GitError> {
+        Err(GitError("tags are not supported by this adapter".into()))
     }
 
     /// Starts the read of the diffs of the files between the full ids `base` and

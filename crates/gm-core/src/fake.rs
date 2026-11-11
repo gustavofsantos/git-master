@@ -16,7 +16,7 @@ use crate::grep::GrepRequest;
 use crate::history::{Canceller, HistoryPage, HistoryStream};
 use crate::port::{
     BlameRead, CommitPresence, DetailRead, FileListRead, GrepRead, HistoryRevs, RangeRead, Rewrite,
-    StackRead,
+    StackRead, TagsRead,
 };
 use crate::stack::{EdgeFacts, StackLink};
 use crate::{GitError, GitPort};
@@ -42,6 +42,8 @@ pub struct FakeGit {
     detail: Arc<Mutex<Result<CommitDetail, GitError>>>,
     stack: Arc<Mutex<Result<Vec<FileDiff>, GitError>>>,
     range: Arc<Mutex<Result<RevisionRange, GitError>>>,
+    tags: Arc<Mutex<Result<Vec<String>, GitError>>>,
+    origin_head: Arc<Mutex<Option<String>>>,
     files: Arc<Mutex<Result<Vec<String>, GitError>>>,
     grep: Arc<Mutex<Result<GrepResult, GitError>>>,
     /// The text searches git was asked for, in order.
@@ -88,6 +90,8 @@ impl FakeGit {
             detail: Arc::new(Mutex::new(Ok(CommitDetail::default()))),
             stack: Arc::new(Mutex::new(Ok(Vec::new()))),
             range: Arc::new(Mutex::new(Ok(RevisionRange::default()))),
+            tags: Arc::new(Mutex::new(Ok(Vec::new()))),
+            origin_head: Arc::new(Mutex::new(None)),
             files: Arc::new(Mutex::new(Ok(Vec::new()))),
             grep: Arc::new(Mutex::new(Ok(GrepResult::default()))),
             greps: Arc::new(Mutex::new(Vec::new())),
@@ -284,6 +288,24 @@ impl FakeGit {
     /// If another thread panicked while holding the range lock.
     pub fn set_range(&self, range: Result<RevisionRange, GitError>) {
         *self.range.lock().unwrap() = range;
+    }
+
+    /// What the next tag listing answers.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the tags lock.
+    pub fn set_tags(&self, tags: Result<Vec<String>, GitError>) {
+        *self.tags.lock().unwrap() = tags;
+    }
+
+    /// The branch `refs/remotes/origin/HEAD` names, as `origin_head` answers it.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while holding the origin lock.
+    pub fn set_origin_head(&self, branch: Option<&str>) {
+        *self.origin_head.lock().unwrap() = branch.map(str::to_owned);
     }
 
     /// The writes git was asked for, in order. Empty for a read-only session.
@@ -517,13 +539,31 @@ impl GitPort for FakeGit {
     ) -> Result<RangeRead, GitError> {
         crate::revision_range::check_revision("from", from)?;
         crate::revision_range::check_revision("to", to)?;
-        let range = self.range.lock().unwrap().clone();
+        let mut range = self.range.lock().unwrap().clone();
+        if let Ok(range) = &mut range {
+            from.clone_into(&mut range.from_name);
+            to.clone_into(&mut range.to_name);
+        }
         Ok(Box::new(move |stop: &AtomicBool| {
             if stop.load(Ordering::SeqCst) {
                 return Err(GitError("the range read was superseded".into()));
             }
             range
         }))
+    }
+
+    fn list_tags(&self, _root: &Path) -> Result<TagsRead, GitError> {
+        let tags = self.tags.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the tag listing was superseded".into()));
+            }
+            tags
+        }))
+    }
+
+    fn origin_head(&self, _root: &Path) -> Result<Option<String>, GitError> {
+        Ok(self.origin_head.lock().unwrap().clone())
     }
 
     fn revision_stack(

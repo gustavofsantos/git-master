@@ -32,7 +32,7 @@ use crate::grep::{self, Collector, Flow, GrepRequest};
 use crate::history::{self as log_parse, Canceller, HistoryPage, HistoryStream};
 use crate::port::{
     BlameRead, CommitPresence, CommitSnapshot, DetailRead, FileListRead, GrepRead, HistoryRevs,
-    RangeRead, RemoteRun, Rewrite, ScriptRemote, StackRead,
+    RangeRead, RemoteRun, Rewrite, ScriptRemote, StackRead, TagsRead,
 };
 use crate::port::{
     ConfigScope, ConfigValue, DiscardOutcome, FileMerge, RefMove, ReviewSide, TreeMerge,
@@ -2226,6 +2226,8 @@ impl GitPort for SubprocessGit {
                 to_oid: to_oid.clone(),
                 from_short,
                 to_short,
+                from_name: from,
+                to_name: to,
                 base,
                 tip: to_oid,
                 files: listed.files,
@@ -2233,6 +2235,28 @@ impl GitPort for SubprocessGit {
                 added: listed.added,
                 deleted: listed.deleted,
             })
+        }))
+    }
+
+    /// The tags, newest first, at most `TAG_LIMIT` (D231 (4b)), from one
+    /// `git for-each-ref`. Stoppable, and not logged (D28).
+    fn list_tags(&self, root: &Path) -> Result<TagsRead, GitError> {
+        let git = self.clone();
+        let root = root.to_path_buf();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            let count = format!("--count={}", revision_range::TAG_LIMIT);
+            let raw = git.run_stoppable(
+                &root,
+                &[
+                    "for-each-ref",
+                    "--sort=-creatordate",
+                    &count,
+                    "--format=%(refname:short)",
+                    "refs/tags",
+                ],
+                stop,
+            )?;
+            Ok(revision_range::tag_names(&raw))
         }))
     }
 

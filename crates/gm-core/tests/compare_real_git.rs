@@ -2,13 +2,18 @@
 //! repositories: the range's file list and totals, the merge base, renames,
 //! binary files, the stack of the range, the refusals and the file limit.
 
+use std::fmt::Write as _;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 
 use gm_core::git::SubprocessGit;
-use gm_core::{GitError, GitPort};
-use gm_schema::{Change, CommitFile, DETAIL_FILE_LIMIT, FileDiff, RangeMode, RevisionRange};
+use gm_core::{Engine, GitError, GitPort};
+use gm_schema::{
+    Actor, Change, CommitFile, DETAIL_FILE_LIMIT, Event, FileDiff, OperationId, OperationState,
+    RangeMode, RevisionRange,
+};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -284,4 +289,265 @@ fn more_than_the_limit_of_changed_files_sets_more_files_and_totals_cover_them_al
     assert_eq!(read.more_files, 5);
     assert_eq!(read.added, 2 * u32::try_from(total).unwrap());
     assert_eq!(read.deleted, 0);
+}
+
+/// An engine on the repository at `dir`, opened as the app opens it.
+fn engine_on(dir: &Path) -> Engine {
+    let mut engine = Engine::new(Box::new(SubprocessGit::default()));
+    engine.handle(
+        OperationId(1),
+        &gm_schema::Command {
+            actor: Actor::Human,
+            kind: gm_schema::CommandKind::OpenRepo {
+                path: dir.to_string_lossy().into_owned(),
+            },
+        },
+    );
+    engine
+}
+
+/// The failure detail of operation `id` among `events`, if it failed.
+fn failure_of(events: &[Event], id: OperationId) -> Option<String> {
+    events.iter().find_map(|event| match event {
+        Event::OperationChanged {
+            id: changed,
+            state: OperationState::Failed,
+            detail,
+            ..
+        } if *changed == id => detail.clone(),
+        _ => None,
+    })
+}
+
+/// The Branch tab's read through the engine: the range it answers, or the message it
+/// fails with.
+fn branch_change(dir: &Path, base: Option<&str>) -> Result<RevisionRange, String> {
+    let mut engine = engine_on(dir);
+    let kind = gm_schema::CommandKind::LoadBranchChange {
+        base: base.map(str::to_owned),
+    };
+    let events = engine.handle(
+        OperationId(2),
+        &gm_schema::Command {
+            actor: Actor::Human,
+            kind,
+        },
+    );
+    if let Some(message) = failure_of(&events, OperationId(2)) {
+        return Err(message);
+    }
+    for job in engine.take_range_jobs() {
+        for event in engine.range_report(job.run()) {
+            match event {
+                Event::RevisionRangeLoaded { range, .. } => return Ok(range),
+                Event::OperationChanged {
+                    state: OperationState::Failed,
+                    detail,
+                    ..
+                } => return Err(detail.unwrap_or_default()),
+                _ => {}
+            }
+        }
+    }
+    panic!("the branch change answered nothing");
+}
+
+/// The tags the engine lists, newest first.
+fn tags(dir: &Path) -> Vec<String> {
+    let mut engine = engine_on(dir);
+    engine.handle(
+        OperationId(2),
+        &gm_schema::Command {
+            actor: Actor::Human,
+            kind: gm_schema::CommandKind::ListTags,
+        },
+    );
+    for job in engine.take_tags_jobs() {
+        for event in engine.tags_report(job.run()) {
+            if let Event::TagsListed { tags, .. } = event {
+                return tags;
+            }
+        }
+    }
+    panic!("the tag listing answered nothing");
+}
+
+/// A commit whose author and committer dates are `date`, so tag order is set.
+fn commit_at(dir: &Path, message: &str, date: &str) {
+    git(dir, &["add", "-A"]);
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ])
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "commit {message:?} failed");
+}
+
+/// A repository with `main` (one commit), a `develop` at the same commit, and a
+/// `feature` branch checked out with one commit of its own.
+fn branches_repo() -> tempfile::TempDir {
+    let dir = repo();
+    let path = dir.path();
+    write(path, "base.txt", b"base\n");
+    commit(path, "base");
+    git(path, &["branch", "develop"]);
+    git(path, &["checkout", "-q", "-b", "feature"]);
+    write(path, "feature.txt", b"feature\n");
+    commit(path, "feature work");
+    dir
+}
+
+#[test]
+fn the_default_branch_comes_from_origin_head_when_it_names_a_local_branch() {
+    let dir = branches_repo();
+    let path = dir.path();
+    git(
+        path,
+        &["update-ref", "refs/remotes/origin/develop", "develop"],
+    );
+    git(
+        path,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/develop",
+        ],
+    );
+
+    let read = branch_change(path, None).unwrap();
+
+    assert_eq!(read.from_name, "develop");
+    assert_eq!(read.to_name, "feature");
+    let paths: Vec<&str> = read.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["feature.txt"]);
+}
+
+#[test]
+fn without_origin_head_the_default_branch_is_the_first_of_the_base_names() {
+    let dir = branches_repo();
+
+    let read = branch_change(dir.path(), None).unwrap();
+
+    assert_eq!(read.from_name, "main");
+    assert_eq!(read.to_name, "feature");
+}
+
+#[test]
+fn a_chosen_base_is_compared_by_its_name() {
+    let dir = branches_repo();
+
+    let read = branch_change(dir.path(), Some("develop")).unwrap();
+
+    assert_eq!(read.from_name, "develop");
+    assert_eq!(read.to_name, "feature");
+    assert_eq!(read.from_oid, rev(dir.path(), "develop"));
+}
+
+#[test]
+fn a_default_branch_that_is_checked_out_says_so() {
+    let dir = branches_repo();
+    git(dir.path(), &["checkout", "-q", "main"]);
+
+    let message = branch_change(dir.path(), None).unwrap_err();
+
+    assert_eq!(
+        message,
+        "You are on the default branch. Choose another base in the picker to compare with it."
+    );
+}
+
+#[test]
+fn a_detached_head_is_named_in_the_branch_change() {
+    let dir = branches_repo();
+    git(dir.path(), &["checkout", "-q", "--detach"]);
+
+    let read = branch_change(dir.path(), Some("main")).unwrap();
+
+    assert_eq!(read.to_name, "HEAD (detached)");
+    assert_eq!(read.tip, rev(dir.path(), "HEAD"));
+}
+
+#[test]
+fn no_default_branch_and_no_base_asks_for_a_base() {
+    // No `main` here: the only branch is `work`, so no default branch exists.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    git(path, &["init", "-q", "-b", "work"]);
+    write(path, "a.txt", b"a\n");
+    commit(path, "one");
+
+    let message = branch_change(path, None).unwrap_err();
+
+    assert_eq!(
+        message,
+        "No default branch found. Choose a base in the picker."
+    );
+}
+
+#[test]
+fn branches_with_no_common_history_name_both_branches() {
+    let dir = branches_repo();
+    let path = dir.path();
+    git(path, &["checkout", "-q", "--orphan", "lonely"]);
+    git(path, &["rm", "-q", "-rf", "."]);
+    write(path, "lone.txt", b"alone\n");
+    commit(path, "unrelated");
+
+    let message = branch_change(path, Some("main")).unwrap_err();
+
+    assert_eq!(message, "lonely and main have no common ancestor.");
+}
+
+#[test]
+fn tags_come_newest_first() {
+    let dir = repo();
+    let path = dir.path();
+    write(path, "a.txt", b"one\n");
+    commit_at(path, "old", "2020-01-01T00:00:00Z");
+    git(path, &["tag", "v-old"]);
+    write(path, "a.txt", b"two\n");
+    commit_at(path, "new", "2024-06-01T00:00:00Z");
+    git(path, &["tag", "v-new"]);
+
+    assert_eq!(tags(path), ["v-new", "v-old"]);
+}
+
+#[test]
+fn the_tag_listing_is_capped_at_500() {
+    let dir = repo();
+    let path = dir.path();
+    write(path, "a.txt", b"one\n");
+    commit(path, "one");
+    let mut refs = String::new();
+    for index in 0..505 {
+        writeln!(refs, "create refs/tags/t{index:04} HEAD").unwrap();
+    }
+    let mut child = Command::new("git")
+        .args(["update-ref", "--stdin"])
+        .current_dir(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(refs.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    assert_eq!(tags(path).len(), 500);
 }

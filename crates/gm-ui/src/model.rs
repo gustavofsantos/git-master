@@ -1535,6 +1535,8 @@ impl Model {
             // The revision reads are not shown yet; a later slice (CR2) routes them to the Changes page.
             Event::RevisionRangeLoaded { .. }
             | Event::RevisionStackLoaded { .. }
+            // The tag suggestions of the pickers are shown by a later slice (CR2).
+            | Event::TagsListed { .. }
             | Event::RestackPlanned { .. }
             | Event::RestackResolutionStarted { .. }
             | Event::RestackResolutionFinished { .. }
@@ -1965,6 +1967,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::CommitStackLoaded { id, .. }
         | Event::RevisionRangeLoaded { id, .. }
         | Event::RevisionStackLoaded { id, .. }
+        | Event::TagsListed { id, .. }
         | Event::FilesFound { id, .. }
         | Event::DirectoryListed { id, .. }
         | Event::FileRead { id, .. }

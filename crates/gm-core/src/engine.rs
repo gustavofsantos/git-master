@@ -36,7 +36,7 @@ use crate::health_session::{HealthJob, HealthOutcome, HealthUpdate};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::move_exec;
 use crate::move_preview;
-use crate::port::{HistoryRevs, ReviewSide};
+use crate::port::{GitError, HistoryRevs, RangeRead, ReviewSide};
 use crate::reflog;
 use crate::remote::{RemoteJob, RemoteReport};
 use crate::restack_resolutions::{self, Resolution};
@@ -44,7 +44,7 @@ use crate::restack_session;
 use crate::review;
 use crate::review_session::{self, ReviewSession, review_store};
 use crate::review_store::{AgentThread, NewScorecard, NewScorecardComment, Reply, ReviewStore};
-use crate::revision_range::{RangeJob, RangeReport};
+use crate::revision_range::{self, RangeJob, RangeReport, TagsJob, TagsReport};
 use crate::scorecards;
 use crate::script::builtins;
 use crate::script::dry;
@@ -124,6 +124,10 @@ pub struct Engine {
     revision_stack: Option<ActiveDetail>,
     /// Revision stack reads accepted since the last call; see `take_revision_stack_jobs`.
     revision_stack_jobs: Vec<StackJob>,
+    /// The tag listing in flight (D231 (4b)), if any.
+    tags_read: Option<ActiveDetail>,
+    /// Tag listings accepted since the last call; see `take_tags_jobs`.
+    tags_jobs: Vec<TagsJob>,
     /// The file list of the open repository (N1, N2).
     files: Option<FilesSession>,
     /// Reads of the file list accepted since the last call; see `take_index_jobs`.
@@ -368,6 +372,8 @@ impl Engine {
             range_jobs: Vec::new(),
             revision_stack: None,
             revision_stack_jobs: Vec::new(),
+            tags_read: None,
+            tags_jobs: Vec::new(),
             files: None,
             index_jobs: Vec::new(),
             files_search: None,
@@ -556,6 +562,12 @@ impl Engine {
     /// on a thread and passes its report to `revision_stack_report`.
     pub fn take_revision_stack_jobs(&mut self) -> Vec<StackJob> {
         std::mem::take(&mut self.revision_stack_jobs)
+    }
+
+    /// The tag listings accepted since the last call. The caller runs each on a thread
+    /// and passes its report to `tags_report`.
+    pub fn take_tags_jobs(&mut self) -> Vec<TagsJob> {
+        std::mem::take(&mut self.tags_jobs)
     }
 
     /// The remote operations accepted since the last call. The caller runs each
@@ -2086,6 +2098,31 @@ impl Engine {
         }
     }
 
+    /// Turns the answer of a tag listing into events. A report for a listing that was
+    /// superseded, or for a repository that was left, is dropped.
+    pub fn tags_report(&mut self, report: TagsReport) -> Vec<Event> {
+        match self.tags_read.take() {
+            Some(active) if active.op.id == report.id => {
+                let (state, detail) = match &report.outcome {
+                    Ok(_) => (OperationState::Done, None),
+                    Err(message) => (OperationState::Failed, Some(message.clone())),
+                };
+                let mut events = vec![Self::operation_changed(&active.op, state, detail)];
+                if let Ok(tags) = report.outcome {
+                    events.push(Event::TagsListed {
+                        id: report.id,
+                        tags,
+                    });
+                }
+                events
+            }
+            other => {
+                self.tags_read = other;
+                Vec::new()
+            }
+        }
+    }
+
     /// Turns the answer of a revision stack read into events. A report for a read
     /// that was superseded, or for a repository that was left, is dropped.
     pub fn revision_stack_report(&mut self, report: StackReport) -> Vec<Event> {
@@ -2493,6 +2530,10 @@ impl Engine {
             CommandKind::LoadRevisionStack { base, tip, files } => {
                 self.start_revision_stack(id, actor, kind, base, tip, files)
             }
+            CommandKind::LoadBranchChange { base } => {
+                self.start_branch_change(id, actor, kind, base.as_deref())
+            }
+            CommandKind::ListTags => self.start_tags(id, actor, kind),
             CommandKind::LoadCommitDetail { oid } => self.start_detail(id, actor, kind, oid),
             CommandKind::SearchFiles { query } => self.start_files_search(id, actor, kind, query),
             CommandKind::ReadFile { path } => self.start_file_read(id, actor, kind, path),
@@ -2932,6 +2973,82 @@ impl Engine {
             .git
             .revision_range(&root, from, to, mode)
             .map_err(|e| e.0)?;
+        Ok(self.queue_range(id, actor, kind, read))
+    }
+
+    /// Starts the Branch tab's read (D231 (4b)): HEAD against the merge base with `base`,
+    /// or with the default branch when `base` is `None`. Each refusal of the page is
+    /// returned as its message, and nothing changes. Shares the range slot.
+    fn start_branch_change(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        base: Option<&str>,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let status = self.git.status(&root).map_err(|e| e.0)?;
+        if status.branch.oid.is_none() {
+            return Err("HEAD has no commits yet.".to_owned());
+        }
+        let current = status.branch.head.clone();
+        let to_name = current
+            .clone()
+            .unwrap_or_else(|| "HEAD (detached)".to_owned());
+        let (from_name, chosen) = if let Some(name) = base {
+            revision_range::check_revision("from", name).map_err(|e| e.0)?;
+            (name.to_owned(), true)
+        } else {
+            let locals = stack_session::locals(self.git.as_ref(), &root)?;
+            let default = stack_session::default_branch(self.git.as_ref(), &root, &locals)?
+                .ok_or_else(|| {
+                    "No default branch found. Choose a base in the picker.".to_owned()
+                })?;
+            (default, false)
+        };
+        if current.as_deref() == Some(from_name.as_str()) {
+            return Err(if chosen {
+                format!("{from_name} is the base. Choose another base in the picker.")
+            } else {
+                "You are on the default branch. Choose another base in the picker to compare with it."
+                    .to_owned()
+            });
+        }
+        let read = self
+            .git
+            .revision_range(&root, &from_name, "HEAD", RangeMode::SinceCommonAncestor)
+            .map_err(|e| e.0)?;
+        // The read names the revisions as typed; the page names the branches, and words a
+        // missing merge base in its own order and with its own full stop.
+        let typed_message = revision_range::no_common_ancestor(&from_name, "HEAD");
+        let page_message = format!("{to_name} and {from_name} have no common ancestor.");
+        let (from_label, to_label) = (from_name.clone(), to_name.clone());
+        let read: RangeRead = Box::new(move |stop| {
+            read(stop)
+                .map(|mut range| {
+                    range.from_name = from_label;
+                    range.to_name = to_label;
+                    range
+                })
+                .map_err(|error| {
+                    if error.0 == typed_message {
+                        GitError(page_message)
+                    } else {
+                        error
+                    }
+                })
+        });
+        Ok(self.queue_range(id, actor, kind, read))
+    }
+
+    /// Queues a range read: the one in flight is superseded and its events are returned.
+    fn queue_range(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        read: RangeRead,
+    ) -> Vec<Event> {
         // The read is built before the old one is stopped, so a refusal keeps the old one.
         let superseded = self.drop_range();
         let stop = Arc::new(AtomicBool::new(false));
@@ -2944,7 +3061,43 @@ impl Engine {
             stop: Arc::clone(&stop),
         });
         self.range_jobs.push(RangeJob { id, read, stop });
+        superseded
+    }
+
+    /// Starts the tag listing (D231 (4b)). A listing in flight is superseded.
+    fn start_tags(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let read = self.git.list_tags(&root).map_err(|e| e.0)?;
+        let superseded = self.drop_tags();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.tags_read = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.tags_jobs.push(TagsJob { id, read, stop });
         Ok(superseded)
+    }
+
+    /// Ends the tag listing: it is stopped, and a request still in flight is cancelled.
+    fn drop_tags(&mut self) -> Vec<Event> {
+        let Some(active) = self.tags_read.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![Self::operation_changed(
+            &active.op,
+            OperationState::Cancelled,
+            None,
+        )]
     }
 
     /// Starts the file diffs of the range between two full ids (D231 (4)). A read in
@@ -4218,6 +4371,7 @@ impl Engine {
         events.extend(self.drop_stack());
         events.extend(self.drop_range());
         events.extend(self.drop_revision_stack());
+        events.extend(self.drop_tags());
         events.extend(self.drop_files());
         events.extend(self.drop_provenance());
         events.extend(self.drop_health());
@@ -6030,6 +6184,8 @@ impl Engine {
                 | CommandKind::LoadReflog { .. }
                 | CommandKind::LoadRevisionRange { .. }
                 | CommandKind::LoadRevisionStack { .. }
+                | CommandKind::LoadBranchChange { .. }
+                | CommandKind::ListTags
                 | CommandKind::LoadSubmodule { .. }
                 | CommandKind::ListMembers
                 | CommandKind::ListRepoBranches { .. }
@@ -6931,6 +7087,8 @@ mod tests {
             to_oid: "b".repeat(40),
             from_short: "aaaaaaa".into(),
             to_short: "bbbbbbb".into(),
+            from_name: "v1".into(),
+            to_name: "main".into(),
             base: "a".repeat(40),
             tip: "b".repeat(40),
             files: vec![CommitFile {
@@ -7155,6 +7313,259 @@ mod tests {
             entry.kind,
             CommandKind::LoadRevisionRange { .. } | CommandKind::LoadRevisionStack { .. }
         )));
+    }
+
+    /// An engine on a repository with `head` checked out (`None` is detached), the local
+    /// branches `main`, `develop` and `feature`, and the canned range of `range_engine`.
+    fn branch_engine(head: Option<&str>, oid: Option<&str>) -> (Engine, FakeGit) {
+        let status = RepoStatus {
+            root: "/r".into(),
+            branch: gm_schema::BranchInfo {
+                head: head.map(str::to_owned),
+                oid: oid.map(str::to_owned),
+                ..gm_schema::BranchInfo::default()
+            },
+            ..RepoStatus::default()
+        };
+        let (engine, git) = range_engine();
+        drop(engine);
+        git.set_status(Ok(status));
+        let local = |name: &str| gm_schema::BranchEntry {
+            name: name.into(),
+            is_remote: false,
+            is_current: head == Some(name),
+            upstream: None,
+            author_email: None,
+        };
+        git.set_branches(Ok(vec![local("main"), local("develop"), local("feature")]));
+        (Engine::new(Box::new(git.clone())), git)
+    }
+
+    /// The branch change of the Branch tab, with `base` as given (`None` for the default).
+    fn load_branch_change(base: Option<&str>) -> CommandKind {
+        CommandKind::LoadBranchChange {
+            base: base.map(str::to_owned),
+        }
+    }
+
+    /// The failure detail of operation `id` in `events`, if it failed.
+    fn failure_of(events: &[Event], id: OperationId) -> Option<String> {
+        events.iter().find_map(|event| match event {
+            Event::OperationChanged {
+                id: changed,
+                state: OperationState::Failed,
+                detail,
+                ..
+            } if *changed == id => detail.clone(),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_branch_change_compares_head_with_the_chosen_base() {
+        let (mut engine, _) = branch_engine(Some("feature"), Some("c"));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_branch_change(Some("main"))));
+        let events = run_range_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionRangeLoaded { id: OperationId(2), range }
+                if range.from_name == "main" && range.to_name == "feature"
+        )));
+    }
+
+    #[test]
+    fn a_branch_change_without_a_base_uses_origin_head_then_the_first_local_base_name() {
+        let (mut engine, git) = branch_engine(Some("feature"), Some("c"));
+        git.set_origin_head(Some("origin/develop"));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_branch_change(None)));
+        let events = run_range_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionRangeLoaded { range, .. } if range.from_name == "develop"
+        )));
+
+        git.set_origin_head(None);
+        engine.handle(OperationId(3), &command(load_branch_change(None)));
+        let events = run_range_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionRangeLoaded { range, .. } if range.from_name == "main"
+        )));
+    }
+
+    #[test]
+    fn a_default_branch_that_is_checked_out_is_refused_with_the_page_message() {
+        let (mut engine, _) = branch_engine(Some("main"), Some("c"));
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(OperationId(2), &command(load_branch_change(None)));
+        assert_eq!(
+            failure_of(&events, OperationId(2)).as_deref(),
+            Some(
+                "You are on the default branch. Choose another base in the picker to compare with it."
+            )
+        );
+        assert!(engine.take_range_jobs().is_empty());
+    }
+
+    #[test]
+    fn a_chosen_base_that_is_checked_out_is_refused_by_name() {
+        let (mut engine, _) = branch_engine(Some("feature"), Some("c"));
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(
+            OperationId(2),
+            &command(load_branch_change(Some("feature"))),
+        );
+        assert_eq!(
+            failure_of(&events, OperationId(2)).as_deref(),
+            Some("feature is the base. Choose another base in the picker.")
+        );
+    }
+
+    #[test]
+    fn no_default_branch_and_no_base_asks_for_a_base() {
+        let (mut engine, git) = branch_engine(Some("feature"), Some("c"));
+        git.set_branches(Ok(vec![gm_schema::BranchEntry {
+            name: "feature".into(),
+            is_remote: false,
+            is_current: true,
+            upstream: None,
+            author_email: None,
+        }]));
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(OperationId(2), &command(load_branch_change(None)));
+        assert_eq!(
+            failure_of(&events, OperationId(2)).as_deref(),
+            Some("No default branch found. Choose a base in the picker.")
+        );
+    }
+
+    #[test]
+    fn an_unborn_head_is_refused() {
+        let (mut engine, _) = branch_engine(Some("feature"), None);
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(OperationId(2), &command(load_branch_change(Some("main"))));
+        assert_eq!(
+            failure_of(&events, OperationId(2)).as_deref(),
+            Some("HEAD has no commits yet.")
+        );
+    }
+
+    #[test]
+    fn a_detached_head_is_named_in_the_branch_change() {
+        let (mut engine, _) = branch_engine(None, Some("c"));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_branch_change(Some("main"))));
+        let events = run_range_jobs(&mut engine);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RevisionRangeLoaded { range, .. } if range.to_name == "HEAD (detached)"
+        )));
+    }
+
+    #[test]
+    fn a_branch_change_without_a_merge_base_names_the_branches_in_page_order() {
+        let (mut engine, git) = branch_engine(Some("feature"), Some("c"));
+        git.set_range(Err(GitError(revision_range::no_common_ancestor(
+            "main", "HEAD",
+        ))));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_branch_change(Some("main"))));
+        let events = run_range_jobs(&mut engine);
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("feature and main have no common ancestor.".into()),
+        }));
+    }
+
+    #[test]
+    fn a_branch_change_base_starting_with_a_dash_is_refused_like_a_range() {
+        let (mut engine, _) = branch_engine(Some("feature"), Some("c"));
+        engine.handle(OperationId(1), &open());
+        let events = engine.handle(OperationId(2), &command(load_branch_change(Some("-x"))));
+        assert_eq!(
+            failure_of(&events, OperationId(2)).as_deref(),
+            Some("from: \"-x\" is not a revision")
+        );
+    }
+
+    #[test]
+    fn a_branch_change_supersedes_a_range_read_in_flight() {
+        let (mut engine, _) = branch_engine(Some("feature"), Some("c"));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(load_range("v1", "main")));
+        let events = engine.handle(OperationId(3), &command(load_branch_change(Some("main"))));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+    }
+
+    #[test]
+    fn a_tag_listing_answers_once_it_is_read() {
+        let (mut engine, git) = branch_engine(Some("feature"), Some("c"));
+        git.set_tags(Ok(vec!["v2.0".into(), "v1.0".into()]));
+        engine.handle(OperationId(1), &open());
+        let started = engine.handle(OperationId(2), &command(CommandKind::ListTags));
+        assert!(
+            !started
+                .iter()
+                .any(|e| matches!(e, Event::TagsListed { .. }))
+        );
+
+        let mut events = Vec::new();
+        for job in engine.take_tags_jobs() {
+            events.extend(engine.tags_report(job.run()));
+        }
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::TagsListed { id: OperationId(2), tags } if tags == &["v2.0", "v1.0"]
+        )));
+        assert!(events.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        }));
+    }
+
+    #[test]
+    fn a_newer_tag_listing_supersedes_the_one_in_flight_and_neither_is_logged() {
+        let (mut engine, _) = branch_engine(Some("feature"), Some("c"));
+        engine.handle(OperationId(1), &open());
+        engine.handle(OperationId(2), &command(CommandKind::ListTags));
+        let superseding = engine.handle(OperationId(3), &command(CommandKind::ListTags));
+        assert!(superseding.contains(&Event::OperationChanged {
+            id: OperationId(2),
+            actor: Actor::Human,
+            state: OperationState::Cancelled,
+            detail: None,
+        }));
+
+        let mut jobs = engine.take_tags_jobs().into_iter();
+        let stale = jobs.next().unwrap();
+        assert!(stale.stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(engine.tags_report(stale.run()).is_empty());
+        let current = jobs.next().unwrap();
+        let events = engine.tags_report(current.run());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::TagsListed {
+                id: OperationId(3),
+                ..
+            }
+        )));
+        assert!(
+            !engine
+                .log()
+                .iter()
+                .any(|entry| matches!(entry.kind, CommandKind::ListTags))
+        );
     }
 
     #[test]

@@ -168,6 +168,17 @@ pub enum CommandKind {
         tip: String,
         files: Vec<CommitFile>,
     },
+    /// Reads the Branch tab (D231 (4b)): HEAD against the merge base with `base`, or with
+    /// the default branch when `base` is `None` (the rule of `ListMergedBranches`).
+    /// Answers `RevisionRangeLoaded`. Never recorded in the command log (D28). Superseded
+    /// by the next range read, like `LoadRevisionRange`.
+    LoadBranchChange {
+        base: Option<String>,
+    },
+    /// Lists the tags of the repository, newest first, at most 500 (D231 (4b)), for the
+    /// pickers' suggestions. Never recorded in the command log (D28). A request in
+    /// flight is superseded by the next one.
+    ListTags,
     /// Reads `REFLOG_PAGE` entries of the reflog of HEAD (B3, D95), newest
     /// first, after the `skip` newest ones. Never recorded in the command log
     /// (D28). An unborn HEAD or a repository without a reflog is an empty list.
@@ -1386,6 +1397,11 @@ pub enum Event {
     RevisionStackLoaded {
         id: OperationId,
         diffs: Vec<FileDiff>,
+    },
+    /// Answers `ListTags`: the tag names, newest first.
+    TagsListed {
+        id: OperationId,
+        tags: Vec<String>,
     },
     /// Answers `ListWorktrees`, and follows each `RefreshStatus` and
     /// `OpenRepo`, so the worktree list is as fresh as the status.

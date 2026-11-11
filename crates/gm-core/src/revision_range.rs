@@ -8,7 +8,10 @@ use std::sync::atomic::AtomicBool;
 
 use gm_schema::{CommitFile, DETAIL_FILE_LIMIT, OperationId, RangeMode, RevisionRange};
 
-use crate::port::{GitError, RangeRead};
+use crate::port::{GitError, RangeRead, TagsRead};
+
+/// How many tags `ListTags` lists, newest first (D231 (4b)).
+pub const TAG_LIMIT: usize = 500;
 
 /// One range read, run on a thread of its own. `stop` is shared with the engine,
 /// which sets it when the read is superseded.
@@ -48,6 +51,50 @@ pub fn check_revision(side: &str, rev: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// One tag listing, run on a thread of its own. `stop` is shared with the engine.
+pub struct TagsJob {
+    pub id: OperationId,
+    pub read: TagsRead,
+    pub stop: Arc<AtomicBool>,
+}
+
+/// What a tags job answers. A failure carries git's own message.
+pub struct TagsReport {
+    pub id: OperationId,
+    pub outcome: Result<Vec<String>, String>,
+}
+
+impl TagsJob {
+    /// Runs the listing to its end, or to the stop request.
+    #[must_use]
+    pub fn run(self) -> TagsReport {
+        let outcome = (self.read)(&self.stop).map_err(|error| error.0);
+        TagsReport {
+            id: self.id,
+            outcome,
+        }
+    }
+}
+
+/// The message of a range whose two sides share no history. Both sides are named as
+/// given.
+#[must_use]
+pub fn no_common_ancestor(from: &str, to: &str) -> String {
+    format!("{from} and {to} have no common ancestor")
+}
+
+/// The tag names of `git for-each-ref --format=%(refname:short) refs/tags`, one per
+/// line, in Git's order.
+#[must_use]
+pub fn tag_names(raw: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(raw)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The full id the diff starts from: `from_oid` for `Direct`, the merge base of
 /// the two for `SinceCommonAncestor`. `from` and `to` are the revisions as the
 /// caller named them, for the message when the two share no history.
@@ -61,7 +108,7 @@ pub fn base_of(
     match mode {
         RangeMode::Direct => Ok(from_oid.to_owned()),
         RangeMode::SinceCommonAncestor => {
-            merge_base.ok_or_else(|| GitError(format!("{from} and {to} have no common ancestor")))
+            merge_base.ok_or_else(|| GitError(no_common_ancestor(from, to)))
         }
     }
 }
@@ -191,6 +238,15 @@ mod tests {
                 .as_deref(),
             Some("0123456789abcdef0123456789abcdef01234567")
         );
+    }
+
+    #[test]
+    fn tag_names_keep_each_line_in_order_and_drop_blank_ones() {
+        assert_eq!(
+            tag_names(b"v2.0\nv1.0\n\nrelease-candidate\n"),
+            ["v2.0", "v1.0", "release-candidate"]
+        );
+        assert!(tag_names(b"").is_empty());
     }
 
     #[test]
