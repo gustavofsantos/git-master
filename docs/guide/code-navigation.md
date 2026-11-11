@@ -88,8 +88,6 @@ The **Files** tab has two panes: the folder tree on the left and the viewer on t
 
 ### Heat dots
 
-> **Planned.** Heat dots in the folder tree are not available in the app yet.
-
 A file among the hottest tenth of the repository has a heat dot after its name, and a folder shows the dot of the hottest file inside it. See [Code health](code-health.md#heat-in-the-folder-tree).
 
 ### File viewer
@@ -161,8 +159,6 @@ A file with a syntax error is still coloured as far as the parser can read it.
 The file tree is navigated with the keyboard, not only with the mouse.
 
 ### Health tab
-
-> **Planned.** The Health tab is not available in the app yet.
 
 The **Health** tab ranks the files of the repository by how much they changed recently and shows the details of the selected file. See [Code health](code-health.md).
 

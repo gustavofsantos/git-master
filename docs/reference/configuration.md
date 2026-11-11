@@ -38,7 +38,7 @@ GitMaster keeps per-repository state in `.git/gitmaster/`, inside the Git common
 | `.git/gitmaster/review.db` | The comments of the [local review](../agents/local-review.md) and their states. Their snapshots are kept in `refs/gitmaster/review/`. The scorecards of the [review workflows](../agents/reviewers.md) are kept here too. | Scorecards planned |
 | `.git/gitmaster/workflows/` | Workflow files that apply to this repository only, such as a review for one task. | Planned |
 | `.git/gitmaster/threads.db` | The [threads](../guide/threads.md) captured from agent sessions in this repository: conversation, tool calls and edits, with a search index. Readable only by you. | |
-| `.git/gitmaster/health.db` | The index of [code health](../guide/code-health.md): what each commit changed, read once from the history. The app and `gitmaster mcp` share it. Deleting it only makes GitMaster read the history again. | Planned |
+| `.git/gitmaster/health.db` | The index of [code health](../guide/code-health.md): what each commit changed, read once from the history. The app and `gitmaster mcp` share it. Deleting it only makes GitMaster read the history again. | |
 | `.git/gitmaster/repo-id` | A random id for this clone, written when the repository is first bound to a [context](../guide/contexts.md), so the binding survives moving the folder. | Planned |
 | `.git/gitmaster/threads-spool/`, `threads-tmp/`, `threads.log` | Events waiting to be written when the database was busy, temporary copies of files the agent is about to edit, and the capture log. The log keeps at most 256 KiB. | |
 | `.git/gitmaster/restack.json` | The record of the last restack, which **Undo restack** reads to put the branches back. | |
@@ -103,8 +103,8 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. `gitmaster worktree add` reads it; see [Command line](cli.md#create-a-worktree). The worktree dialog does not read it yet. | Planned |
 | `gitmaster.worktree.include` | Any | `symlink` | How `gitmaster worktree add` brings the paths of `.worktreeinclude` into a new worktree: `symlink`, `reflink` or `none`. See [Command line](cli.md#share-ignored-files-worktreeinclude). | |
 | `gitmaster.workspace.root` | Any | `~/workspaces` | The base folder for new [workspaces](../guide/workspaces.md). | Planned |
-| `gitmaster.health.*` | Any | See [Code health](../guide/code-health.md#configuration) | The half-life, dormancy gap, analysis window, excluded paths and ignored commits of code health. | Planned |
-| `gitmaster-health.<path>.*` | Any | The repository's values | The half-life and dormancy gap of the files under `<path>`. See [Code health](../guide/code-health.md#configuration). | Planned |
+| `gitmaster.health.*` | Any | See [Code health](../guide/code-health.md#configuration) | The half-life, dormancy gap, analysis window, excluded paths and ignored commits of code health. | |
+| `gitmaster-health.<path>.*` | Any | The repository's values | The half-life and dormancy gap of the files under `<path>`. See [Code health](../guide/code-health.md#configuration). | |
 | `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | |
 | `branch.<name>.stackParentBase` | Repository | Not set | The commit the parent branch pointed to when this branch was last created or re-anchored. | |
 
