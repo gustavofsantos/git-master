@@ -834,6 +834,16 @@ Requested by the author on 2026-11-11 for daily use on very large repositories a
 
 **Known gaps:** the hotspot map has no keyboard (the arrows drive the list only); complexity is an indicator and a constraint but does not weight the rank (D229 (1)); churn is weak in the backtest on git/git (lift 1.1 to 1.4), so its constraint waits for a run on a large repository of the author's; dormancy break could not be backtested on git/git; line survival follows first-parent history, so churn inside a side branch before its merge is not seen (D228 (2)); the rest of `scripts/ui-smoke.sh` still has stale coordinates (not this slice). `cargo audit` reported RUSTSEC-2026-0459 (`libsqlite3-sys` 0.38.2 through `rusqlite` 0.40) before this slice; `rusqlite` 0.41 fixes it with no code change.
 
+## Slice 6r: compare changes (planned 2026-11-11; D231)
+
+Requested by the author on 2026-11-11: the Changes page gets tabs for the branch against the default branch, any two revisions, and the uncommitted changes. Behavior: `docs/guide/compare-changes.md`, `Planned`. Sub-slices use the prefix CR.
+
+- **CR0, docs and decision** (done 2026-11-11): the page, D231, this entry.
+- **CR1, engine:** `GitPort::revision_range` and `GitPort::revision_stack`, the `Command`s and `Event`s of D231 (4), the engine's supersede handling, and real-git tests in `crates/gm-core/tests/compare_real_git.rs` (branch against its base with commits landed on the base since, two tags, a rename, a binary file, a root commit, an unknown revision, a revision that starts with `-`).
+- **CR2, UI model:** the pure state of the tabs, the two pickers and the suggestions, in `gm-ui` and tested without a window; the palette actions in `action_registry.rs`.
+- **CR3, UI view:** the tab bar, the pickers, the file list and the read-only stacked diff, reusing the commit view's rows; the refresh after a status refresh.
+- **CR4, close:** a UI smoke scenario in both themes, the docs `status` and markers, this entry.
+
 ## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
 
 Requested by the author on 2026-11-09. Behavior in `docs/guide/memories.md` and `docs/reference/mcp-tools.md` (`Planned`). Order: as the author chose on 2026-11-09, after the review workflows of slice 8s (S4); D219 replaces the gates of slice 8r that it was planned after.

@@ -53,6 +53,7 @@ GitMaster runs on Linux and macOS. Each release has prebuilt Linux binaries for 
 | Concepts | [Trust and safety](concepts/trust-and-safety.md) | Who may change a repository, and what the app records. |
 | Guide | [Working Copy](guide/working-copy.md) | Changes, staging and commits. |
 | Guide | [Diff and staging](guide/diff-and-staging.md) | Reading diffs, and staging chunks and lines. |
+| Guide | [Compare changes](guide/compare-changes.md) | The branch against the default branch, and any two revisions. |
 | Guide | [History](guide/history.md) | The commit graph and commit details. |
 | Guide | [Branches](guide/branches.md) | Switching, creating and deleting branches. |
 | Guide | [Stacks](guide/stacks.md) | Branch stacks and restack. Preview feature. |

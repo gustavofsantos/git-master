@@ -7,6 +7,8 @@ order: 10
 
 The Working Copy shows the changes in your repository that are not committed yet. Use it to choose what goes into the next commit, write the commit message and commit.
 
+It is the **Uncommitted** tab of the **Changes** page. The other tabs of the page compare your branch, or any two revisions, read-only; see [Compare changes](compare-changes.md).
+
 ## Changed files
 
 The header reads **Working Copy** and shows how many files changed, for example **6 changed**. The list groups the changed files under their folder:
