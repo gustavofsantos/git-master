@@ -4,20 +4,26 @@
 //! it and sends the requests it plans. Rows are drawn by a `uniform_list`, so only the rows on
 //! screen are built.
 
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
+use std::rc::Rc;
 
 use gm_schema::{ChurnSummary, FileHealth, Partner, SPARK_BARS, Trend};
 use gpui::{
-    Context, Div, Entity, FocusHandle, FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent,
-    Pixels, ScrollStrategy, Stateful, Subscription, UniformListScrollHandle, Window, div,
-    prelude::*, px, uniform_list,
+    AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, FontWeight, Hsla, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, ScrollStrategy, Stateful, Subscription,
+    UniformListScrollHandle, Window, canvas, div, prelude::*, px, uniform_list,
 };
 
-use crate::health_page::{self, DORMANT_SHOWN, HealthState, heat_share, spark_heights};
+use crate::health_page::{
+    self, DORMANT_SHOWN, HealthState, HeatBand, HotspotView, heat_share, human_size, spark_heights,
+};
 use crate::icon::{self, Icon};
 use crate::text_area::TextArea;
 use crate::theme;
+use crate::treemap::{self, MapNode, Rect};
 use crate::view::{Screen, StatusView};
+use crate::window_chrome;
 
 /// A row of the hotspots list, as tall as a row of the file tree.
 const ROW_HEIGHT: f32 = 24.;
@@ -37,14 +43,32 @@ const CHURN_SECTION_HEIGHT: f32 = 120.;
 const CHURN_BAR_MAX: f32 = 48.;
 const CHURN_BAR_WIDTH: f32 = 14.;
 const CHURN_COLUMN_WIDTH: f32 = 40.;
+/// The map: the header strip of a folder's name, the shortest side a box may have to be drawn,
+/// the size of the map before its first paint, and the smallest box that shows a file's name.
+const MAP_HEADER: f64 = 18.;
+const MAP_MIN_SIDE: f64 = 4.;
+const MAP_DEFAULT_SIZE: (f64, f64) = (720., 420.);
+const MAP_NAME_MIN_WIDTH: f64 = 56.;
+const MAP_NAME_MIN_HEIGHT: f64 = 16.;
 
-/// The window's part of the Health tab: the filter box, the hotspot list's scroll and its focus.
-/// Its state is `model.health`.
+/// The map's boxes, made for one size of the map and one revision of the health state.
+struct MapLayout {
+    size: (f64, f64),
+    rev: u64,
+    nodes: Vec<MapNode>,
+}
+
+/// The window's part of the Health tab: the filter box, the hotspot list's scroll and its focus,
+/// and the map's size and layout. Its state is `model.health`.
 pub(crate) struct HealthView {
     pub(crate) query: Entity<TextArea>,
     pub(crate) list: UniformListScrollHandle,
     /// The hotspot list takes the arrow and page keys while it has focus.
     pub(crate) focus: FocusHandle,
+    /// The map's size in pixels, as its canvas last painted it; the default before that.
+    map_size: Rc<Cell<(f64, f64)>>,
+    /// The map's boxes. Laid out again only when the size or the health state changed.
+    map_layout: RefCell<Option<MapLayout>>,
 }
 
 impl HealthView {
@@ -53,8 +77,45 @@ impl HealthView {
             query,
             list: UniformListScrollHandle::new(),
             focus,
+            map_size: Rc::new(Cell::new(MAP_DEFAULT_SIZE)),
+            map_layout: RefCell::new(None),
         }
     }
+
+    /// Lays the map out again when its size or the health state changed since the last layout.
+    fn ensure_layout(&self, health: &HealthState) {
+        let size = self.map_size.get();
+        let mut slot = self.map_layout.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|layout| same_size(layout.size, size) && layout.rev == health.rev())
+        {
+            return;
+        }
+        let files: Vec<(usize, &str, u64)> = health
+            .map_files()
+            .iter()
+            .map(|(index, path, bytes)| (*index, path.as_str(), *bytes))
+            .collect();
+        let area = Rect {
+            x: 0.,
+            y: 0.,
+            w: size.0,
+            h: size.1,
+        };
+        let scope = health_page::scope_of(health.filter());
+        let nodes = treemap::layout(&files, scope, area, MAP_HEADER, MAP_MIN_SIDE);
+        *slot = Some(MapLayout {
+            size,
+            rev: health.rev(),
+            nodes,
+        });
+    }
+}
+
+/// Whether two map sizes are the same. Compared by bits: the size only changes by a layout pass.
+fn same_size(a: (f64, f64), b: (f64, f64)) -> bool {
+    a.0.to_bits() == b.0.to_bits() && a.1.to_bits() == b.1.to_bits()
 }
 
 /// The subscription that keeps the model's filter in step with the box. Made with the window.
@@ -93,6 +154,24 @@ impl StatusView {
     /// Shows the details of the file at `path`.
     fn select_health_file(&mut self, path: &str, cx: &mut Context<Self>) {
         self.model.health.select(path);
+        cx.notify();
+    }
+
+    /// Shows the hotspots as `view`: the list or the map.
+    fn set_hotspot_view(&mut self, view: HotspotView, cx: &mut Context<Self>) {
+        self.model.health.set_view(view);
+        cx.notify();
+    }
+
+    /// Puts `folder` in the filter box, as typing it would, so the map and the list look inside it.
+    fn open_health_folder(&mut self, folder: &str, cx: &mut Context<Self>) {
+        let text = folder.to_owned();
+        self.health_view
+            .query
+            .update(cx, |area, cx| area.set_text(&text, cx));
+        if self.model.health.set_filter(&text) {
+            self.health_view.list.scroll_to_item(0, ScrollStrategy::Top);
+        }
         cx.notify();
     }
 
@@ -257,7 +336,8 @@ impl StatusView {
         )
     }
 
-    /// The hotspots: a heading, then the list of the rows under the filter.
+    /// The hotspots: a heading with the choice of list or map, then the rows under the filter or
+    /// the map of them.
     fn hotspots(&self, cx: &mut Context<Self>) -> Div {
         let health = &self.model.health;
         let count = health.rows().len();
@@ -270,6 +350,8 @@ impl StatusView {
                 .text_color(theme::muted())
                 .child(empty_text(health))
                 .into_any_element()
+        } else if health.view() == HotspotView::Map {
+            self.hotspot_map(cx).into_any_element()
         } else {
             hotspot_list(
                 count,
@@ -291,10 +373,127 @@ impl StatusView {
                     .px_4()
                     .pt_3()
                     .pb_1()
-                    .child(section_title("Hotspots")),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(section_title("Hotspots"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_4()
+                            .child(self.view_button(
+                                "List",
+                                "health-view-list",
+                                HotspotView::List,
+                                cx,
+                            ))
+                            .child(self.view_button(
+                                "Map",
+                                "health-view-map",
+                                HotspotView::Map,
+                                cx,
+                            )),
+                    ),
             )
             .child(body)
             .child(churn_section(health))
+    }
+
+    /// One of the List and Map choices above the hotspots, underlined while it is shown, as the
+    /// tabs of the Code page are.
+    fn view_button(
+        &self,
+        label: &'static str,
+        id: &'static str,
+        view: HotspotView,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let active = self.model.health.view() == view;
+        div()
+            .id(id)
+            .cursor_pointer()
+            .h(px(24.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .border_b_2()
+            .border_color(if active {
+                theme::accent()
+            } else {
+                theme::panel()
+            })
+            .text_xs()
+            .font_weight(if active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(if active {
+                theme::text()
+            } else {
+                theme::muted()
+            })
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.set_hotspot_view(view, cx);
+                }),
+            )
+    }
+
+    /// The map of the hotspots: a box per folder under the filter, with its files as boxes
+    /// inside, sized by their bytes and colored by their heat. The boxes are laid out for the
+    /// size the map was last painted at; a canvas measures it and asks for a redraw on a change.
+    fn hotspot_map(&self, cx: &mut Context<Self>) -> Div {
+        let health = &self.model.health;
+        self.health_view.ensure_layout(health);
+        let layout = self.health_view.map_layout.borrow();
+        let nodes = layout
+            .as_ref()
+            .map_or(&[][..], |layout| layout.nodes.as_slice());
+        let selected = health.selected();
+
+        let size = Rc::clone(&self.health_view.map_size);
+        let measure = canvas(
+            move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
+                let now = (
+                    f64::from(f32::from(bounds.size.width)),
+                    f64::from(f32::from(bounds.size.height)),
+                );
+                if !same_size(size.get(), now) {
+                    size.set(now);
+                    // A refresh asked for while painting is lost; the next frame lays the map
+                    // out again at the size just measured.
+                    window.on_next_frame(|window, _| window.refresh());
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .size_full();
+
+        let mut boxes: Vec<AnyElement> = Vec::new();
+        for node in nodes {
+            boxes.push(map_folder(node, cx).into_any_element());
+            for (index, rect) in &node.files {
+                if let Some(file) = health.file(*index) {
+                    let chosen = selected == Some(file.path.as_str());
+                    boxes
+                        .push(map_file(*index, file, *rect, health, chosen, cx).into_any_element());
+                }
+            }
+        }
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .relative()
+            .overflow_hidden()
+            .child(measure)
+            .children(boxes)
     }
 
     /// The details of the selected file, or nothing when no file is selected.
@@ -379,6 +578,120 @@ impl StatusView {
                 ),
         )
     }
+}
+
+/// The box of a folder: a hairline border, its name in a muted strip across the top. Clicking the
+/// name puts the folder in the filter box. The files of the scope are named "files here".
+fn map_folder(node: &MapNode, cx: &Context<StatusView>) -> Div {
+    let rect = node.rect;
+    let name = if node.folder.is_empty() {
+        "files here".to_owned()
+    } else {
+        node.folder
+            .rsplit('/')
+            .next()
+            .unwrap_or(&node.folder)
+            .to_owned()
+    };
+    let strip = div()
+        .h(Pixels::from(MAP_HEADER))
+        .px_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_xs()
+        .text_color(theme::muted())
+        .child(name);
+    let strip = if node.folder.is_empty() {
+        strip
+    } else {
+        let folder = node.folder.clone();
+        strip.cursor_pointer().on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.open_health_folder(&folder, cx);
+            }),
+        )
+    };
+    div()
+        .absolute()
+        .left(Pixels::from(rect.x))
+        .top(Pixels::from(rect.y))
+        .w(Pixels::from(rect.w))
+        .h(Pixels::from(rect.h))
+        .border_1()
+        .border_color(theme::hairline())
+        .overflow_hidden()
+        .child(strip)
+}
+
+/// The box of a file, at `rect` in the map: its heat as the fill (the hottest tenth) or a muted
+/// fill, its name when the box is large enough, and the path, rank and size on hover. A click
+/// selects the file; the selected box has a 2 px outline. Boxes are inset by half a pixel, so
+/// neighbours are 1 px apart.
+fn map_file(
+    index: usize,
+    file: &FileHealth,
+    rect: Rect,
+    health: &HealthState,
+    chosen: bool,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let band = health.file_band(&file.path).map(|(band, _)| band);
+    let color = band.map_or_else(theme::hairline, theme::heat);
+    // White on the hottest band, the text color on the others: each keeps its contrast.
+    let name_color = if band == Some(HeatBand::Top1) {
+        theme::on_accent()
+    } else {
+        theme::text()
+    };
+    let (w, h) = ((rect.w - 1.).max(0.), (rect.h - 1.).max(0.));
+    let name = file
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&file.path)
+        .to_owned();
+    let label = (w >= MAP_NAME_MIN_WIDTH && h >= MAP_NAME_MIN_HEIGHT).then(|| {
+        div()
+            .px_1()
+            .text_xs()
+            .text_color(name_color)
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(name)
+    });
+    let tip = format!(
+        "{} · rank {} of {} · {}",
+        file.path,
+        file.rank,
+        health.of(),
+        human_size(file.bytes)
+    );
+    let path = file.path.clone();
+    div()
+        .id(("health-map-file", index))
+        .absolute()
+        .left(Pixels::from(rect.x + 0.5))
+        .top(Pixels::from(rect.y + 0.5))
+        .w(Pixels::from(w))
+        .h(Pixels::from(h))
+        .bg(color)
+        .overflow_hidden()
+        .cursor_pointer()
+        .when(chosen, |boxed| boxed.border_2().border_color(theme::text()))
+        .tooltip(window_chrome::hint(tip))
+        .children(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.select_health_file(&path, cx);
+            }),
+        )
 }
 
 /// A small heading of a section.
@@ -753,6 +1066,7 @@ fn survival_column(age: u32, fill: f64, label: &str) -> Div {
         .items_center()
         .child(
             div()
+                .flex_none()
                 .w(px(CHURN_BAR_WIDTH))
                 .h(px(CHURN_BAR_MAX))
                 .flex()

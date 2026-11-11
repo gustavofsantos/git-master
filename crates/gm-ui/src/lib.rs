@@ -111,6 +111,7 @@ mod threads;
 mod threads_settings;
 mod title_bar;
 mod transform_run;
+mod treemap;
 mod view;
 mod welcome;
 mod window_chrome;

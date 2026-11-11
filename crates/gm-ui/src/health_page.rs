@@ -14,6 +14,8 @@ use gm_schema::{
     OperationId, Ownership, Partner, SPARK_BARS, SURVIVAL_AGES, Trend,
 };
 
+use crate::treemap::MAP_FILES;
+
 /// The band of a file's heat dot: the hottest 1%, 5% or 10% of the files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeatBand {
@@ -41,6 +43,14 @@ impl HeatBand {
 
 /// The dormancy breaks the Health tab lists before it says how many more there are.
 pub(crate) const DORMANT_SHOWN: usize = 5;
+
+/// How the Health tab shows the hotspots: as a list of rows, or as a map of boxes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum HotspotView {
+    #[default]
+    List,
+    Map,
+}
 
 /// What the Code page shows of code health: the report, the index progress, the error, and the
 /// Health tab's filter and selection.
@@ -70,6 +80,14 @@ pub(crate) struct HealthState {
     churn: Option<ChurnSummary>,
     /// A request came while a read was in flight, so the read is asked again when it ends (D229).
     wanted_again: bool,
+    /// How the hotspots are shown. Kept across reports; `clear` puts it back to the list.
+    view: HotspotView,
+    /// The files the map lays out for the filter: the files under it with bytes, the largest
+    /// `MAP_FILES` first (ties by path), as `(index, path, bytes)`. Kept by `refresh`.
+    map_files: Vec<(usize, String, u64)>,
+    /// Counts each recomputation of the rows: a changed report or filter. The map's layout is
+    /// kept for one revision. Never reset, so a cleared state never matches an older one.
+    rev: u64,
 }
 
 impl HealthState {
@@ -208,6 +226,29 @@ impl HealthState {
         &self.filter
     }
 
+    /// How the hotspots are shown.
+    #[must_use]
+    pub(crate) fn view(&self) -> HotspotView {
+        self.view
+    }
+
+    /// Shows the hotspots as `view`. The choice survives a new report and a new filter.
+    pub(crate) fn set_view(&mut self, view: HotspotView) {
+        self.view = view;
+    }
+
+    /// The files the map lays out under the filter, as `(index, path, bytes)`.
+    #[must_use]
+    pub(crate) fn map_files(&self) -> &[(usize, String, u64)] {
+        &self.map_files
+    }
+
+    /// The revision of the rows: it changes whenever the report or the filter does.
+    #[must_use]
+    pub(crate) fn rev(&self) -> u64 {
+        self.rev
+    }
+
     /// Limits the list to the folder `text` names. Returns whether the filter changed; a changed
     /// filter recomputes the rows, an unchanged one costs nothing.
     pub(crate) fn set_filter(&mut self, text: &str) -> bool {
@@ -287,8 +328,10 @@ impl HealthState {
 
     /// Recomputes what the list keeps from the report and the filter, and the heat scale.
     fn refresh(&mut self) {
+        self.rev = self.rev.wrapping_add(1);
         self.rows.clear();
         self.dormant.clear();
+        self.map_files.clear();
         self.max_heat = 0.0;
         self.churn = None;
         let Some(report) = self.report.as_deref() else {
@@ -314,6 +357,18 @@ impl HealthState {
             .filter(|&index| report.files[index].dormancy_break.is_some())
             .collect();
         self.dormant.sort_by_key(|&index| report.files[index].rank);
+        let mut map: Vec<(usize, String, u64)> = self
+            .rows
+            .iter()
+            .filter(|&&index| report.files[index].bytes > 0)
+            .map(|&index| {
+                let file = &report.files[index];
+                (index, file.path.clone(), file.bytes)
+            })
+            .collect();
+        map.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+        map.truncate(MAP_FILES);
+        self.map_files = map;
         // The churn of a removed file counts toward the folder it was in (D229).
         self.churn = ChurnSummary::of(
             self.rows
@@ -329,9 +384,14 @@ impl HealthState {
         );
     }
 
-    /// Forgets everything: another repository opened.
+    /// Forgets everything: another repository opened. The view goes back to the list, and the
+    /// revision moves on so that no layout made before is taken for one made now.
     pub(crate) fn clear(&mut self) {
-        *self = Self::default();
+        let rev = self.rev.wrapping_add(1);
+        *self = Self {
+            rev,
+            ..Self::default()
+        };
     }
 }
 
@@ -350,6 +410,25 @@ pub(crate) fn is_under(path: &str, scope: &str) -> bool {
         || path
             .strip_prefix(scope)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A size in bytes as a short word: `B` below a KiB, then one decimal in `KiB`, `MiB` or `GiB`.
+#[must_use]
+pub(crate) fn human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    if bytes < KIB {
+        return format!("{bytes} B");
+    }
+    let (unit, name) = if bytes < KIB * KIB {
+        (KIB, "KiB")
+    } else if bytes < KIB * KIB * KIB {
+        (KIB * KIB, "MiB")
+    } else {
+        (KIB * KIB * KIB, "GiB")
+    };
+    // Tenths of the unit, rounded to the nearest: integers only, so no float cast is needed.
+    let tenths = (u128::from(bytes) * 10 + u128::from(unit) / 2) / u128::from(unit);
+    format!("{}.{} {name}", tenths / 10, tenths % 10)
 }
 
 /// A file's heat as a share of the hottest file's, 0 to 1, for the width of its heat bar.
@@ -835,7 +914,14 @@ mod tests {
         assert_eq!(state.of(), 0);
         assert_eq!(state.file_band("a/x.rs"), None);
         assert_eq!(state.folder_band("a"), None);
-        assert_eq!(state, HealthState::default());
+        // The revision moves on, so it is the one field a cleared state does not share with a new one.
+        assert_eq!(
+            HealthState {
+                rev: 0,
+                ..state.clone()
+            },
+            HealthState::default()
+        );
     }
 
     #[test]
@@ -1360,6 +1446,111 @@ mod tests {
             Box::new(report(vec![file("x.rs", 1, 99.0)], true)),
         );
         assert!(!state.take_ask_again());
+    }
+
+    #[test]
+    fn the_map_input_is_the_files_under_the_filter_with_bytes_largest_first() {
+        let sized = |path: &str, rank: u32, bytes: u64| {
+            let mut f = file(path, rank, 50.0);
+            f.bytes = bytes;
+            f
+        };
+        let mut state = HealthState::default();
+        state.requested(OperationId(50));
+        state.loaded(
+            OperationId(50),
+            Box::new(report(
+                vec![
+                    sized("src/a.rs", 1, 10),
+                    sized("src/b.rs", 2, 30),
+                    sized("src/c.rs", 3, 30),
+                    sized("docs/d.md", 4, 99),
+                    sized("src/empty.rs", 5, 0),
+                ],
+                true,
+            )),
+        );
+        let paths = |state: &HealthState| -> Vec<String> {
+            state
+                .map_files()
+                .iter()
+                .map(|(_, path, _)| path.clone())
+                .collect()
+        };
+        assert_eq!(
+            paths(&state),
+            ["docs/d.md", "src/b.rs", "src/c.rs", "src/a.rs"]
+        );
+        assert!(state.set_filter("src"));
+        assert_eq!(paths(&state), ["src/b.rs", "src/c.rs", "src/a.rs"]);
+        let indices: Vec<usize> = state.map_files().iter().map(|file| file.0).collect();
+        assert_eq!(indices, [1, 2, 0]);
+        assert!(state.set_filter("nothing"));
+        assert!(state.map_files().is_empty());
+    }
+
+    #[test]
+    fn the_map_input_is_capped_at_the_largest_2000_files() {
+        let files: Vec<FileHealth> = (0..2100)
+            .map(|index| {
+                let mut f = file(&format!("d/f{index:05}.rs"), index + 1, 50.0);
+                f.bytes = u64::from(index) + 1;
+                f
+            })
+            .collect();
+        let mut state = HealthState::default();
+        state.requested(OperationId(51));
+        state.loaded(OperationId(51), Box::new(report(files, true)));
+        assert_eq!(state.map_files().len(), MAP_FILES);
+        assert_eq!(state.map_files()[0].2, 2100);
+        assert_eq!(state.map_files()[MAP_FILES - 1].2, 101);
+    }
+
+    #[test]
+    fn the_view_is_a_list_until_chosen_and_survives_reports_and_filters() {
+        let mut state = sample();
+        assert_eq!(state.view(), HotspotView::List);
+        state.set_view(HotspotView::Map);
+        assert_eq!(state.view(), HotspotView::Map);
+        assert!(state.set_filter("a"));
+        state.requested(OperationId(52));
+        state.loaded(
+            OperationId(52),
+            Box::new(report(vec![file("a/q.rs", 1, 99.0)], true)),
+        );
+        assert_eq!(state.view(), HotspotView::Map);
+        state.clear();
+        assert_eq!(state.view(), HotspotView::List);
+    }
+
+    #[test]
+    fn the_revision_moves_on_each_change_and_clear_does_not_go_back() {
+        let mut state = HealthState::default();
+        let start = state.rev();
+        state.requested(OperationId(53));
+        state.loaded(
+            OperationId(53),
+            Box::new(report(vec![file("a.rs", 1, 99.0)], true)),
+        );
+        let loaded = state.rev();
+        assert!(loaded > start);
+        assert!(state.set_filter("a"));
+        let filtered = state.rev();
+        assert!(filtered > loaded);
+        assert!(!state.set_filter("a"));
+        assert_eq!(state.rev(), filtered);
+        state.clear();
+        assert!(state.rev() > filtered);
+    }
+
+    #[test]
+    fn sizes_read_in_bytes_kibibytes_and_mebibytes() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(10 * 1024 * 1024 + 512 * 1024), "10.5 MiB");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 
     #[test]

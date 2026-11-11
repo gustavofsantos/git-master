@@ -1,7 +1,7 @@
 ---
 title: Code health
 description: See which files change the most, which quiet files have started to change, which files change together and how widely a file is owned, from the history of the repository, and give an agent the same picture before it edits.
-status: partial
+status: implemented
 order: 65
 ---
 
@@ -84,8 +84,6 @@ Type in the filter box above the list to show only the files under a folder, suc
 With the list focused, `Up` and `Down` move the selection, `Home` and `End` go to the first and last file, `PageUp` and `PageDown` move a page, and `Enter` opens the selected file on the **Files** tab. Click the list or a row to focus it.
 
 ### Hotspot map
-
-> **Planned.** The hotspot map is not available in the app yet.
 
 Choose **Map** above the hotspots to see them as a map instead of a list; **List** goes back. The map shows the folder in the filter box, or the whole repository: each folder directly inside it is a box with its name, and inside each folder box its files are boxes too. A box's area is the size of the file, and its color is its heat: the three heat colors for the hottest 10% of the repository, and a muted color for the rest. The hot areas of a large repository stand out at a glance.
 
