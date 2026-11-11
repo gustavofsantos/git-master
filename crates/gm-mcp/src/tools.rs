@@ -19,6 +19,7 @@ use gm_schema::{
 };
 use serde_json::{Map, Value, json};
 
+use crate::health_tools;
 use crate::memory_tools;
 use crate::scorecard_tools;
 use crate::session::Session;
@@ -196,6 +197,7 @@ pub fn tools() -> Vec<ToolDefinition> {
     ]);
     all.extend(memory_tools::definitions());
     all.extend(scorecard_tools::definitions());
+    all.extend(health_tools::definitions());
     all.into_iter().map(with_agent_argument).collect()
 }
 
@@ -403,6 +405,8 @@ fn dispatch(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
         "memory_mark" => memory_tools::memory_mark(session, args),
         "scorecard_publish" => scorecard_tools::scorecard_publish(session, args),
         "scorecards_list" => scorecard_tools::scorecards_list(session, args),
+        "health_context" => health_tools::health_context(session, args),
+        "hotspots_list" => health_tools::hotspots_list(session, args),
         other => Err(format!("there is no tool {other}")),
     }
 }
@@ -1263,7 +1267,7 @@ fn rel_kind_name(kind: ThreadRelKind) -> &'static str {
 }
 
 /// A path relative to the repository root: no leading `/`, no `..`, no `.` part.
-fn repository_path(path: &str) -> Result<(), String> {
+pub(crate) fn repository_path(path: &str) -> Result<(), String> {
     let parsed = Path::new(path);
     if parsed.is_absolute() {
         return Err(format!(

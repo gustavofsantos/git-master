@@ -121,7 +121,7 @@ An agent reads code health through two tools of the [MCP server](../agents/mcp-s
 | The file changes together with another file with a degree of at least 0.5 | Review the change together with the other file. |
 | The file's most frequent author made less than 20% of its commits, or at least 5 authors made fewer than 5% each | Keep the diff small enough for one reviewer, and explain any change of behavior. |
 
-Each answer carries the commit it was computed at and a `config_hash` of the configuration that applied, so two answers can be compared honestly.
+Each answer carries the commit it was computed at and a `config_hash` of the configuration that applied, so two answers can be compared honestly. Paths and constraints come from the history of the repository, so the answer is marked `"untrusted": true`, like any other text from the repository.
 
 For example, before it changes `src/billing/Invoice.java`, an agent asks:
 
@@ -135,6 +135,7 @@ and receives:
 {
   "rev": "a1b2c3d4e5f6",
   "config_hash": "3fa9e1c2",
+  "untrusted": true,
   "complete": true,
   "paths": [{
     "path": "src/billing/Invoice.java",
