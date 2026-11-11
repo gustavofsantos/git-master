@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-11-10 (slice S5 of 8s done, D221; before that, slice S4 of 8s done, D220; before that, slice 8s S1 to S3 done; slice 8r is replaced by slice 8s, D219; before that, 2026-11-07: M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-11 (slice 6h, code health, planned, D225; before that, 2026-11-10: slice S5 of 8s done, D221; before that, slice S4 of 8s done, D220; before that, slice 8s S1 to S3 done; slice 8r is replaced by slice 8s, D219; before that, 2026-11-07: M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -806,6 +806,21 @@ Every memory belongs to one or more contexts; a context is an area of knowledge 
 - **K3, the app.** Manage Contexts shows the whole tree, **Bind Repository** and **Unbind**, contexts with no repository; the scope filter (bound, or any context); New Memory picks a context; Move between contexts; the workspace window.
 - **K4, plugin text.** `propose-memories`, `prepare` and `consolidate` speak of contexts, not repository memories; the plugin version is raised.
 - **K5, cleanup.** `threads.db` drops its memory tables once empty; the `Planned` markers come off and the pages go back to their status.
+
+## Slice 6h: code health (decided 2026-11-11; D225)
+
+Requested by the author on 2026-11-11 for daily use on very large repositories at work. Behavior: `docs/guide/code-health.md`, the Health tab and heat dots in `docs/guide/code-navigation.md`, the keys and `health.db` in `docs/reference/configuration.md`, the tools in `docs/reference/mcp-tools.md`, all `Planned`. No preview flag (D225 (8)). Sub-slices use the prefix CH, since H1 to H8 belong to History.
+
+- **CH0, docs and decision** (done 2026-11-11): the pages above, D225, this entry.
+- **CH1a, the index.** `health.db` store, ingest of `git log --numstat -M -z` newest first in two phases, cancellable, resumable, shared with `gitmaster mcp`. Real-git tests.
+- **CH1b, the metrics.** Pure functions: clocks, heat, trend, dormancy, changes together, ownership, constraints, config resolution and `config_hash`. Unit and property tests.
+- **CH1c, the engine.** `LoadHealth` command and its events, mirroring `ReadProvenance`; per-process cache per `(rev, config_hash)`; progress events while indexing.
+- **CH2, MCP.** `health_context`, `hotspots_list`; `crates/gm-mcp/tests/health_mcp_real_git.rs`.
+- **CH3a, heat dots** in the Files tree. **CH3b, the Health tab:** dormancy breaks, virtualized hotspot list with sparkline, file details, filter, **Show Code Health** in the palette.
+- **CH4, changes by agents.** Commit-level matching of added lines against thread edits (reuses `run_matches` and `judge`), `churn_summary`, paired bars. Measure first, as Q34 did.
+- **CH5, the prepare skill** reads `health_context` (plugin, `ai` submodule).
+- **CH6, the hotspot map** (treemap).
+- **Owed:** the backtest of the research doc on a large real repository before tuning any threshold.
 
 ## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
 

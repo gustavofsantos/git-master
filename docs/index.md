@@ -57,6 +57,7 @@ GitMaster runs on Linux and macOS. Each release has prebuilt Linux binaries for 
 | Guide | [Branches](guide/branches.md) | Switching, creating and deleting branches. |
 | Guide | [Stacks](guide/stacks.md) | Branch stacks and restack. Preview feature. |
 | Guide | [Resolving conflicts](guide/conflicts.md) | Resolving a file's conflicts by hand. Preview feature. |
+| Guide | [Code health](guide/code-health.md) | Hotspots, quiet files that wake up, files that change together. |
 | Guide | [Command palette](guide/command-palette.md) | Finding and running any action. |
 | Guide | [Threads](guide/threads.md) | Reading and searching your agent sessions. |
 | Workflows | [Overview](workflows/overview.md) | Automating GitMaster with workflow scripts. |

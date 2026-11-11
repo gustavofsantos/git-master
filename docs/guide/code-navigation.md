@@ -73,7 +73,7 @@ The list is read again each time you open Quick Open or the **Code** page. New f
 
 ## The Code page
 
-Open the **Code** page from the sidebar, or choose **Show Code** in the command palette. The page has two tabs, **Files** and **Search**. **Show Code** opens the **Files** tab, and **Search Text…** opens the **Search** tab.
+Open the **Code** page from the sidebar, or choose **Show Code** in the command palette. The page has three tabs, **Files**, **Search** and **Health**. **Show Code** opens the **Files** tab, **Search Text…** opens the **Search** tab and **Show Code Health** opens the **Health** tab, described in [Code health](code-health.md).
 
 ### Files tab
 
@@ -85,6 +85,12 @@ The **Files** tab has two panes: the folder tree on the left and the viewer on t
 - Folders are listed first, then files. Each group is sorted by name.
 - A folder whose only content is one other folder is shown as one row, such as `a/b/c`.
 - Click a file to show it in the viewer.
+
+### Heat dots
+
+> **Planned.** Heat dots in the folder tree are not available in the app yet.
+
+A file among the hottest tenth of the repository has a heat dot after its name, and a folder shows the dot of the hottest file inside it. See [Code health](code-health.md#heat-in-the-folder-tree).
 
 ### File viewer
 
@@ -153,6 +159,12 @@ A file with a syntax error is still coloured as far as the parser can read it.
 > **Planned.** Keyboard navigation of the file tree is not available in the app yet.
 
 The file tree is navigated with the keyboard, not only with the mouse.
+
+### Health tab
+
+> **Planned.** The Health tab is not available in the app yet.
+
+The **Health** tab ranks the files of the repository by how much they changed recently and shows the details of the selected file. See [Code health](code-health.md).
 
 ## View File
 
