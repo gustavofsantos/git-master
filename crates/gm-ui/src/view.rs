@@ -33,7 +33,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
 use crate::contexts_dialog::ContextsDialog;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
-use crate::diff_rows::Layout;
+use crate::diff_rows::{Layout, gone_from_disk};
 use crate::editor_theme;
 use crate::file_discard::DiscardDialog;
 use crate::hook_convert::{self, CONVERT_TITLE};
@@ -1449,6 +1449,7 @@ impl StatusView {
                 cx,
             ),
             DiffPaneEvent::LeaveCommit => self.close_commit_file(cx),
+            DiffPaneEvent::OpenFile { path, line } => self.view_file(path, *line, cx),
             DiffPaneEvent::Review { action, args } => self.run_action(*action, args, window, cx),
             DiffPaneEvent::ReplyTo(id) => self.open_review_reply(*id, window, cx),
             // One layout for both diffs: the other pane follows, and the choice is saved (D40).
@@ -1505,8 +1506,12 @@ impl StatusView {
         staged: Option<FileDiff>,
         cx: &mut Context<Self>,
     ) {
+        let deleted = self
+            .model
+            .selected_entry()
+            .is_some_and(|entry| gone_from_disk(entry.unstaged, entry.staged));
         self.diff_pane
-            .update(cx, |pane, cx| pane.set_diffs(unstaged, staged, cx));
+            .update(cx, |pane, cx| pane.set_diffs(unstaged, staged, deleted, cx));
     }
 
     pub(crate) fn step_file(&mut self, down: bool, cx: &mut Context<Self>) {

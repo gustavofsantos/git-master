@@ -70,8 +70,6 @@ The layout you choose is saved for your user account as `gitmaster.diffLayout` i
 
 ## Open the file
 
-> **Planned.** The **Open File** button and its shortcut are not available in the app yet.
-
 Every diff view has an **Open File** button in the header of a file: the Working Copy diff, the stacked diff of a commit, and the diffs of the **Branch** and **Compare** tabs described in [Compare changes](compare-changes.md). Click it, or press `Ctrl+Shift+O` (`⇧⌘O` on macOS), to read the whole file where you are looking.
 
 The file opens in the read-only viewer of the [Code](code-navigation.md#view-file) page, with the first line you see in the diff marked and shown near the top. The line is the one of the new side of the diff. In a stacked diff, the file is the one at the top of the view, and each file header has its own button. When the first row you see has no line on the new side, such as a removed line, the nearest line on the new side after it is used, or the last one before it when there is none.

@@ -459,6 +459,130 @@ pub fn step_from_top(starts: &[usize], top: usize, forward: bool) -> Option<usiz
     }
 }
 
+/// The new-side line of each unified row, `None` where the row has none: a hunk
+/// header, a removed line or a row of the stack itself (D232).
+#[must_use]
+pub fn unified_new_lines(rows: &[Row], diffs: Diffs<'_>) -> Vec<Option<u32>> {
+    rows.iter()
+        .map(|row| match *row {
+            Row::Line {
+                side,
+                hunk_index,
+                line_index,
+            } => new_no_of((side, hunk_index, line_index), diffs),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The new-side line of each split row, `None` where the row has no new cell: a
+/// header, a banner or a pair with only a removed line (D232).
+#[must_use]
+pub fn split_new_lines(rows: &[SplitRow], diffs: Diffs<'_>) -> Vec<Option<u32>> {
+    rows.iter()
+        .map(|row| match row {
+            SplitRow::Pair {
+                new: Some(cell), ..
+            } => new_no_of(cell.key, diffs),
+            _ => None,
+        })
+        .collect()
+}
+
+fn new_no_of(key: LineKey, diffs: Diffs<'_>) -> Option<u32> {
+    let (side, hunk_index, line_index) = key;
+    diffs.hunk(side, hunk_index)?.lines.get(line_index)?.new_no
+}
+
+/// The file Open File acts on and the line it opens (D232).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenTarget {
+    pub file: usize,
+    /// The new-side line; `None` when the file has no new-side line in view.
+    pub line: Option<u32>,
+}
+
+/// The rows of `file`: from its start to the next file's start, or to the end of
+/// the list. With no starts (a single-file pane) the one file holds every row.
+fn file_span(starts: &[usize], len: usize, file: usize) -> Range<usize> {
+    let start = starts.get(file).copied().unwrap_or(0).min(len);
+    let end = starts
+        .get(file + 1)
+        .copied()
+        .unwrap_or(len)
+        .min(len)
+        .max(start);
+    start..end
+}
+
+/// The new-side line of the first row at or after `from` in `span`, else of the
+/// nearest row before it in `span`. `None` when the span has no new-side line.
+fn line_near(new_lines: &[Option<u32>], span: Range<usize>, from: usize) -> Option<u32> {
+    let from = from.clamp(span.start, span.end);
+    let after = new_lines.get(from..span.end)?.iter().find_map(|line| *line);
+    let before = new_lines
+        .get(span.start..from)?
+        .iter()
+        .rev()
+        .find_map(|line| *line);
+    after.or(before)
+}
+
+/// The file that owns the top row and the line Open File opens for it (D232).
+/// `new_lines` holds each row's new-side line, in the active layout. The line is
+/// the top row's, or the next one in the same file, else the nearest before it.
+#[must_use]
+pub fn open_target(starts: &[usize], new_lines: &[Option<u32>], top: usize) -> OpenTarget {
+    let top = top.min(new_lines.len().saturating_sub(1));
+    let file = file_at_row(starts, top);
+    let span = file_span(starts, new_lines.len(), file);
+    OpenTarget {
+        file,
+        line: line_near(new_lines, span, top),
+    }
+}
+
+/// The line the Open File button of `file` opens (D232): the top row's line when
+/// the top row is in that file, else the file's first new-side line.
+#[must_use]
+pub fn file_open_line(
+    starts: &[usize],
+    new_lines: &[Option<u32>],
+    top: usize,
+    file: usize,
+) -> Option<u32> {
+    let span = file_span(starts, new_lines.len(), file);
+    let from = if file_at_row(starts, top) == file {
+        top
+    } else {
+        span.start
+    };
+    line_near(new_lines, span, from)
+}
+
+/// Why Open File refuses a file, with the reason it shows (D232). A deleted file
+/// is not on disk, and a binary file has no lines.
+#[must_use]
+pub fn open_file_refusal(deleted: bool, binary: bool) -> Option<&'static str> {
+    if deleted {
+        Some("The file is deleted in the working tree.")
+    } else if binary {
+        Some("A binary file has no lines to show.")
+    } else {
+        None
+    }
+}
+
+/// Whether a file's status means it is not on disk: deleted in the working tree,
+/// or deleted in the index with no change in the working tree (`git rm`).
+#[must_use]
+pub fn gone_from_disk(unstaged: Option<Change>, staged: Option<Change>) -> bool {
+    match unstaged {
+        Some(change) => change == Change::Deleted,
+        None => staged == Some(Change::Deleted),
+    }
+}
+
 /// The blank rows to add after the last row of a stacked list, so that the
 /// last file's header can scroll to the top of the page. `tail_rows` counts the
 /// rows from the last file's header to the end (the header included) and
@@ -2075,5 +2199,359 @@ mod stack_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod open_file_tests {
+    use super::*;
+    use gm_schema::{DiffLine, HunkId};
+
+    fn ctx(old: u32, new: u32) -> DiffLine {
+        DiffLine {
+            kind: LineKind::Context,
+            old_no: Some(old),
+            new_no: Some(new),
+            text: String::new(),
+            no_newline: false,
+        }
+    }
+
+    fn add(new: u32) -> DiffLine {
+        DiffLine {
+            kind: LineKind::Added,
+            old_no: None,
+            new_no: Some(new),
+            text: String::new(),
+            no_newline: false,
+        }
+    }
+
+    fn del(old: u32) -> DiffLine {
+        DiffLine {
+            kind: LineKind::Removed,
+            old_no: Some(old),
+            new_no: None,
+            text: String::new(),
+            no_newline: false,
+        }
+    }
+
+    fn hunk(lines: Vec<DiffLine>) -> Hunk {
+        Hunk {
+            id: HunkId(String::new()),
+            old_start: 1,
+            old_lines: 0,
+            new_start: 1,
+            new_lines: 0,
+            header: String::new(),
+            lines,
+        }
+    }
+
+    /// The unified rows of one file's hunks and the new-side line of each row.
+    fn unified(hunks: &[Hunk]) -> (Vec<Row>, Vec<Option<u32>>) {
+        let diffs = Diffs {
+            unstaged: hunks,
+            staged: &[],
+        };
+        let rows = build_rows(diffs, Side::Unstaged);
+        let lines = unified_new_lines(&rows, diffs);
+        (rows, lines)
+    }
+
+    /// Two files in one stack, unified and split. File 0 is `[ctx 4/5, add 6]`;
+    /// file 1 is `[del 1, add 7, ctx 2/8]`, so its header is row 4 and its first
+    /// new-side line is 7.
+    fn stack() -> (Vec<Hunk>, Stacked) {
+        let hunks = vec![
+            hunk(vec![ctx(4, 5), add(6)]),
+            hunk(vec![del(1), add(7), ctx(2, 8)]),
+        ];
+        let files = [
+            StackFile {
+                hunks: 0..1,
+                notice: None,
+            },
+            StackFile {
+                hunks: 1..2,
+                notice: None,
+            },
+        ];
+        let stacked = build_stack(&hunks, &files, 0);
+        (hunks, stacked)
+    }
+
+    #[test]
+    fn a_context_row_opens_its_own_line() {
+        let (_, lines) = unified(&[hunk(vec![ctx(1, 1), ctx(2, 2)])]);
+        // Rows: header, context 1, context 2.
+        assert_eq!(lines, [None, Some(1), Some(2)]);
+        assert_eq!(
+            open_target(&[], &lines, 2),
+            OpenTarget {
+                file: 0,
+                line: Some(2)
+            }
+        );
+    }
+
+    #[test]
+    fn an_added_row_opens_its_own_line() {
+        let (_, lines) = unified(&[hunk(vec![ctx(1, 1), add(2), ctx(2, 3)])]);
+        assert_eq!(
+            open_target(&[], &lines, 2),
+            OpenTarget {
+                file: 0,
+                line: Some(2)
+            }
+        );
+    }
+
+    #[test]
+    fn a_removed_row_takes_the_added_line_after_it() {
+        let (_, lines) = unified(&[hunk(vec![ctx(1, 1), del(2), add(2), ctx(3, 3)])]);
+        assert_eq!(lines, [None, Some(1), None, Some(2), Some(3)]);
+        assert_eq!(open_target(&[], &lines, 2).line, Some(2));
+        assert_eq!(open_target(&[], &lines, 1).line, Some(1));
+    }
+
+    #[test]
+    fn a_removed_row_at_the_end_of_a_hunk_takes_the_next_line_of_the_file() {
+        let (_, lines) = unified(&[hunk(vec![ctx(1, 1), del(2)]), hunk(vec![ctx(9, 9)])]);
+        // Rows: header, context 1, removed 2, header, context 9.
+        assert_eq!(open_target(&[], &lines, 2).line, Some(9));
+    }
+
+    #[test]
+    fn a_removed_row_at_the_end_of_the_last_hunk_takes_the_line_before_it() {
+        let (_, lines) = unified(&[hunk(vec![ctx(1, 1), ctx(2, 2), del(3)])]);
+        assert_eq!(open_target(&[], &lines, 3).line, Some(2));
+    }
+
+    #[test]
+    fn a_top_row_on_a_hunk_header_takes_the_first_line_of_its_hunk() {
+        let (_, lines) = unified(&[hunk(vec![ctx(1, 1), add(2)])]);
+        assert_eq!(open_target(&[], &lines, 0).line, Some(1));
+    }
+
+    #[test]
+    fn a_top_row_on_a_file_header_maps_to_that_files_first_line() {
+        let (hunks, stacked) = stack();
+        assert_eq!(stacked.unified_starts, [0, 4]);
+        let diffs = Diffs {
+            unstaged: &hunks,
+            staged: &[],
+        };
+        let lines = unified_new_lines(&stacked.rows, diffs);
+        // File 1's header is row 4; its first new-side line is 7, not the removed 1.
+        let target = open_target(&stacked.unified_starts, &lines, 4);
+        assert_eq!(
+            target,
+            OpenTarget {
+                file: 1,
+                line: Some(7)
+            }
+        );
+        // File 0's header is row 0 and its first new-side line is 5.
+        let target = open_target(&stacked.unified_starts, &lines, 0);
+        assert_eq!(
+            target,
+            OpenTarget {
+                file: 0,
+                line: Some(5)
+            }
+        );
+    }
+
+    #[test]
+    fn in_a_stack_the_file_owning_the_top_row_is_opened() {
+        let (hunks, stacked) = stack();
+        let diffs = Diffs {
+            unstaged: &hunks,
+            staged: &[],
+        };
+        let lines = unified_new_lines(&stacked.rows, diffs);
+        assert_eq!(
+            open_target(&stacked.unified_starts, &lines, 3),
+            OpenTarget {
+                file: 0,
+                line: Some(6)
+            }
+        );
+        assert_eq!(
+            open_target(&stacked.unified_starts, &lines, 8),
+            OpenTarget {
+                file: 1,
+                line: Some(8)
+            }
+        );
+        // The removed row of file 1 takes its own file's added line, not file 0's.
+        assert_eq!(
+            open_target(&stacked.unified_starts, &lines, 6).line,
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn a_removed_row_does_not_take_the_line_of_the_next_file() {
+        let hunks = vec![hunk(vec![del(1)]), hunk(vec![ctx(5, 5)])];
+        let files = [
+            StackFile {
+                hunks: 0..1,
+                notice: None,
+            },
+            StackFile {
+                hunks: 1..2,
+                notice: None,
+            },
+        ];
+        let stacked = build_stack(&hunks, &files, 0);
+        let diffs = Diffs {
+            unstaged: &hunks,
+            staged: &[],
+        };
+        let lines = unified_new_lines(&stacked.rows, diffs);
+        // Rows: header 0, header 1, removed 2, file 1 header 3, header 4, context 5.
+        assert_eq!(stacked.unified_starts, [0, 3]);
+        assert_eq!(
+            open_target(&stacked.unified_starts, &lines, 2),
+            OpenTarget {
+                file: 0,
+                line: None
+            }
+        );
+        assert_eq!(file_open_line(&stacked.unified_starts, &lines, 2, 0), None);
+        assert_eq!(
+            file_open_line(&stacked.unified_starts, &lines, 2, 1),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn the_file_button_uses_the_top_row_only_in_its_own_file() {
+        let (hunks, stacked) = stack();
+        let diffs = Diffs {
+            unstaged: &hunks,
+            staged: &[],
+        };
+        let lines = unified_new_lines(&stacked.rows, diffs);
+        // The top row is in file 0 (row 6 is file 1, so use row 3 in file 0).
+        assert_eq!(
+            file_open_line(&stacked.unified_starts, &lines, 3, 0),
+            Some(6)
+        );
+        // Another file's button opens that file's first new-side line.
+        assert_eq!(
+            file_open_line(&stacked.unified_starts, &lines, 3, 1),
+            Some(7)
+        );
+        assert_eq!(
+            file_open_line(&stacked.unified_starts, &lines, 6, 1),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn a_file_with_only_removals_opens_without_a_line() {
+        let (_, lines) = unified(&[hunk(vec![del(1), del(2)])]);
+        assert_eq!(
+            open_target(&[], &lines, 1),
+            OpenTarget {
+                file: 0,
+                line: None
+            }
+        );
+        assert_eq!(file_open_line(&[], &lines, 1, 0), None);
+    }
+
+    #[test]
+    fn a_split_row_opens_the_new_cell_of_its_pair() {
+        let hunks = vec![hunk(vec![del(1), add(1), ctx(2, 2)])];
+        let diffs = Diffs {
+            unstaged: &hunks,
+            staged: &[],
+        };
+        let split = split_rows(diffs, Side::Unstaged);
+        let lines = split_new_lines(&split.rows, diffs);
+        // Rows: header, the pair of removed 1 and added 1, the context pair.
+        assert_eq!(
+            open_target(&[], &lines, 0),
+            OpenTarget {
+                file: 0,
+                line: Some(1)
+            }
+        );
+        assert_eq!(open_target(&[], &lines, 2).line, Some(2));
+    }
+
+    #[test]
+    fn a_split_removed_pair_takes_the_next_new_side_line() {
+        let hunks = vec![hunk(vec![del(1), del(2), ctx(3, 3)])];
+        let diffs = Diffs {
+            unstaged: &hunks,
+            staged: &[],
+        };
+        let split = split_rows(diffs, Side::Unstaged);
+        let lines = split_new_lines(&split.rows, diffs);
+        assert_eq!(open_target(&[], &lines, 1).line, Some(3));
+    }
+
+    #[test]
+    fn a_split_stack_opens_the_file_of_its_top_row() {
+        let (hunks, stacked) = stack();
+        let diffs = Diffs {
+            unstaged: &hunks,
+            staged: &[],
+        };
+        let lines = split_new_lines(&stacked.split, diffs);
+        assert_eq!(stacked.split_starts, [0, 4]);
+        assert_eq!(
+            open_target(&stacked.split_starts, &lines, 4),
+            OpenTarget {
+                file: 1,
+                line: Some(7)
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_list_has_no_line_and_the_first_file() {
+        assert_eq!(
+            open_target(&[], &[], 0),
+            OpenTarget {
+                file: 0,
+                line: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_deleted_or_binary_file_is_refused_with_its_reason() {
+        assert_eq!(
+            open_file_refusal(true, false),
+            Some("The file is deleted in the working tree.")
+        );
+        assert_eq!(
+            open_file_refusal(false, true),
+            Some("A binary file has no lines to show.")
+        );
+        assert_eq!(
+            open_file_refusal(true, true),
+            open_file_refusal(true, false)
+        );
+        assert_eq!(open_file_refusal(false, false), None);
+    }
+
+    #[test]
+    fn a_file_deleted_in_the_working_tree_or_only_in_the_index_is_gone() {
+        assert!(gone_from_disk(Some(Change::Deleted), None));
+        assert!(gone_from_disk(None, Some(Change::Deleted)));
+        assert!(!gone_from_disk(
+            Some(Change::Modified),
+            Some(Change::Deleted)
+        ));
+        assert!(!gone_from_disk(Some(Change::Modified), None));
+        assert!(!gone_from_disk(None, Some(Change::Added)));
     }
 }

@@ -179,8 +179,6 @@ From the command palette:
 
 From a diff:
 
-> **Planned.** Opening a file from a diff is not available in the app yet.
-
 1. Click **Open File** in the header of a file in any diff, or press `Ctrl+Shift+O` (`⇧⌘O` on macOS).
 2. The viewer opens at the first line you saw in the diff. See [Open the file](diff-and-staging.md#open-the-file).
 

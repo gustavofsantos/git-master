@@ -1926,6 +1926,13 @@ impl Model {
         self.selected.as_deref()
     }
 
+    /// The status entry of the selected file, when the file is listed.
+    #[must_use]
+    pub fn selected_entry(&self) -> Option<&StatusEntry> {
+        let path = self.selected.as_deref()?;
+        self.entries().iter().find(|entry| entry.path == path)
+    }
+
     /// The selected row, when it is a submodule (D175).
     #[must_use]
     pub fn selected_submodule(&self) -> Option<&StatusEntry> {

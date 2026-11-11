@@ -851,7 +851,7 @@ Requested by the author on 2026-11-11: the Changes page gets tabs for the branch
 Requested by the author on 2026-11-11. Behavior: `docs/guide/diff-and-staging.md#open-the-file`, `Planned`. Sub-slices use the prefix DV.
 
 - **DV0, docs and decision** (done 2026-11-11): the pages above, D232, this entry.
-- **DV1, the button and the shortcut:** the pure row-to-line function in `diff_rows.rs`, the pane's event, the button in every file header of `diff_pane.rs`, `Ctrl+Shift+O`, and the window's call to `view_file`. Starts after CR3a, which edits the same files.
+- **DV1, the button and the shortcut** (done 2026-11-11): the pure row-to-line function in `diff_rows.rs`, the pane's event, the button in every file header of `diff_pane.rs`, `Ctrl+Shift+O`, and the window's call to `view_file`. Known gaps: nothing was seen in a window (no display in the build environment); the line can be off on the staged side and for a commit or revision diff, because the viewer reads the file on disk (as the docs say); a submodule entry listed in a commit's stack is not refused by the button, so it would try to read the submodule path (the registry's `ViewFile` refuses submodules; the pane does not yet).
 
 ## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
 

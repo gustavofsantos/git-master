@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::time::Instant;
 
-use gm_schema::{CommitFile, FileDiff, LineKind, ReviewComment, StageTarget};
+use gm_schema::{Change, CommitFile, FileDiff, LineKind, ReviewComment, StageTarget};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollStrategy,
@@ -20,10 +20,11 @@ use crate::action_registry::{Action, Args};
 use crate::diff_rows::{
     Apply, Cell, Diffs, Layout, LineKey, Mode, Press, Row, Selection, Side, SplitRow, SplitRows,
     StackFile, build_rows, build_stack, change_counts, changed_keys_between, complete_pairs,
-    concat_hunks, controls, default_side, file_at_row, file_notice, hunk_header_text,
-    hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line, next_hunk_header,
-    no_newline_mark, notice_text, press, prev_changed_line, prev_hunk_header, scroll_padding,
-    skip_columns, split_cell_on_cursor, split_pairs, split_rows, step_from_top,
+    concat_hunks, controls, default_side, file_at_row, file_notice, file_open_line,
+    hunk_header_text, hunk_selection_count, hunks_of, max_scroll_columns, next_changed_line,
+    next_hunk_header, no_newline_mark, notice_text, open_file_refusal, open_target, press,
+    prev_changed_line, prev_hunk_header, scroll_padding, skip_columns, split_cell_on_cursor,
+    split_new_lines, split_pairs, split_rows, step_from_top, unified_new_lines,
 };
 use crate::icon::{self, Icon};
 use crate::review::{
@@ -59,7 +60,7 @@ struct KeyRow {
 /// text area's redo (⇧⌘Z), the palette and quit (⌘K, ⌘Q), and Ctrl+Shift+U, which
 /// is the Unicode entry of `IBus` on GNOME: that key never reaches the app there.
 /// Ctrl+Shift+M comments on the selected lines (B4c): its label is this key.
-const WORKING_KEYS: [KeyRow; 11] = [
+const WORKING_KEYS: [KeyRow; 12] = [
     KeyRow {
         keys: "up",
         action: "PrevChangedLine",
@@ -115,11 +116,16 @@ const WORKING_KEYS: [KeyRow; 11] = [
         action: "CommentOnSelection",
         what: "Comment on the selected lines",
     },
+    KeyRow {
+        keys: "secondary-shift-o",
+        action: "OpenFileAtTop",
+        what: "Open the file at the first line in view",
+    },
 ];
 
 /// The keys of the commit's stacked diff (H4c, H4c-keys), bound in the read-only
 /// context only. Up and Down scroll a row; the file keys wrap around.
-const COMMIT_KEYS: [KeyRow; 8] = [
+const COMMIT_KEYS: [KeyRow; 9] = [
     KeyRow {
         keys: "secondary-shift-m",
         action: "CommentOnSelection",
@@ -134,6 +140,11 @@ const COMMIT_KEYS: [KeyRow; 8] = [
         keys: "secondary-shift-p",
         action: "PrevFile",
         what: "Previous file",
+    },
+    KeyRow {
+        keys: "secondary-shift-o",
+        action: "OpenFileAtTop",
+        what: "Open the file at the first line in view",
     },
     KeyRow {
         keys: "up",
@@ -210,6 +221,7 @@ actions!(
         ToggleVisual,
         PrevFile,
         NextFile,
+        OpenFileAtTop,
         LeaveCommit,
         ScrollLineUp,
         ScrollLineDown,
@@ -233,6 +245,12 @@ pub enum DiffPaneEvent {
     Unstage(StageTarget),
     /// Escape in a read-only pane: back to the commit view.
     LeaveCommit,
+    /// Open File (D232): the shell opens `path` in the Code viewer at `line`, on
+    /// the new side of the diff.
+    OpenFile {
+        path: String,
+        line: Option<u32>,
+    },
     /// The user chose a layout in the header (D39); the shell saves it.
     LayoutChosen(Layout),
     /// A review action of the diff: the comment key or button, or a card's button.
@@ -297,6 +315,9 @@ pub struct DiffPane {
     delete_arm: DeleteArm,
     /// The line to show once the diff of its file is here (B4d).
     reveal: Option<Reveal>,
+    /// The working copy's file is not on disk (its diff deletes it), so Open File
+    /// is refused (D232). Set with the diffs.
+    deleted: bool,
 }
 
 /// What a pane's picked rows hold, for the window to turn into a comment target (D141).
@@ -365,6 +386,7 @@ impl DiffPane {
             threads: BTreeSet::new(),
             delete_arm: DeleteArm::default(),
             reveal: None,
+            deleted: false,
         }
     }
 
@@ -385,6 +407,7 @@ impl DiffPane {
         &mut self,
         unstaged: Option<FileDiff>,
         staged: Option<FileDiff>,
+        deleted: bool,
         cx: &mut Context<Self>,
     ) {
         let new_path = unstaged
@@ -401,6 +424,7 @@ impl DiffPane {
         };
         self.unstaged = unstaged;
         self.staged = staged;
+        self.deleted = deleted;
         let current_empty = hunks_of(match self.side {
             Side::Unstaged => self.unstaged.as_ref(),
             Side::Staged => self.staged.as_ref(),
@@ -529,6 +553,72 @@ impl DiffPane {
         match layout {
             Layout::Unified => &self.unified_starts,
             Layout::Split => &self.split_starts,
+        }
+    }
+
+    /// The path of file `file` of the list (D232): the stack's own file, or the
+    /// one file the pane shows. `None` when there is none.
+    fn file_path(&self, file: usize) -> Option<String> {
+        match self.mode {
+            Mode::ReadOnly => self.stack_files.get(file).map(|meta| meta.path.clone()),
+            Mode::Working => self.path(),
+        }
+    }
+
+    /// Why Open File refuses file `file`, or `None` when it may open (D232).
+    fn open_refusal(&self, file: usize) -> Option<&'static str> {
+        let (deleted, binary) = match self.mode {
+            Mode::ReadOnly => self.stack_files.get(file).map_or((false, false), |meta| {
+                (meta.change == Change::Deleted, meta.binary)
+            }),
+            Mode::Working => (
+                self.deleted,
+                self.unstaged
+                    .as_ref()
+                    .or(self.staged.as_ref())
+                    .is_some_and(|diff| diff.binary),
+            ),
+        };
+        open_file_refusal(deleted, binary)
+    }
+
+    /// The new-side line of each row of the active layout (D232).
+    fn new_lines(&self) -> Vec<Option<u32>> {
+        match self.layout {
+            Layout::Unified => unified_new_lines(&self.rows, self.diffs()),
+            Layout::Split => split_new_lines(&self.split.rows, self.diffs()),
+        }
+    }
+
+    /// Open File from the keys (D232): the file that owns the top row, at the first
+    /// line in view. Nothing happens for a file that cannot open.
+    pub fn open_file_at_top(&mut self, cx: &mut Context<Self>) {
+        let target = open_target(
+            self.starts_for(self.layout),
+            &self.new_lines(),
+            self.top_row(),
+        );
+        self.emit_open_file(target.file, target.line, cx);
+    }
+
+    /// Open File from the button of file `file`'s header (D232): at the first line
+    /// in view when the top row is in that file, else at the file's first new-side line.
+    pub fn open_file_of(&mut self, file: usize, cx: &mut Context<Self>) {
+        let line = file_open_line(
+            self.starts_for(self.layout),
+            &self.new_lines(),
+            self.top_row(),
+            file,
+        );
+        self.emit_open_file(file, line, cx);
+    }
+
+    fn emit_open_file(&self, file: usize, line: Option<u32>, cx: &mut Context<Self>) {
+        if self.open_refusal(file).is_some() {
+            return;
+        }
+        if let Some(path) = self.file_path(file) {
+            cx.emit(DiffPaneEvent::OpenFile { path, line });
         }
     }
 
@@ -1114,7 +1204,7 @@ impl DiffPane {
                         self.hunk_row(ix, side, hunk_index, cx)
                     }
                     Some(SplitRow::Pair { old, new }) => self.pair_row(ix, old, new, cx),
-                    Some(SplitRow::Banner(row)) => self.banner_row(row),
+                    Some(SplitRow::Banner(row)) => self.banner_row(row, cx),
                     None => div().into_any_element(),
                 },
             },
@@ -1515,6 +1605,7 @@ impl DiffPane {
                     .flex_row()
                     .items_center()
                     .gap_2()
+                    .child(self.open_file_control(0, cx))
                     .children(
                         controls(self.mode)
                             .line_selection
@@ -1856,7 +1947,7 @@ impl DiffPane {
                 line_index,
             }) => self.line_row(ix, row, side, hunk_index, line_index, cx),
             Some(row @ (Row::FileHeader { .. } | Row::Notice { .. } | Row::MoreFiles { .. })) => {
-                self.banner_row(row)
+                self.banner_row(row, cx)
             }
             None => div().into_any_element(),
         }
@@ -1864,9 +1955,9 @@ impl DiffPane {
 
     /// A row of a stack that is not a diff line (H4c): a file's header, a notice,
     /// or the count of files past the limit. Each is one list row high.
-    fn banner_row(&self, row: Row) -> AnyElement {
+    fn banner_row(&self, row: Row, cx: &Context<Self>) -> AnyElement {
         match row {
-            Row::FileHeader { file } => self.file_row(file),
+            Row::FileHeader { file } => self.file_row(file, cx),
             Row::Notice { notice, .. } => text_row(&notice_text(notice), theme::muted()),
             Row::MoreFiles { count } => text_row(
                 &format!("and {count} more files, not shown."),
@@ -1878,7 +1969,7 @@ impl DiffPane {
 
     /// A file's header in a stack: its change letter, path (old → new for a
     /// rename) and `+ −` counts.
-    fn file_row(&self, file: usize) -> AnyElement {
+    fn file_row(&self, file: usize, cx: &Context<Self>) -> AnyElement {
         let Some(meta) = self.stack_files.get(file) else {
             return div().into_any_element();
         };
@@ -1921,6 +2012,45 @@ impl DiffPane {
                     .text_color(theme::muted())
                     .child(file_counts(meta)),
             )
+            .child(self.open_file_control(file, cx))
+            .into_any_element()
+    }
+
+    /// The Open File button of file `file`'s header (D232). A file that cannot
+    /// open shows its reason in muted text, and the button is disabled.
+    fn open_file_control(&self, file: usize, cx: &Context<Self>) -> AnyElement {
+        let refusal = self.open_refusal(file);
+        let button = chunk_button(
+            ("open-file", file),
+            "Open File",
+            refusal.is_none(),
+            if refusal.is_some() {
+                theme::muted()
+            } else {
+                theme::text()
+            },
+        );
+        let button = match refusal {
+            Some(_) => button.into_any_element(),
+            None => button
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.open_file_of(file, cx);
+                }))
+                .into_any_element(),
+        };
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .children(refusal.map(|reason| {
+                div()
+                    .whitespace_nowrap()
+                    .text_color(theme::muted())
+                    .child(reason)
+            }))
+            .child(button)
             .into_any_element()
     }
 
@@ -2173,6 +2303,7 @@ fn binding(action: &str, keys: &str, context: &'static str) -> KeyBinding {
         "ClearSelection" => KeyBinding::new(keys, ClearSelection, context),
         "NextFile" => KeyBinding::new(keys, NextFile, context),
         "PrevFile" => KeyBinding::new(keys, PrevFile, context),
+        "OpenFileAtTop" => KeyBinding::new(keys, OpenFileAtTop, context),
         "ScrollLineUp" => KeyBinding::new(keys, ScrollLineUp, context),
         "ScrollLineDown" => KeyBinding::new(keys, ScrollLineDown, context),
         "ScrollPageUp" => KeyBinding::new(keys, ScrollPageUp, context),
@@ -2203,6 +2334,7 @@ impl Render for DiffPane {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &PrevFile, _, cx| this.step_stack_file(false, cx)))
             .on_action(cx.listener(|this, _: &NextFile, _, cx| this.step_stack_file(true, cx)))
+            .on_action(cx.listener(|this, _: &OpenFileAtTop, _, cx| this.open_file_at_top(cx)))
             .on_action(cx.listener(|this, _: &ScrollLineUp, _, cx| this.scroll_rows(-1, cx)))
             .on_action(cx.listener(|this, _: &ScrollLineDown, _, cx| this.scroll_rows(1, cx)))
             .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| {
@@ -2361,6 +2493,7 @@ mod tests {
                 "secondary-shift-m",
                 "secondary-shift-n",
                 "secondary-shift-p",
+                "secondary-shift-o",
                 "up",
                 "down",
                 "pageup",
