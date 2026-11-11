@@ -13,6 +13,7 @@ A context is not a repository and not a workspace. It exists on its own: you can
 
 - Contexts **nest**. A context can have sub-contexts, and a sub-context has one parent. A sub-context is a narrower part of its parent: **Refunds** under **Payments**, **Payments** under **Finance**.
 - A sub-context **inherits** the memories of its parent and of every context above it. A memory in **Finance** holds in **Payments** and in **Refunds** too. The memories of a sub-context do not flow up: a memory in **Refunds** is not part of **Payments**.
+- Naming a context to read it also covers its **sub-contexts**, at any depth. Reading **Payments** by name reads **Payments**, **Finance** (what it inherits) and **Refunds**. A repository bound to **Payments** still sees only its default reach; the sub-contexts come in when the context is named.
 - A memory belongs to **one or more** contexts. It is stored once. When it holds in two contexts that are not parent and child, such as **Payments** and **Accounting**, it is attached to both.
 - A repository is **bound to any number of contexts**, or to none. A repository that two areas use is bound to both.
 
@@ -23,11 +24,14 @@ Finance
   Payments                bound: billing, api
     Refunds               bound: refunds-worker
   Accounting              bound: ledger
+  Access                  bound: iam
 Sales                     bound: crm, api
 Incident: stuck exports   bound: no repository
 ```
 
 An agent in `refunds-worker` sees the memories of **Refunds**, **Payments** and **Finance**. An agent in `api` sees those of **Payments**, **Finance** and **Sales**. An agent in `ledger` sees **Accounting** and **Finance**, but not **Payments**. **Incident: stuck exports** has no repository; you and any agent can still read it by name.
+
+An agent in `refunds-worker` is changing a call to an endpoint that needs authorization. Its default reach does not include **Access**, which belongs to the area of the **iam** repository. The agent names the context to read it: `memories_search` with `scope: "Finance / Access"` reads **Access** and what it inherits, **Finance**. Naming **Finance** instead reads all of **Finance**, **Access** included, but not **Sales**.
 
 ## Manage contexts
 
@@ -55,7 +59,7 @@ The **Memories** tab shows a chip on every memory with the context it belongs to
 The scope filter chooses what the list holds:
 
 - **Bound to this repository**, the default: the memories of the contexts the repository is bound to and of every context above them.
-- **One context**: pick any context in the tree. The list holds its memories and those it inherits.
+- **One context**: pick any context in the tree. The list holds its memories, those it inherits and those of every sub-context below it. Choosing **Finance** lists the memories of **Finance**, **Payments**, **Refunds**, **Accounting** and **Access**, but not those of **Sales**.
 
 ### Write a memory in a context
 
@@ -79,7 +83,7 @@ A memory's sources can be threads, commits and files of different repositories. 
 
 ## What agents see
 
-Over [MCP](../reference/mcp-tools.md), `memories_search` returns, by default, the memories of the contexts the repository is bound to and of every context above them, each labeled with its context. An agent can name any context, bound or not, to read that context and what it inherits: a runbook context bound to no repository is read this way. `contexts_list` lists the contexts the repository is bound to; with `all` it lists every context.
+Over [MCP](../reference/mcp-tools.md), `memories_search` returns, by default, the memories of the contexts the repository is bound to and of every context above them, each labeled with its context. An agent can name any context, bound or not, to read that context, what it inherits and every sub-context below it: a runbook context bound to no repository is read this way. An agent working near another area names it to read it: an agent in `refunds-worker` that touches authorization names **Access** with `scope: "Finance / Access"`, and names **Finance** to see everything under it. The default `bound` scope does not change, so the other areas stay out until they are named. `contexts_list` lists the contexts the repository is bound to; with `all` it lists every context, and its `accepted_memories` counts the memories that naming the context reads.
 
 ## Contexts in a workspace
 

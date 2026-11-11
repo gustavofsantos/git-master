@@ -875,7 +875,7 @@ visible_contexts(repo_id) = ancestors_inclusive( { c : (c, repo_id) in context_r
 
 `ProposeMemory` (above) takes an optional `context`: it must be in `visible_contexts` of the calling repository's `repo_id` (a context the repository belongs to or an ancestor of one), and the memory is created `proposed`. A call naming another context is refused.
 
-Search takes a `scope` (`all`, `repository` or a context name) and queries the repository store and the allowed context rows, merges by relevance and uses the nearer scope as a tie-break. Each result carries `scope` as a context path (`Platform / Billing`) or `repository`. `contexts.db` missing, locked for too long or unreadable never fails a search: the repository scope answers, and the result says the contexts were not read.
+Search takes a `scope` (`all`, `repository` or a context name) and queries the repository store and the allowed context rows, merges by relevance and uses the nearer scope as a tie-break. A named context also covers its descendants at any depth (D230); the default `bound` reach is unchanged. Each result carries `scope` as a context path (`Platform / Billing`) or `repository`. `contexts.db` missing, locked for too long or unreadable never fails a search: the repository scope answers, and the result says the contexts were not read.
 
 #### Threat model
 

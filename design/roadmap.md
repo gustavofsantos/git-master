@@ -806,6 +806,7 @@ Every memory belongs to one or more contexts; a context is an area of knowledge 
 - **K3, the app.** Manage Contexts shows the whole tree, **Bind Repository** and **Unbind**, contexts with no repository; the scope filter (bound, or any context); New Memory picks a context; Move between contexts; the workspace window.
 - **K4, plugin text.** `propose-memories`, `prepare` and `consolidate` speak of contexts, not repository memories; the plugin version is raised.
 - **K5, cleanup.** `threads.db` drops its memory tables once empty; the `Planned` markers come off and the pages go back to their status.
+- **K6, named scope reads the subtree** (done 2026-11-11; D230): a scope that names a context reads its ancestors and every descendant, in the app and over MCP, with the counts of `contexts_list` and the size line following the same reach. Known gap: nothing was seen in a window.
 
 ## Slice 6h: code health (done 2026-11-11, with gaps; D225 to D229)
 

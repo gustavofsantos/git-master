@@ -27,7 +27,7 @@ Every memory belongs to one or more [contexts](contexts.md): areas of knowledge 
 
 Open **Agents** in the sidebar, then choose the **Memories** tab. Or run **Show Memories** from the command palette. The tabs **Threads**, **Memories** and **Labels** sit above the page. The list shows the text, the kind, the status and the origin. A memory that is **Tested** or **Unconfirmed** also shows its basis as a chip; an **Observed** memory shows none. An **Unconfirmed** chip is flagged, as a changed file is. **Proposed** memories come first and carry a count in the tab, so a new proposal does not wait unseen.
 
-Filter the list by kind, by status, by file, by author or by scope: the contexts bound to this repository, or any one context with what it inherits. Search finds a memory by its words.
+Filter the list by kind, by status, by file, by author or by scope: the contexts bound to this repository, or any one context with what it inherits and every sub-context below it. Search finds a memory by its words.
 
 ## Write a memory
 
@@ -118,7 +118,7 @@ A cheap sub-agent checks accepted memories against their sources, the files they
 
 GitMaster counts on your machine how often each memory is retrieved and when. An agent's search counts each memory it returns, and an agent's read counts the memory it reads. The counts are never shared, never sent to a model and never in an agent's results. The detail of a memory says **Retrieved 3 times, last 2 h ago**, or **Never retrieved**.
 
-The line above the list gives the size of the scope you chose: how many accepted memories it holds and how many characters of text they hold, such as **12 accepted, 3.1k characters**. Search and the other filters do not change it. A store that grows without use is then visible.
+The line above the list gives the size of the scope you chose: how many accepted memories it reaches, its own, those it inherits and those of its sub-contexts, and how many characters of text they hold, such as **12 accepted, 3.1k characters**. Search and the other filters do not change it. A store that grows without use is then visible.
 
 ## When a memory goes stale
 
@@ -146,7 +146,7 @@ You can also choose **Mark Memory Useful** or **Mark Memory Wrong** in the [comm
 
 Agents read memories over [MCP](../reference/mcp-tools.md):
 
-- `memories_search` finds accepted memories by their words, by kind, by file or by context. By default it searches the contexts the repository is bound to and every context above them; it can name any other context.
+- `memories_search` finds accepted memories by their words, by kind, by file or by context. By default it searches the contexts the repository is bound to and every context above them. Naming a context reads that context, what it inherits and every sub-context below it, so an agent working near another area names it to read its memories.
 - `contexts_list` lists the contexts the repository is bound to, or every context.
 - `memory_get` reads one memory with its sources and its marks.
 - `memories_for_path` lists the accepted memories that apply to a file.
