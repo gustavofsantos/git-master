@@ -83,11 +83,11 @@ Type in the filter box above the list to show only the files under a folder, suc
 
 A map of the folder tree shows each file as a box, its size by the size of the file and its color by heat, so the hot areas of a large repository stand out at a glance.
 
-### Changes by agents
+### Churn
 
-> **Planned.** Splitting changes by agent is not available in the app yet.
+> **Planned.** Churn is not available in the app yet.
 
-For a folder, the tab shows how much of the recent change came from agents, matched to their [threads](threads.md), and how much is unattributed, and how soon each kind of change was rewritten. It never says "human": work done in an agent whose sessions are not captured has no thread, so its lines look like anyone else's. The split is always **agent (observed)** against **unattributed**.
+For a folder, the tab shows its **churn**: the share of the lines added under it that were rewritten or deleted within 14 active days, and a curve of how long lines survive. Code that is rewritten soon after it is written was often wrong or incomplete when it landed. Churn counts every line the same way, whoever or whatever wrote it.
 
 ## Heat in the folder tree
 
@@ -119,7 +119,7 @@ An agent reads code health through two tools of the [MCP server](../agents/mcp-s
 | The file changes together with another file with a degree of at least 0.5 | Review the change together with the other file. |
 | The file has at least 5 commits, and its most frequent author made less than 20% of them, or less than half of them while at least 5 authors made fewer than 5% each | Keep the diff small enough for one reviewer, and explain any change of behavior. |
 
-Each answer carries the commit it was computed at and a `config_hash` of the configuration that applied, so two answers can be compared honestly. Paths and constraints come from the history of the repository, so the answer is marked `"untrusted": true`, like any other text from the repository.
+Each answer carries the commit it was computed at and a `config_hash` of the configuration that applied, so two answers can be compared honestly.
 
 For example, before it changes `src/billing/Invoice.java`, an agent asks:
 
@@ -133,7 +133,6 @@ and receives:
 {
   "rev": "a1b2c3d4e5f6",
   "config_hash": "3fa9e1c2",
-  "untrusted": true,
   "complete": true,
   "paths": [{
     "path": "src/billing/Invoice.java",

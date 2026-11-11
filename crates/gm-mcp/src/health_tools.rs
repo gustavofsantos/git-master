@@ -86,7 +86,6 @@ pub(crate) fn health_context(session: &mut Session, args: &Value) -> Result<Valu
     let mut result = json!({
         "rev": report.rev,
         "config_hash": report.config_hash,
-        "untrusted": true,
         "complete": report.complete,
         "paths": answers,
     });
@@ -136,7 +135,6 @@ pub(crate) fn hotspots_list(session: &mut Session, args: &Value) -> Result<Value
     let mut result = json!({
         "rev": report.rev,
         "config_hash": report.config_hash,
-        "untrusted": true,
         "complete": report.complete,
         "files": page.iter().map(|file| hotspot_json(file)).collect::<Vec<_>>(),
         "has_more": has_more,

@@ -817,7 +817,7 @@ Requested by the author on 2026-11-11 for daily use on very large repositories a
 - **CH1c, the engine** (done 2026-11-11). `LoadHealth` command and its events, mirroring `ReadProvenance`; per-process cache per `(rev, config_hash)`; progress events while indexing.
 - **CH2, MCP** (done 2026-11-11). `health_context`, `hotspots_list`; `crates/gm-mcp/tests/health_mcp_real_git.rs`.
 - **CH3a, heat dots** in the Files tree (done 2026-11-11). **CH3b, the Health tab** (done 2026-11-11): dormancy breaks, virtualized hotspot list with sparkline, file details, filter, **Show Code Health** in the palette.
-- **CH4, changes by agents.** Commit-level matching of added lines against thread edits (reuses `run_matches` and `judge`), `churn_summary`, paired bars. Measure first, as Q34 did.
+- **CH4, churn.** The share of added lines rewritten or deleted within 14 active days and line survival, per folder, with no split by who wrote them (D227); `churn_summary` and the Health tab's churn panel. Needs line tracking across commits (blame of the parent, lazily, for the hot set), so measure the cost first.
 - **CH5, the prepare skill** reads `health_context` (plugin, `ai` submodule; done 2026-11-11, plugin 0.7.0).
 - **CH6, the hotspot map** (treemap).
 - **Owed:** the backtest of the research doc on a large real repository before tuning any threshold.
@@ -826,7 +826,7 @@ Requested by the author on 2026-11-11 for daily use on very large repositories a
 
 **Seen in a window** under Xvfb on git/git: dark theme, the tree's heat dots, the progress line while the history is read and the dots of the partial report, the Health tab with a dormancy break, the hotspot list and the file details; light theme, aligned hotspot columns, the selection, the folder filter and the agent's constraints.
 
-**Known gaps:** no hotspot map (CH6) and no split by agent (CH4); complexity does not weight the rank yet (heat alone); no `scripts/ui-smoke.sh` scenario; the partial answer of the MCP tools is not covered by a test; a refresh while a health read is in flight is skipped until the next refresh; a first MCP call in a repository with no index builds it inline (open the Health tab first in a very large repository); keyboard navigation of the hotspot list. `cargo audit` reported RUSTSEC-2026-0459 (`libsqlite3-sys` 0.38.2 through `rusqlite` 0.40) before this slice; `rusqlite` 0.41 fixes it with no code change.
+**Known gaps:** no hotspot map (CH6) and no churn (CH4); complexity does not weight the rank yet (heat alone); no `scripts/ui-smoke.sh` scenario; the partial answer of the MCP tools is not covered by a test; a refresh while a health read is in flight is skipped until the next refresh; a first MCP call in a repository with no index builds it inline (open the Health tab first in a very large repository); keyboard navigation of the hotspot list. `cargo audit` reported RUSTSEC-2026-0459 (`libsqlite3-sys` 0.38.2 through `rusqlite` 0.40) before this slice; `rusqlite` 0.41 fixes it with no code change.
 
 ## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
 
