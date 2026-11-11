@@ -79,16 +79,29 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Asks the engine for the code health of HEAD (D225), unless a read is in flight. A read of
-    /// the same HEAD and configuration is answered at once from the engine's cache.
+    /// Asks the engine for the code health of HEAD (D225). While a read is in flight the request
+    /// is remembered and asked again when the read ends (D229), since the read may answer an
+    /// older HEAD. A read of the same HEAD and configuration is answered at once from the
+    /// engine's cache.
     pub(crate) fn request_health(&mut self) {
-        if self.model.status().is_none() || self.model.health.pending() {
+        if self.model.health.pending() {
+            self.model.health.want_again();
+            return;
+        }
+        if self.model.status().is_none() {
             return;
         }
         let id = self
             .engine
             .dispatch(Actor::Human, CommandKind::LoadHealth { rev: None });
         self.model.health.requested(id);
+    }
+
+    /// Asks for the health again when a request came during the read that has just ended (D229).
+    pub(crate) fn ask_health_again(&mut self) {
+        if self.model.health.take_ask_again() {
+            self.request_health();
+        }
     }
 
     /// Opens the Code page on `path`, at `line` if given: the tree opens the

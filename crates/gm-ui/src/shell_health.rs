@@ -8,8 +8,9 @@ use std::ops::Range;
 
 use gm_schema::{ChurnSummary, FileHealth, Partner, SPARK_BARS, Trend};
 use gpui::{
-    Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, ScrollStrategy,
-    Stateful, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    Context, Div, Entity, FocusHandle, FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent,
+    Pixels, ScrollStrategy, Stateful, Subscription, UniformListScrollHandle, Window, div,
+    prelude::*, px, uniform_list,
 };
 
 use crate::health_page::{self, DORMANT_SHOWN, HealthState, heat_share, spark_heights};
@@ -30,25 +31,28 @@ const ROW_SPARK_HEIGHT: u16 = 16;
 /// The activity chart of the details: the panel's content width, 48 px tall.
 const DETAIL_SPARK_WIDTH: f32 = DETAILS_WIDTH - 32.;
 const DETAIL_SPARK_HEIGHT: u16 = 48;
-/// The Churn section under the hotspots: a fixed height, and the survival chart's bars, columns
-/// and bar width.
-const CHURN_SECTION_HEIGHT: f32 = 96.;
-const CHURN_BAR_MAX: f32 = 24.;
+/// The Churn section under the hotspots: a fixed height, and the survival chart's track, columns
+/// and bar width. The track is as tall as the chart's bars can grow.
+const CHURN_SECTION_HEIGHT: f32 = 120.;
+const CHURN_BAR_MAX: f32 = 48.;
 const CHURN_BAR_WIDTH: f32 = 14.;
 const CHURN_COLUMN_WIDTH: f32 = 40.;
 
-/// The window's part of the Health tab: the filter box and the list's scroll. Its state is
-/// `model.health`.
+/// The window's part of the Health tab: the filter box, the hotspot list's scroll and its focus.
+/// Its state is `model.health`.
 pub(crate) struct HealthView {
     pub(crate) query: Entity<TextArea>,
     pub(crate) list: UniformListScrollHandle,
+    /// The hotspot list takes the arrow and page keys while it has focus.
+    pub(crate) focus: FocusHandle,
 }
 
 impl HealthView {
-    pub(crate) fn new(query: Entity<TextArea>) -> Self {
+    pub(crate) fn new(query: Entity<TextArea>, focus: FocusHandle) -> Self {
         Self {
             query,
             list: UniformListScrollHandle::new(),
+            focus,
         }
     }
 }
@@ -89,6 +93,50 @@ impl StatusView {
     /// Shows the details of the file at `path`.
     fn select_health_file(&mut self, path: &str, cx: &mut Context<Self>) {
         self.model.health.select(path);
+        cx.notify();
+    }
+
+    /// A key in the hotspot list: the arrows, Home, End and the page keys move the selection, and
+    /// Enter opens the selected file.
+    fn on_health_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        if key == "enter" {
+            if let Some(path) = self
+                .model
+                .health
+                .selected_file()
+                .map(|file| file.path.clone())
+            {
+                self.view_file(&path, None, cx);
+            }
+            return;
+        }
+        let Some(step) = health_page::step_of_key(key) else {
+            return;
+        };
+        let visible = self
+            .health_view
+            .list
+            .0
+            .borrow()
+            .base_handle
+            .bounds()
+            .size
+            .height;
+        let page = health_page::page_rows(f32::from(visible), ROW_HEIGHT);
+        let health = &self.model.health;
+        let Some(row) =
+            health_page::move_selection(health.selected_row(), health.rows().len(), step, page)
+        else {
+            return;
+        };
+        let Some(path) = health.path_at_row(row).map(str::to_owned) else {
+            return;
+        };
+        self.model.health.select(&path);
+        self.health_view
+            .list
+            .scroll_to_item(row, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -223,7 +271,13 @@ impl StatusView {
                 .child(empty_text(health))
                 .into_any_element()
         } else {
-            hotspot_list(count, self.health_view.list.clone(), cx).into_any_element()
+            hotspot_list(
+                count,
+                self.health_view.list.clone(),
+                &self.health_view.focus,
+                cx,
+            )
+            .into_any_element()
         };
         div()
             .flex_1()
@@ -299,6 +353,7 @@ impl StatusView {
                 }))
                 .child(partners_section(file, cx))
                 .child(ownership_section(file))
+                .children(complexity_block(file))
                 .children(churn_block(file))
                 .child(constraints_section(file))
                 .child(
@@ -352,38 +407,59 @@ fn empty_text(health: &HealthState) -> String {
 }
 
 /// The list of the hotspots: one row per file under the filter, drawn as they scroll into view.
-fn hotspot_list(count: usize, list: UniformListScrollHandle, cx: &mut Context<StatusView>) -> Div {
-    div().flex_1().min_h(px(0.)).flex().flex_col().child(
-        uniform_list(
-            "health-rows",
-            count,
-            cx.processor(
-                |this: &mut StatusView,
-                 range: Range<usize>,
-                 _window: &mut Window,
-                 cx: &mut Context<StatusView>| {
-                    let health = &this.model.health;
-                    let max_heat = health.max_heat();
-                    let selected = health.selected();
-                    health
-                        .rows()
-                        .get(range.clone())
-                        .unwrap_or_default()
-                        .iter()
-                        .zip(range)
-                        .filter_map(|(&index, row)| {
-                            let file = health.file(index)?;
-                            let chosen = selected == Some(file.path.as_str());
-                            Some(hotspot_row(file, row, health, max_heat, chosen, cx))
-                        })
-                        .collect::<Vec<_>>()
-                },
-            ),
-        )
-        .track_scroll(list)
+/// It takes focus on a click and then the keys of `on_health_key`.
+fn hotspot_list(
+    count: usize,
+    list: UniformListScrollHandle,
+    focus: &FocusHandle,
+    cx: &mut Context<StatusView>,
+) -> Div {
+    div()
         .flex_1()
-        .min_h(px(0.)),
-    )
+        .min_h(px(0.))
+        .flex()
+        .flex_col()
+        .track_focus(focus)
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            this.on_health_key(event, cx);
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, window, _| {
+                this.health_view.focus.focus(window);
+            }),
+        )
+        .child(
+            uniform_list(
+                "health-rows",
+                count,
+                cx.processor(
+                    |this: &mut StatusView,
+                     range: Range<usize>,
+                     _window: &mut Window,
+                     cx: &mut Context<StatusView>| {
+                        let health = &this.model.health;
+                        let max_heat = health.max_heat();
+                        let selected = health.selected();
+                        health
+                            .rows()
+                            .get(range.clone())
+                            .unwrap_or_default()
+                            .iter()
+                            .zip(range)
+                            .filter_map(|(&index, row)| {
+                                let file = health.file(index)?;
+                                let chosen = selected == Some(file.path.as_str());
+                                Some(hotspot_row(file, row, health, max_heat, chosen, cx))
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                ),
+            )
+            .track_scroll(list)
+            .flex_1()
+            .min_h(px(0.)),
+        )
 }
 
 /// One hotspot: the rank, the path, the heat bar, the activity chart and the trend. A click
@@ -570,6 +646,17 @@ fn ownership_section(file: &FileHealth) -> Div {
         })
 }
 
+/// The complexity of the selected file: its deepest and mean nesting, and where it stands among
+/// the measured files. Nothing when the file has none (D229).
+fn complexity_block(file: &FileHealth) -> Option<Div> {
+    let [depth, standing] = health_page::complexity_lines(file.complexity.as_ref()?);
+    Some(
+        detail_section("Complexity")
+            .child(note(&depth))
+            .child(note(&standing)),
+    )
+}
+
 /// The churn of the selected file: its line of churn and the share alive after 30 active days.
 /// Nothing when the file has no churn.
 fn churn_block(file: &FileHealth) -> Option<Div> {
@@ -642,22 +729,23 @@ fn churn_body(churn: &ChurnSummary) -> Div {
         .child(survival_chart(churn))
 }
 
-/// The share of lines alive at each age: one column per age, a bar as tall as the share, the
-/// percentage under it and the age at the foot.
+/// The share of lines alive at each age: one column per age, a bar on a muted track, the
+/// percentage under it and the age at the foot. The bars start from `survival_floor`, so the
+/// differences between the shares show (`health_page::survival_fills`).
 fn survival_chart(churn: &ChurnSummary) -> Div {
     let points = health_page::survival_points(churn);
+    let fills = health_page::survival_fills(&churn.survival);
     div().flex_none().flex().flex_row().gap_2().children(
-        churn
-            .survival
-            .iter()
+        fills
+            .into_iter()
             .zip(points.iter())
-            .map(|(&share, (age, label))| survival_column(*age, share, label.as_str())),
+            .map(|(fill, (age, label))| survival_column(*age, fill, label.as_str())),
     )
 }
 
-/// One column of the survival chart.
-fn survival_column(age: u32, share: f64, label: &str) -> Div {
-    let height = Pixels::from(share.clamp(0.0, 1.0) * f64::from(CHURN_BAR_MAX));
+/// One column of the survival chart: a bar filled to `fill` of its track.
+fn survival_column(age: u32, fill: f64, label: &str) -> Div {
+    let height = Pixels::from(fill.clamp(0.0, 1.0) * f64::from(CHURN_BAR_MAX));
     div()
         .w(px(CHURN_COLUMN_WIDTH))
         .flex()
@@ -665,19 +753,14 @@ fn survival_column(age: u32, share: f64, label: &str) -> Div {
         .items_center()
         .child(
             div()
-                .w_full()
+                .w(px(CHURN_BAR_WIDTH))
                 .h(px(CHURN_BAR_MAX))
                 .flex()
                 .flex_col()
                 .justify_end()
-                .items_center()
-                .child(
-                    div()
-                        .w(px(CHURN_BAR_WIDTH))
-                        .h(height)
-                        .rounded_sm()
-                        .bg(theme::muted()),
-                ),
+                .rounded_sm()
+                .bg(theme::hairline())
+                .child(div().w_full().h(height).rounded_sm().bg(theme::muted())),
         )
         .child(
             div()

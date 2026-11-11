@@ -508,7 +508,7 @@ impl StatusView {
             quick_open_view: QuickOpenView::new(quick_open_input),
             code_view: CodeView::new(),
             search_view: SearchView::new(search_query, search_paths),
-            health_view: HealthView::new(health_query),
+            health_view: HealthView::new(health_query, cx.focus_handle()),
             threads_view: ThreadsView::new(threads_query),
             memories_view: MemoriesView::new(memories_query, memory_path, memory_mark_reason),
             threads_tab: ThreadsTab::default(),
@@ -679,6 +679,7 @@ impl StatusView {
         self.follow_memories(&event, cx);
         self.follow_contexts(&event, cx);
         let shown = self.model.apply(event);
+        self.ask_health_again();
         if moved_by_workflow {
             self.replan_after_workflow_restack(cx);
         }

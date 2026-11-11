@@ -83,6 +83,17 @@ Next file and previous file wrap around at the first and the last file.
 | Quick Open, find a file in the worktree | `Ctrl+P` | `⌘P` | Implemented |
 | Search Text, search the repository | `Ctrl+Shift+F` | `⇧⌘F` | Implemented |
 
+## Code health
+
+These keys work in the hotspot list of the **Health** tab, while the list has focus. Click the list or a row to focus it.
+
+| Action | Linux and Windows | macOS | Status |
+|---|---|---|---|
+| Select the next or the previous file | `Down`, `Up` | `Down`, `Up` | Implemented |
+| Select the first or the last file | `Home`, `End` | `Home`, `End` | Implemented |
+| Select the file a page down or up | `PageDown`, `PageUp` | `PageDown`, `PageUp` | Implemented |
+| Open the selected file on the Files tab | `Enter` | `Enter` | Implemented |
+
 ## Workflows
 
 A manual workflow can declare its own shortcut with `key` in the `trigger` table of `M.meta`. See [Writing workflows](../workflows/writing-workflows.md).

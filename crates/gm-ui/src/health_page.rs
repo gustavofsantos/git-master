@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gm_schema::{
-    CHURN_DAYS, ChurnSummary, DormancyBreak, FileHealth, HealthProgress, HealthReport, OperationId,
-    Ownership, Partner, SPARK_BARS, SURVIVAL_AGES, Trend,
+    CHURN_DAYS, ChurnSummary, Complexity, DormancyBreak, FileHealth, HealthProgress, HealthReport,
+    OperationId, Ownership, Partner, SPARK_BARS, SURVIVAL_AGES, Trend,
 };
 
 /// The band of a file's heat dot: the hottest 1%, 5% or 10% of the files.
@@ -68,14 +68,34 @@ pub(crate) struct HealthState {
     /// The churn of the files under the filter that have churn; `None` when none has. Kept by
     /// `refresh`.
     churn: Option<ChurnSummary>,
+    /// A request came while a read was in flight, so the read is asked again when it ends (D229).
+    wanted_again: bool,
 }
 
 impl HealthState {
-    /// A read of the health was asked for under `id`. A new request replaces an old error.
+    /// A read of the health was asked for under `id`. A new request replaces an old error and
+    /// answers any earlier request that came while the previous read was in flight.
     pub(crate) fn requested(&mut self, id: OperationId) {
         self.pending = Some(id);
         self.progress = None;
         self.error = None;
+        self.wanted_again = false;
+    }
+
+    /// A request came while a read is in flight: the read answers an older HEAD, so one more
+    /// read follows it (D229).
+    pub(crate) fn want_again(&mut self) {
+        self.wanted_again = true;
+    }
+
+    /// Whether a request was skipped and no read is in flight any more. Taking it clears it, so
+    /// the caller asks once, after a complete answer, a failure or a cancel.
+    pub(crate) fn take_ask_again(&mut self) -> bool {
+        if self.pending.is_none() && self.wanted_again {
+            self.wanted_again = false;
+            return true;
+        }
+        false
     }
 
     /// The index of the read `id` filled up to `progress`.
@@ -248,6 +268,23 @@ impl HealthState {
         self.file(index)
     }
 
+    /// The position of the selected file among the rows, or `None` when it is not listed.
+    #[must_use]
+    pub(crate) fn selected_row(&self) -> Option<usize> {
+        let selected = self.selected.as_deref()?;
+        self.rows.iter().position(|&index| {
+            self.file(index)
+                .is_some_and(|file| file.path.as_str() == selected)
+        })
+    }
+
+    /// The path of the file on the row at `row`, when there is one.
+    #[must_use]
+    pub(crate) fn path_at_row(&self, row: usize) -> Option<&str> {
+        let index = *self.rows.get(row)?;
+        self.file(index).map(|file| file.path.as_str())
+    }
+
     /// Recomputes what the list keeps from the report and the filter, and the heat scale.
     fn refresh(&mut self) {
         self.rows.clear();
@@ -277,10 +314,18 @@ impl HealthState {
             .filter(|&index| report.files[index].dormancy_break.is_some())
             .collect();
         self.dormant.sort_by_key(|&index| report.files[index].rank);
+        // The churn of a removed file counts toward the folder it was in (D229).
         self.churn = ChurnSummary::of(
             self.rows
                 .iter()
-                .filter_map(|&index| report.files[index].churn.as_ref()),
+                .filter_map(|&index| report.files[index].churn.as_ref())
+                .chain(
+                    report
+                        .removed_churn
+                        .iter()
+                        .filter(|removed| is_under(&removed.path, scope))
+                        .map(|removed| &removed.churn),
+                ),
         );
     }
 
@@ -424,6 +469,116 @@ pub(crate) fn alive_line(churn: &ChurnSummary) -> String {
         "Alive after 30 active days: {}%",
         percent_round(churn.survival[DETAIL_SURVIVAL_INDEX])
     )
+}
+
+/// The share at the bottom of a survival chart: the lowest share less five points, rounded down
+/// to a tenth and kept between 0 and 0.9, so the bars use the track's height for the range shown.
+#[must_use]
+pub(crate) fn survival_floor(survival: &[f64]) -> f64 {
+    let lowest = survival.iter().copied().fold(1.0, f64::min);
+    let base = (lowest - 0.05).clamp(0.0, 0.9);
+    // The epsilon keeps a share that is exactly a tenth from rounding down one tenth too far.
+    ((base * 10.0) + 1e-9).floor() / 10.0
+}
+
+/// Each share of a survival chart as the fraction of its track to fill, 0 to 1, measured from
+/// `survival_floor`: the floor is empty and 100% is full.
+#[must_use]
+pub(crate) fn survival_fills(survival: &[f64]) -> Vec<f64> {
+    let floor = survival_floor(survival);
+    survival
+        .iter()
+        .map(|&share| ((share - floor) / (1.0 - floor)).clamp(0.0, 1.0))
+        .collect()
+}
+
+/// The two lines of a file's complexity: its nesting, and how it compares with the other
+/// measured files (the percentile rounded down).
+#[must_use]
+pub(crate) fn complexity_lines(complexity: &Complexity) -> [String; 2] {
+    [
+        format!(
+            "Deepest nesting {} · mean {:.1} · {} lines",
+            complexity.indent_max, complexity.indent_mean, complexity.lines
+        ),
+        format!(
+            "More complex than {}% of the measured files",
+            complexity.percentile.floor()
+        ),
+    ]
+}
+
+/// A move in the hotspot list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    Up,
+    Down,
+    First,
+    Last,
+    PageUp,
+    PageDown,
+}
+
+/// The step a key of the hotspot list makes, or `None` for any other key.
+#[must_use]
+pub(crate) fn step_of_key(key: &str) -> Option<Step> {
+    match key {
+        "up" => Some(Step::Up),
+        "down" => Some(Step::Down),
+        "home" => Some(Step::First),
+        "end" => Some(Step::Last),
+        "pageup" => Some(Step::PageUp),
+        "pagedown" => Some(Step::PageDown),
+        _ => None,
+    }
+}
+
+/// The rows a page of the list moves by when the viewport holds `visible_px` high rows of
+/// `row_px`. 15 when the viewport is not laid out yet.
+#[must_use]
+pub(crate) fn page_rows(visible_px: f32, row_px: f32) -> usize {
+    const UNKNOWN: usize = 15;
+    if visible_px <= 0.0 || row_px <= 0.0 {
+        return UNKNOWN;
+    }
+    let mut rows = 0;
+    let mut used = 0.0;
+    while used + row_px <= visible_px {
+        rows += 1;
+        used += row_px;
+    }
+    rows.max(1)
+}
+
+/// The row a key moves the selection to, among `len` rows. `current` is the selected row. With
+/// no selection, Down, Home and `PageDown` select the first row and Up, End and `PageUp` the last.
+/// `page` is the number of rows a page moves by, at least one. `None` for an empty list.
+#[must_use]
+pub(crate) fn move_selection(
+    current: Option<usize>,
+    len: usize,
+    step: Step,
+    page: usize,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let last = len - 1;
+    let page = page.max(1);
+    let Some(current) = current.map(|row| row.min(last)) else {
+        return Some(match step {
+            Step::Up | Step::Last | Step::PageUp => last,
+            Step::Down | Step::First | Step::PageDown => 0,
+        });
+    };
+    Some(match step {
+        Step::Up => current.saturating_sub(1),
+        Step::Down => current.saturating_add(1).min(last),
+        Step::First => 0,
+        Step::Last => last,
+        Step::PageUp => current.saturating_sub(page),
+        Step::PageDown => current.saturating_add(page).min(last),
+    })
 }
 
 /// The index of each file by path, and for each folder the hottest banded file inside it.
@@ -1035,5 +1190,214 @@ mod tests {
         assert_eq!(shares, ["90%", "82%", "50%", "41%", "20%", "0%"]);
         assert_eq!(SURVIVAL_AGES[DETAIL_SURVIVAL_INDEX], 30);
         assert_eq!(alive_line(&churn), "Alive after 30 active days: 50%");
+    }
+
+    fn close(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() < 1e-9
+    }
+
+    #[test]
+    fn the_survival_floor_is_the_lowest_share_less_five_points_to_a_tenth_at_most_half() {
+        assert!(close(survival_floor(&[0.98, 0.66, 1.0]), 0.6));
+        assert!(close(survival_floor(&[0.99, 0.86]), 0.8));
+        assert!(close(survival_floor(&[0.3, 0.9]), 0.2));
+        assert!(close(survival_floor(&[0.35, 1.0]), 0.3));
+        assert!(close(survival_floor(&[0.2]), 0.1));
+        assert!(close(survival_floor(&[0.02]), 0.0));
+        assert!(close(survival_floor(&[0.0, 0.0]), 0.0));
+        assert!(close(survival_floor(&[1.0, 1.0]), 0.9));
+    }
+
+    #[test]
+    fn the_survival_fills_measure_from_the_floor_to_the_full_track() {
+        let fills = survival_fills(&[0.98, 0.66, 1.0, 0.7]);
+        // The floor is 0.6, so 66% to 100% fill the track.
+        assert!(close(fills[0], 0.95));
+        assert!(close(fills[1], 0.15));
+        assert!(close(fills[2], 1.0));
+        assert!(close(fills[3], 0.25));
+        let fills = survival_fills(&[0.9, 0.4]);
+        assert!(close(fills[0], 0.6 / 0.7));
+        assert!(close(fills[1], 0.1 / 0.7));
+        assert!(survival_fills(&[0.0; 3]).iter().all(|&fill| fill == 0.0));
+    }
+
+    #[test]
+    fn a_complexity_block_names_the_nesting_and_the_rounded_down_percentile() {
+        let complexity = Complexity {
+            lines: 1840,
+            indent_max: 7,
+            indent_mean: 2.1,
+            indent_total: 3864,
+            percentile: 97.5,
+        };
+        assert_eq!(
+            complexity_lines(&complexity),
+            [
+                "Deepest nesting 7 · mean 2.1 · 1840 lines".to_owned(),
+                "More complex than 97% of the measured files".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_map_to_steps_and_others_map_to_none() {
+        assert_eq!(step_of_key("up"), Some(Step::Up));
+        assert_eq!(step_of_key("down"), Some(Step::Down));
+        assert_eq!(step_of_key("home"), Some(Step::First));
+        assert_eq!(step_of_key("end"), Some(Step::Last));
+        assert_eq!(step_of_key("pageup"), Some(Step::PageUp));
+        assert_eq!(step_of_key("pagedown"), Some(Step::PageDown));
+        assert_eq!(step_of_key("enter"), None);
+        assert_eq!(step_of_key("a"), None);
+    }
+
+    #[test]
+    fn arrows_move_one_row_and_stop_at_the_ends() {
+        assert_eq!(move_selection(Some(1), 5, Step::Down, 3), Some(2));
+        assert_eq!(move_selection(Some(1), 5, Step::Up, 3), Some(0));
+        assert_eq!(move_selection(Some(0), 5, Step::Up, 3), Some(0));
+        assert_eq!(move_selection(Some(4), 5, Step::Down, 3), Some(4));
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_first_and_last_row() {
+        assert_eq!(move_selection(Some(3), 5, Step::First, 3), Some(0));
+        assert_eq!(move_selection(Some(1), 5, Step::Last, 3), Some(4));
+        assert_eq!(move_selection(Some(0), 1, Step::Last, 3), Some(0));
+    }
+
+    #[test]
+    fn pages_move_by_the_page_and_stop_at_the_ends() {
+        assert_eq!(move_selection(Some(2), 20, Step::PageDown, 15), Some(17));
+        assert_eq!(move_selection(Some(10), 20, Step::PageDown, 15), Some(19));
+        assert_eq!(move_selection(Some(10), 20, Step::PageUp, 15), Some(0));
+        assert_eq!(move_selection(Some(10), 20, Step::PageUp, 0), Some(9));
+    }
+
+    #[test]
+    fn with_no_selection_down_selects_the_first_row() {
+        assert_eq!(move_selection(None, 5, Step::Down, 3), Some(0));
+        assert_eq!(move_selection(None, 5, Step::First, 3), Some(0));
+        assert_eq!(move_selection(None, 5, Step::PageDown, 3), Some(0));
+        assert_eq!(move_selection(None, 5, Step::Up, 3), Some(4));
+        assert_eq!(move_selection(None, 5, Step::Last, 3), Some(4));
+        assert_eq!(move_selection(None, 5, Step::PageUp, 3), Some(4));
+    }
+
+    #[test]
+    fn an_empty_list_has_no_selection_and_a_stale_row_is_brought_back() {
+        assert_eq!(move_selection(None, 0, Step::Down, 3), None);
+        assert_eq!(move_selection(Some(0), 0, Step::Up, 3), None);
+        assert_eq!(move_selection(Some(10), 3, Step::Up, 3), Some(1));
+    }
+
+    #[test]
+    fn a_page_is_the_rows_that_fit_or_fifteen_when_unknown() {
+        assert_eq!(page_rows(0.0, 24.0), 15);
+        assert_eq!(page_rows(400.0, 0.0), 15);
+        assert_eq!(page_rows(100.0, 24.0), 4);
+        assert_eq!(page_rows(10.0, 24.0), 1);
+    }
+
+    #[test]
+    fn the_selection_is_a_row_of_the_list_under_the_filter() {
+        let mut state = sample();
+        state.select("a/x.rs");
+        assert_eq!(state.selected_row(), Some(1));
+        assert_eq!(state.path_at_row(2), Some("a/b/c.rs"));
+        assert_eq!(state.path_at_row(5), None);
+        state.set_filter("a/b");
+        assert_eq!(state.selected_row(), None);
+        assert_eq!(state.path_at_row(1), Some("a/b/c.rs"));
+        state.select("cold.rs");
+        assert_eq!(state.selected_row(), None);
+    }
+
+    #[test]
+    fn a_request_during_a_read_is_asked_again_once_the_read_ends() {
+        let mut state = HealthState::default();
+        assert!(!state.take_ask_again());
+        state.requested(OperationId(30));
+        state.want_again();
+        state.loaded(
+            OperationId(30),
+            Box::new(report(vec![file("x.rs", 1, 99.0)], false)),
+        );
+        assert!(!state.take_ask_again(), "a partial answer keeps the read");
+        state.loaded(
+            OperationId(30),
+            Box::new(report(vec![file("x.rs", 1, 99.0)], true)),
+        );
+        assert!(state.take_ask_again());
+        assert!(!state.take_ask_again(), "asked once");
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_read_also_asks_again() {
+        let mut state = HealthState::default();
+        state.requested(OperationId(31));
+        state.want_again();
+        state.failed(OperationId(31), "boom".to_owned());
+        assert!(state.take_ask_again());
+
+        let mut state = HealthState::default();
+        state.requested(OperationId(32));
+        state.want_again();
+        state.cancelled(OperationId(32));
+        assert!(state.take_ask_again());
+    }
+
+    #[test]
+    fn a_new_read_answers_the_request_it_started_from() {
+        let mut state = HealthState::default();
+        state.requested(OperationId(33));
+        state.want_again();
+        state.cancelled(OperationId(33));
+        state.requested(OperationId(34));
+        state.loaded(
+            OperationId(34),
+            Box::new(report(vec![file("x.rs", 1, 99.0)], true)),
+        );
+        assert!(!state.take_ask_again());
+    }
+
+    #[test]
+    fn removed_files_count_toward_their_folder() {
+        let mut churned = file("src/a.rs", 1, 99.0);
+        churned.churn = Some(LineChurn {
+            added: 4,
+            rewritten: 1,
+            ..LineChurn::default()
+        });
+        let removed = |path: &str, added, rewritten| gm_schema::RemovedChurn {
+            path: path.to_owned(),
+            churn: LineChurn {
+                added,
+                rewritten,
+                ..LineChurn::default()
+            },
+        };
+        let mut full = report(vec![churned], true);
+        full.removed_churn = vec![
+            removed("src/old.rs", 10, 5),
+            removed("srcx/old.rs", 2, 0),
+            removed("other/gone.rs", 3, 0),
+        ];
+        let mut state = HealthState::default();
+        state.requested(OperationId(40));
+        state.loaded(OperationId(40), Box::new(full));
+
+        let summary = state.churn().expect("churn");
+        assert_eq!((summary.lines_added, summary.rewritten_14), (19, 6));
+        assert!(state.set_filter("src"));
+        let summary = state.churn().expect("churn");
+        assert_eq!((summary.lines_added, summary.rewritten_14), (14, 6));
+        assert!(state.set_filter("srcx"));
+        assert_eq!(state.churn().expect("churn").lines_added, 2);
+        assert!(state.set_filter("other"));
+        assert_eq!(state.churn().expect("churn").lines_added, 3);
+        assert!(state.set_filter("nothing"));
+        assert!(state.churn().is_none());
     }
 }
