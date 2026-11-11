@@ -87,7 +87,13 @@ With the list focused, `Up` and `Down` move the selection, `Home` and `End` go t
 
 > **Planned.** The hotspot map is not available in the app yet.
 
-A map of the folder tree shows each file as a box, its size by the size of the file and its color by heat, so the hot areas of a large repository stand out at a glance.
+Choose **Map** above the hotspots to see them as a map instead of a list; **List** goes back. The map shows the folder in the filter box, or the whole repository: each folder directly inside it is a box with its name, and inside each folder box its files are boxes too. A box's area is the size of the file, and its color is its heat: the three heat colors for the hottest 10% of the repository, and a muted color for the rest. The hot areas of a large repository stand out at a glance.
+
+- Hover a file box to read its path, rank and size.
+- Click a file box to select the file and show its details.
+- Click a folder's name to put that folder in the filter box and look inside it.
+
+Files too small to draw are left out of the map, and the map shows at most the 2,000 largest files under the folder; the list always shows them all.
 
 ### Churn
 
