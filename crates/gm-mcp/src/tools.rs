@@ -407,6 +407,7 @@ fn dispatch(session: &mut Session, name: &str, args: &Value) -> Result<Value, St
         "scorecards_list" => scorecard_tools::scorecards_list(session, args),
         "health_context" => health_tools::health_context(session, args),
         "hotspots_list" => health_tools::hotspots_list(session, args),
+        "churn_summary" => health_tools::churn_summary(session, args),
         other => Err(format!("there is no tool {other}")),
     }
 }

@@ -807,7 +807,7 @@ Every memory belongs to one or more contexts; a context is an area of knowledge 
 - **K4, plugin text.** `propose-memories`, `prepare` and `consolidate` speak of contexts, not repository memories; the plugin version is raised.
 - **K5, cleanup.** `threads.db` drops its memory tables once empty; the `Planned` markers come off and the pages go back to their status.
 
-## Slice 6h: code health (CH0 to CH3b and CH5 done 2026-11-11, with gaps; CH4, CH6 and the backtest to do; D225, D226)
+## Slice 6h: code health (CH0 to CH5 done 2026-11-11, with gaps; CH6 and the backtest to do; D225 to D228)
 
 Requested by the author on 2026-11-11 for daily use on very large repositories at work. Behavior: `docs/guide/code-health.md`, the Health tab and heat dots in `docs/guide/code-navigation.md`, the keys and `health.db` in `docs/reference/configuration.md`, the tools in `docs/reference/mcp-tools.md`, all `Planned`. No preview flag (D225 (8)). Sub-slices use the prefix CH, since H1 to H8 belong to History.
 
@@ -817,16 +817,18 @@ Requested by the author on 2026-11-11 for daily use on very large repositories a
 - **CH1c, the engine** (done 2026-11-11). `LoadHealth` command and its events, mirroring `ReadProvenance`; per-process cache per `(rev, config_hash)`; progress events while indexing.
 - **CH2, MCP** (done 2026-11-11). `health_context`, `hotspots_list`; `crates/gm-mcp/tests/health_mcp_real_git.rs`.
 - **CH3a, heat dots** in the Files tree (done 2026-11-11). **CH3b, the Health tab** (done 2026-11-11): dormancy breaks, virtualized hotspot list with sparkline, file details, filter, **Show Code Health** in the palette.
-- **CH4, churn** (D227, D228). **CH4a, engine:** `health.db` v2 with the hunk headers of the first-parent commits, their ingest, the pure replay into a `LineChurn` per file, the job fills `FileHealth::churn`. **CH4b, front ends:** the Health tab's churn panel and the file's churn in the details, and `churn_summary` over MCP.
+- **CH4, churn** (done 2026-11-11; D227, D228). **CH4a, engine:** `health.db` v2 with the hunk headers of the first-parent commits, their ingest, the pure replay into a `LineChurn` per file, the job fills `FileHealth::churn`. **CH4b, front ends:** the Health tab's churn panel and the file's churn in the details, and `churn_summary` over MCP.
 - **CH5, the prepare skill** reads `health_context` (plugin, `ai` submodule; done 2026-11-11, plugin 0.7.0).
 - **CH6, the hotspot map** (treemap).
 - **Owed:** the backtest of the research doc on a large real repository before tuning any threshold.
 
 **Measured** (release build, git/git, 11,316 commits in the 3-year window, `crates/gm-core/tests/health_measure.rs`): cold index 9.7 s (about 1,170 commits a second), an incremental pass 0.22 s, loading the window 0.26 s, the indicators 8 ms. A window of 200,000 commits would take about three minutes to index the first time, the last six months first.
 
+**Churn, measured** on git/git (release): the hunks of 2,751 first-parent commits (103,683 hunks) read in 7.7 s cold and 63 ms incrementally, the replay in 83 ms; 1.4% of 446,894 lines rewritten within 14 active days, 85% alive after 180. **Checked against `git blame`** at HEAD for five files: the lines born in the window and alive match exactly for `odb/source-files.c` (1,327), `builtin/clone.c` (573) and `odb.c` (841); `setup.c` (1,426 against 1,404) and `Makefile` (817 against 800) count more, as D228 (2) says: lines committed on a side branch before the window and merged in it are born on the merge day. Seen in a window: the churn panel for the whole repository and for `odb` (3% of 5,745 lines), and the file's churn in the details.
+
 **Seen in a window** under Xvfb on git/git: dark theme, the tree's heat dots, the progress line while the history is read and the dots of the partial report, the Health tab with a dormancy break, the hotspot list and the file details; light theme, aligned hotspot columns, the selection, the folder filter and the agent's constraints.
 
-**Known gaps:** no hotspot map (CH6) and no churn (CH4); complexity does not weight the rank yet (heat alone); no `scripts/ui-smoke.sh` scenario; the partial answer of the MCP tools is not covered by a test; a refresh while a health read is in flight is skipped until the next refresh; a first MCP call in a repository with no index builds it inline (open the Health tab first in a very large repository); keyboard navigation of the hotspot list. `cargo audit` reported RUSTSEC-2026-0459 (`libsqlite3-sys` 0.38.2 through `rusqlite` 0.40) before this slice; `rusqlite` 0.41 fixes it with no code change.
+**Known gaps:** no hotspot map (CH6); the survival chart's bars are 24 px tall, so 98% and 66% look alike; complexity does not weight the rank yet (heat alone); no `scripts/ui-smoke.sh` scenario; the partial answer of the MCP tools is not covered by a test; a refresh while a health read is in flight is skipped until the next refresh; a first MCP call in a repository with no index builds it inline (open the Health tab first in a very large repository); keyboard navigation of the hotspot list. `cargo audit` reported RUSTSEC-2026-0459 (`libsqlite3-sys` 0.38.2 through `rusqlite` 0.40) before this slice; `rusqlite` 0.41 fixes it with no code change.
 
 ## Slice 6u: memory revisions, applies-to paths and links (decided 2026-11-09; D213, Q47)
 

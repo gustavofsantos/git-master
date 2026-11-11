@@ -85,8 +85,6 @@ A map of the folder tree shows each file as a box, its size by the size of the f
 
 ### Churn
 
-> **Planned.** Churn is not available in the app yet.
-
 Under the hotspots, the tab shows the **churn** of the folder in the filter box, or of the whole repository when the box is empty:
 
 - **Rewritten within 14 active days**: of the lines added under the folder in the analysis window, the share that a later commit deleted or changed within 14 active days of the repository. Lines added in the last 14 active days are not counted yet, since they have not had their 14 days.

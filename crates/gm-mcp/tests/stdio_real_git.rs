@@ -144,7 +144,8 @@ fn the_handshake_lists_only_the_tools_the_agent_does_not_have() {
             "scorecard_publish",
             "scorecards_list",
             "health_context",
-            "hotspots_list"
+            "hotspots_list",
+            "churn_summary"
         ]
     );
 }

@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use gm_schema::{FileHealth, Partner, SPARK_BARS, Trend};
+use gm_schema::{ChurnSummary, FileHealth, Partner, SPARK_BARS, Trend};
 use gpui::{
     Context, Div, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, ScrollStrategy,
     Stateful, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
@@ -30,6 +30,12 @@ const ROW_SPARK_HEIGHT: u16 = 16;
 /// The activity chart of the details: the panel's content width, 48 px tall.
 const DETAIL_SPARK_WIDTH: f32 = DETAILS_WIDTH - 32.;
 const DETAIL_SPARK_HEIGHT: u16 = 48;
+/// The Churn section under the hotspots: a fixed height, and the survival chart's bars, columns
+/// and bar width.
+const CHURN_SECTION_HEIGHT: f32 = 96.;
+const CHURN_BAR_MAX: f32 = 24.;
+const CHURN_BAR_WIDTH: f32 = 14.;
+const CHURN_COLUMN_WIDTH: f32 = 40.;
 
 /// The window's part of the Health tab: the filter box and the list's scroll. Its state is
 /// `model.health`.
@@ -234,6 +240,7 @@ impl StatusView {
                     .child(section_title("Hotspots")),
             )
             .child(body)
+            .child(churn_section(health))
     }
 
     /// The details of the selected file, or nothing when no file is selected.
@@ -292,6 +299,7 @@ impl StatusView {
                 }))
                 .child(partners_section(file, cx))
                 .child(ownership_section(file))
+                .children(churn_block(file))
                 .child(constraints_section(file))
                 .child(
                     div()
@@ -560,6 +568,129 @@ fn ownership_section(file: &FileHealth) -> Div {
         .fold(detail_section("Ownership"), |section, line| {
             section.child(note(&line))
         })
+}
+
+/// The churn of the selected file: its line of churn and the share alive after 30 active days.
+/// Nothing when the file has no churn.
+fn churn_block(file: &FileHealth) -> Option<Div> {
+    let churn = ChurnSummary::of(file.churn.as_ref())?;
+    Some(
+        detail_section("Churn")
+            .child(note(&health_page::churn_line(&churn)))
+            .child(note(&health_page::alive_line(&churn))),
+    )
+}
+
+/// The churn of the folder the list is limited to, under the hotspots: its line and its survival
+/// chart, or why there is none yet. A fixed height.
+fn churn_section(health: &HealthState) -> Div {
+    let folder = health_page::scope_of(health.filter());
+    let folder = if folder.is_empty() {
+        "whole repository"
+    } else {
+        folder
+    };
+    let body = match health.churn() {
+        Some(churn) => churn_body(&churn),
+        None if health.reading() => note("Churn appears once the history of the window is read."),
+        None => note("No lines to follow here."),
+    };
+    div()
+        .flex_none()
+        .h(px(CHURN_SECTION_HEIGHT))
+        .px_4()
+        .py_2()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .overflow_hidden()
+        .border_t_1()
+        .border_color(theme::hairline())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(section_title("Churn"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::muted())
+                        .child(format!("· {folder}")),
+                ),
+        )
+        .child(body)
+}
+
+/// The line of a folder's churn beside its survival chart.
+fn churn_body(churn: &ChurnSummary) -> Div {
+    div()
+        .flex_1()
+        .min_h(px(0.))
+        .flex()
+        .flex_row()
+        .gap_4()
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_xs()
+                .text_color(theme::muted())
+                .child(health_page::churn_line(churn)),
+        )
+        .child(survival_chart(churn))
+}
+
+/// The share of lines alive at each age: one column per age, a bar as tall as the share, the
+/// percentage under it and the age at the foot.
+fn survival_chart(churn: &ChurnSummary) -> Div {
+    let points = health_page::survival_points(churn);
+    div().flex_none().flex().flex_row().gap_2().children(
+        churn
+            .survival
+            .iter()
+            .zip(points.iter())
+            .map(|(&share, (age, label))| survival_column(*age, share, label.as_str())),
+    )
+}
+
+/// One column of the survival chart.
+fn survival_column(age: u32, share: f64, label: &str) -> Div {
+    let height = Pixels::from(share.clamp(0.0, 1.0) * f64::from(CHURN_BAR_MAX));
+    div()
+        .w(px(CHURN_COLUMN_WIDTH))
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(
+            div()
+                .w_full()
+                .h(px(CHURN_BAR_MAX))
+                .flex()
+                .flex_col()
+                .justify_end()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(CHURN_BAR_WIDTH))
+                        .h(height)
+                        .rounded_sm()
+                        .bg(theme::muted()),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(label.to_owned()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(format!("{age}d")),
+        )
 }
 
 /// The constraints an agent is told before it changes the file.

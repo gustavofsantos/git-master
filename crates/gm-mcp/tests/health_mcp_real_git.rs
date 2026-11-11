@@ -316,7 +316,7 @@ fn both_health_tools_are_listed_and_read_only() {
         ],
     );
     let tools = replies[1]["result"]["tools"].as_array().unwrap();
-    for name in ["health_context", "hotspots_list"] {
+    for name in ["health_context", "hotspots_list", "churn_summary"] {
         let tool = tools
             .iter()
             .find(|tool| tool["name"] == name)
@@ -330,4 +330,60 @@ fn both_health_tools_are_listed_and_read_only() {
         .unwrap();
     assert_eq!(context["inputSchema"]["required"], json!(["paths"]));
     assert!(context["description"].as_str().unwrap().contains("BEFORE"));
+}
+
+/// The churn of a summary has its counts and its shares to two decimals, at every age.
+fn assert_churn_shape(churn: &Value) {
+    if churn.is_null() {
+        return;
+    }
+    assert!(churn["lines_added"].is_u64(), "{churn}");
+    assert!(churn["rewritten_14"].is_u64(), "{churn}");
+    let share = churn["rewritten_share"].as_f64().unwrap();
+    assert!((0.0..=1.0).contains(&share), "{churn}");
+    assert!(
+        (share * 100.0 - (share * 100.0).round()).abs() < 1e-9,
+        "{churn}"
+    );
+    let survival = churn["survival"].as_object().unwrap();
+    assert_eq!(survival.len(), 6, "{churn}");
+    for age in ["7", "14", "30", "60", "90", "180"] {
+        let share = survival[age]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{age}: {churn}"));
+        assert!((0.0..=1.0).contains(&share), "{churn}");
+    }
+}
+
+#[test]
+fn churn_summary_answers_the_whole_repository_and_a_scope_with_churn_or_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    make_repo(&repo);
+    let whole = ask(&repo, "churn_summary", &json!({}));
+    assert_eq!(whole["complete"], true, "{whole}");
+    assert!(whole.get("note").is_none(), "{whole}");
+    assert_eq!(whole["rev"].as_str().unwrap().len(), 40, "{whole}");
+    assert!(whole["config_hash"].is_string(), "{whole}");
+    assert_eq!(whole["scope"], "", "{whole}");
+    assert_churn_shape(&whole["churn"]);
+    let folder = ask(&repo, "churn_summary", &json!({ "scope": "/src/a/" }));
+    assert_eq!(folder["scope"], "src/a", "{folder}");
+    assert_churn_shape(&folder["churn"]);
+}
+
+#[test]
+fn churn_summary_of_an_unknown_scope_has_no_churn() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    make_repo(&repo);
+    let unknown = ask(&repo, "churn_summary", &json!({ "scope": "nowhere" }));
+    assert!(unknown["churn"].is_null(), "{unknown}");
+    assert_eq!(unknown["scope"], "nowhere", "{unknown}");
+    let sibling = ask(&repo, "churn_summary", &json!({ "scope": "src/a" }));
+    let prefix = ask(&repo, "churn_summary", &json!({ "scope": "src" }));
+    assert_eq!(sibling["scope"], "src/a", "{sibling}");
+    assert_eq!(prefix["scope"], "src", "{prefix}");
+    let bad = refusal(&repo, "churn_summary", &json!({ "scope": "../x" }));
+    assert!(!bad.is_empty());
 }

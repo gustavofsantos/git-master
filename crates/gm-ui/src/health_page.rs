@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gm_schema::{
-    DormancyBreak, FileHealth, HealthProgress, HealthReport, OperationId, Ownership, Partner,
-    SPARK_BARS, Trend,
+    CHURN_DAYS, ChurnSummary, DormancyBreak, FileHealth, HealthProgress, HealthReport, OperationId,
+    Ownership, Partner, SPARK_BARS, SURVIVAL_AGES, Trend,
 };
 
 /// The band of a file's heat dot: the hottest 1%, 5% or 10% of the files.
@@ -65,6 +65,9 @@ pub(crate) struct HealthState {
     dormant: Vec<usize>,
     /// The heat of the hottest file of the report. Kept by `refresh`.
     max_heat: f64,
+    /// The churn of the files under the filter that have churn; `None` when none has. Kept by
+    /// `refresh`.
+    churn: Option<ChurnSummary>,
 }
 
 impl HealthState {
@@ -214,6 +217,19 @@ impl HealthState {
         self.max_heat
     }
 
+    /// The churn of the folder the list is limited to: the sum over its files that have churn.
+    /// `None` when no file under the filter has churn.
+    #[must_use]
+    pub(crate) fn churn(&self) -> Option<ChurnSummary> {
+        self.churn.clone()
+    }
+
+    /// Whether the answers are still being read: a read is in flight, or the report is partial.
+    #[must_use]
+    pub(crate) fn reading(&self) -> bool {
+        self.pending() || self.report.as_ref().is_some_and(|report| !report.complete)
+    }
+
     /// The path of the file the details show.
     #[must_use]
     pub(crate) fn selected(&self) -> Option<&str> {
@@ -237,6 +253,7 @@ impl HealthState {
         self.rows.clear();
         self.dormant.clear();
         self.max_heat = 0.0;
+        self.churn = None;
         let Some(report) = self.report.as_deref() else {
             return;
         };
@@ -260,6 +277,11 @@ impl HealthState {
             .filter(|&index| report.files[index].dormancy_break.is_some())
             .collect();
         self.dormant.sort_by_key(|&index| report.files[index].rank);
+        self.churn = ChurnSummary::of(
+            self.rows
+                .iter()
+                .filter_map(|&index| report.files[index].churn.as_ref()),
+        );
     }
 
     /// Forgets everything: another repository opened.
@@ -370,6 +392,40 @@ pub(crate) fn ownership_lines(ownership: &Ownership) -> [String; 3] {
     ]
 }
 
+/// The index in `SURVIVAL_AGES` of the age the details name: 30 active days.
+const DETAIL_SURVIVAL_INDEX: usize = 2;
+
+/// The line of a folder's churn: the share of its added lines rewritten within `CHURN_DAYS`,
+/// and how many lines were added.
+#[must_use]
+pub(crate) fn churn_line(churn: &ChurnSummary) -> String {
+    format!(
+        "Rewritten within {CHURN_DAYS} active days: {}% of {} lines",
+        percent_round(churn.rewritten_share),
+        grouped(u64::from(churn.lines_added))
+    )
+}
+
+/// Each age of `SURVIVAL_AGES` with the share of lines still alive at it, as a whole percentage.
+#[must_use]
+pub(crate) fn survival_points(churn: &ChurnSummary) -> Vec<(u32, String)> {
+    SURVIVAL_AGES
+        .iter()
+        .copied()
+        .zip(churn.survival.iter().copied())
+        .map(|(age, share)| (age, format!("{}%", percent_round(share))))
+        .collect()
+}
+
+/// The line of a file's churn that names the share still alive after 30 active days.
+#[must_use]
+pub(crate) fn alive_line(churn: &ChurnSummary) -> String {
+    format!(
+        "Alive after 30 active days: {}%",
+        percent_round(churn.survival[DETAIL_SURVIVAL_INDEX])
+    )
+}
+
 /// The index of each file by path, and for each folder the hottest banded file inside it.
 fn lookups(report: &HealthReport) -> (HashMap<String, usize>, HashMap<String, (HeatBand, u32)>) {
     let mut paths = HashMap::new();
@@ -412,7 +468,7 @@ fn grouped(count: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::{Ownership, Trend};
+    use gm_schema::{AGE_BUCKETS, LineChurn, Ownership, Trend};
 
     fn file(path: &str, rank: u32, percentile: f64) -> FileHealth {
         FileHealth {
@@ -875,5 +931,106 @@ mod tests {
                 "9 occasional authors"
             ]
         );
+    }
+
+    /// A file whose lines added in the window were `added`, `rewritten` within 14 days, with all
+    /// of them still alive at the oldest age.
+    fn file_with_churn(path: &str, rank: u32, added: u32, rewritten: u32) -> FileHealth {
+        let mut file = file(path, rank, 99.0);
+        let mut churn = LineChurn {
+            added,
+            rewritten,
+            ..LineChurn::default()
+        };
+        churn.alive[AGE_BUCKETS - 1] = added;
+        file.churn = Some(churn);
+        file
+    }
+
+    #[test]
+    fn the_churn_of_the_folder_sums_its_files_that_have_churn() {
+        let mut state = HealthState::default();
+        state.requested(OperationId(30));
+        state.loaded(
+            OperationId(30),
+            Box::new(report(
+                vec![
+                    file_with_churn("src/a.rs", 1, 4, 1),
+                    file("src/b.rs", 2, 99.0),
+                    file_with_churn("docs/c.md", 3, 6, 2),
+                ],
+                true,
+            )),
+        );
+        let whole = state.churn().expect("the churn of the whole repository");
+        assert_eq!((whole.lines_added, whole.rewritten_14), (10, 3));
+        state.set_filter("src");
+        let folder = state.churn().expect("the churn of src");
+        assert_eq!((folder.lines_added, folder.rewritten_14), (4, 1));
+        state.set_filter("src/b.rs");
+        assert_eq!(state.churn(), None, "a file without churn has none");
+    }
+
+    #[test]
+    fn no_churn_in_the_report_is_no_churn_and_clear_forgets_it() {
+        let mut state = sample();
+        assert_eq!(state.churn(), None);
+        state.requested(OperationId(31));
+        state.loaded(
+            OperationId(31),
+            Box::new(report(vec![file_with_churn("x.rs", 1, 2, 0)], true)),
+        );
+        assert!(state.churn().is_some());
+        state.clear();
+        assert_eq!(state.churn(), None);
+    }
+
+    #[test]
+    fn reading_is_a_read_in_flight_or_a_partial_report() {
+        let mut state = HealthState::default();
+        assert!(!state.reading());
+        state.requested(OperationId(32));
+        assert!(state.reading());
+        state.loaded(
+            OperationId(32),
+            Box::new(report(vec![file("x.rs", 1, 99.0)], false)),
+        );
+        assert!(state.reading());
+        state.loaded(
+            OperationId(32),
+            Box::new(report(vec![file("x.rs", 1, 99.0)], true)),
+        );
+        assert!(!state.reading());
+    }
+
+    #[test]
+    fn the_churn_line_rounds_the_share_and_groups_the_lines() {
+        let churn = ChurnSummary {
+            lines_added: 12_340,
+            rewritten_14: 4_000,
+            rewritten_share: 0.3241,
+            survival: [1.0; SURVIVAL_AGES.len()],
+        };
+        assert_eq!(
+            churn_line(&churn),
+            "Rewritten within 14 active days: 32% of 12,340 lines"
+        );
+    }
+
+    #[test]
+    fn the_survival_points_name_each_age_with_its_share() {
+        let churn = ChurnSummary {
+            lines_added: 10,
+            rewritten_14: 5,
+            rewritten_share: 0.5,
+            survival: [0.9, 0.82, 0.5, 0.41, 0.2, 0.0],
+        };
+        let points = survival_points(&churn);
+        let ages: Vec<u32> = points.iter().map(|(age, _)| *age).collect();
+        assert_eq!(ages, [7, 14, 30, 60, 90, 180]);
+        let shares: Vec<&str> = points.iter().map(|(_, share)| share.as_str()).collect();
+        assert_eq!(shares, ["90%", "82%", "50%", "41%", "20%", "0%"]);
+        assert_eq!(SURVIVAL_AGES[DETAIL_SURVIVAL_INDEX], 30);
+        assert_eq!(alive_line(&churn), "Alive after 30 active days: 50%");
     }
 }

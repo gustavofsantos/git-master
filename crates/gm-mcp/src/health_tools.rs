@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use gm_schema::{CommandKind, Event, FileHealth, HealthReport, Trend};
+use gm_schema::{ChurnSummary, CommandKind, Event, FileHealth, HealthReport, SURVIVAL_AGES, Trend};
 use serde_json::{Value, json};
 
 use crate::session::Session;
@@ -24,7 +24,11 @@ const CURSOR_MISMATCH: &str = "the cursor belongs to another listing (another re
 
 /// The definitions of the code health tools, in the order the server lists them.
 pub(crate) fn definitions() -> Vec<ToolDefinition> {
-    vec![health_context_definition(), hotspots_list_definition()]
+    vec![
+        health_context_definition(),
+        hotspots_list_definition(),
+        churn_summary_definition(),
+    ]
 }
 
 fn health_context_definition() -> ToolDefinition {
@@ -61,6 +65,22 @@ fn hotspots_list_definition() -> ToolDefinition {
                 "rev": { "type": "string", "description": "The commit to list at, by any revision Git reads. Default HEAD." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": HOTSPOTS_MAX_LIMIT, "default": HOTSPOTS_DEFAULT_LIMIT },
                 "cursor": { "type": "string", "description": "next_cursor of the previous page, with the same rev, scope and configuration." }
+            },
+            "additionalProperties": false
+        }),
+        read_only: true,
+    }
+}
+
+fn churn_summary_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "churn_summary",
+        description: "The churn of a folder, or of the whole repository: of the lines added to its files in the analysis window, how many were deleted or changed within 14 active days of the repository (`rewritten_14`, and as a share, `rewritten_share`), and the share of those lines still alive at 7, 14, 30, 60, 90 and 180 active days (`survival`, keyed by the age in days). Lines added in the last 14 active days are not counted yet. A high share means code that keeps being redone: a change in such a folder deserves extra care and a second look at what it replaces. Churn counts every line the same way, whoever or whatever wrote it, so it says nothing about a person. `scope` is a repository-relative folder such as src/billing; left out, it is the whole repository. `churn` is null when no file under the scope has churn yet (the index is still being built, or nothing changed there in the window); `complete` false, with a `note`, means the answer is partial. The numbers are deterministic at `rev` (default HEAD) under the configuration named by `config_hash`: context for the change, not a score to optimize. Read-only.",
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "scope": { "type": "string", "description": "A repository-relative folder, such as src/billing. Left out or empty, the whole repository." },
+                "rev": { "type": "string", "description": "The commit to compute at, by any revision Git reads. Default HEAD." }
             },
             "additionalProperties": false
         }),
@@ -106,16 +126,10 @@ pub(crate) fn hotspots_list(session: &mut Session, args: &Value) -> Result<Value
         None => 0,
         Some(cursor) => cursor_offset(cursor, &report, &scope)?,
     };
-    // A folder's files start with its name and a slash, so `src/a` never takes `src/ab`.
-    let prefix = if scope.is_empty() {
-        String::new()
-    } else {
-        format!("{scope}/")
-    };
     let listed: Vec<&FileHealth> = report
         .files
         .iter()
-        .filter(|file| file.path.starts_with(prefix.as_str()))
+        .filter(|file| is_under(&file.path, &scope))
         .collect();
     let rest = listed.get(offset..).unwrap_or(&[]);
     let page: Vec<&FileHealth> = rest
@@ -139,6 +153,31 @@ pub(crate) fn hotspots_list(session: &mut Session, args: &Value) -> Result<Value
         "files": page.iter().map(|file| hotspot_json(file)).collect::<Vec<_>>(),
         "has_more": has_more,
         "next_cursor": next_cursor,
+    });
+    if !report.complete {
+        result["note"] = json!(PARTIAL_NOTE);
+    }
+    Ok(result)
+}
+
+/// `churn_summary`: the churn of the files under a scope, summed; null when none of them has churn.
+pub(crate) fn churn_summary(session: &mut Session, args: &Value) -> Result<Value, String> {
+    let scope = scope_arg(args)?;
+    let rev = optional_text(args, "rev")?;
+    let report = health_report(session, rev)?;
+    let churn = ChurnSummary::of(
+        report
+            .files
+            .iter()
+            .filter(|file| is_under(&file.path, &scope))
+            .filter_map(|file| file.churn.as_ref()),
+    );
+    let mut result = json!({
+        "rev": report.rev,
+        "config_hash": report.config_hash,
+        "complete": report.complete,
+        "scope": scope,
+        "churn": churn.as_ref().map(churn_json),
     });
     if !report.complete {
         result["note"] = json!(PARTIAL_NOTE);
@@ -204,6 +243,28 @@ fn scope_arg(args: &Value) -> Result<String, String> {
         repository_path(&folder)?;
     }
     Ok(folder)
+}
+
+/// Whether `path` lies under the folder `scope`, on a segment boundary. An empty scope holds every path.
+fn is_under(path: &str, scope: &str) -> bool {
+    scope.is_empty()
+        || path
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A churn summary: its counts, and its shares and survival to two decimals.
+fn churn_json(churn: &ChurnSummary) -> Value {
+    let mut survival = serde_json::Map::new();
+    for (age, share) in SURVIVAL_AGES.iter().zip(churn.survival) {
+        survival.insert(age.to_string(), json!(round2(share)));
+    }
+    json!({
+        "lines_added": churn.lines_added,
+        "rewritten_14": churn.rewritten_14,
+        "rewritten_share": round2(churn.rewritten_share),
+        "survival": survival,
+    })
 }
 
 /// The offset a cursor names, when it was made for this report, this configuration and this scope.
