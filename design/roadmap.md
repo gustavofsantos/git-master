@@ -844,7 +844,7 @@ Requested by the author on 2026-11-11: the Changes page gets tabs for the branch
 - **CR3, UI view:** the tab bar, the pickers, the file list and the read-only stacked diff, reusing the commit view's rows; the refresh after a status refresh.
   - **CR3a, tab bar, Branch tab and file list** (done 2026-11-11).
   - **CR3b, Compare fields and a steady list** (done 2026-11-11): From and To with suggestions, Swap, Mode, the defaults, the tags, the errors under the fields, and a re-read that keeps the last result on screen. Known gaps of CR3: the inline Base picker is not a popover; nothing was seen in a window; the Branch tab re-reads on every status refresh.
-- **CR4, close:** a UI smoke scenario in both themes, the docs `status` and markers, this entry.
+- **CR4, close** (done 2026-11-11): the UI smoke scenario `o-compare-tabs` passes in both themes (Uncommitted, Branch, Compare with an unknown revision and Since common ancestor, and Open File). The docs `status` and `Planned` markers of `docs/guide/compare-changes.md` are not part of this note.
 
 ## Open the file from a diff (planned 2026-11-11; D232)
 
@@ -921,7 +921,7 @@ Several repositories in one workspace: a superproject whose submodules are linke
 
 ## UI smoke suite: stale coordinates (found 2026-11-06, repaired 2026-11-07)
 
-`scripts/ui-smoke.sh` had drifted from the app before D184. Repaired: every scenario passes in both themes (agent run 2026-11-07; re-run by the manager: all 31 light scenarios and the first 6 dark ones, stopped by a container restart, no failure). Each scenario now opens only the sidebar section it needs (Worktrees alone for the worktree scenarios, Branches alone otherwise). Fixed coordinates: stage lines (gutter x), branch menu, worktree section crop, remove/lock/prune worktree rows and menus, commit diff split (file row), commit stack rows, split gutter checkboxes, script editor caret. The `v-lock-prune-worktree` scenario passes again since the app stopped pruning missing worktrees on open (96cb74f). Unconfirmed: `Ctrl+End` did not move the caret in the Script editor in one run.
+`scripts/ui-smoke.sh` had drifted from the app before D184. Repaired: every scenario passes in both themes (agent run 2026-11-07; re-run by the manager: all 31 light scenarios and the first 6 dark ones, stopped by a container restart, no failure). Each scenario now opens only the sidebar section it needs (Worktrees alone for the worktree scenarios, Branches alone otherwise). Fixed coordinates: stage lines (gutter x), branch menu, worktree section crop, remove/lock/prune worktree rows and menus, commit diff split (file row), commit stack rows, split gutter checkboxes, script editor caret. The `v-lock-prune-worktree` scenario passes again since the app stopped pruning missing worktrees on open (96cb74f). Unconfirmed: `Ctrl+End` did not move the caret in the Script editor in one run. Known gap (CR4, 2026-11-11): the older scenarios were not repaired then and are stale since the sidebar redesign; only `n-code-health` and `o-compare-tabs` were run against the current layout.
 
 ## Slice 8: local review
 

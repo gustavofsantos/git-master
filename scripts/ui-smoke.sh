@@ -19,7 +19,7 @@ DISPLAY_NUM=":97"
 RUN_ROOT="$HOME/.cache/gm-smoke/smoke-run"
 SMOKE_OUT="${SMOKE_OUT:-$HOME/.cache/gm-smoke/smoke-out}"
 THEMES=(light dark)
-SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette x-convert-hooks r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor n-code-health)
+SCENARIOS=(a-stage-lines b-stage-file c-commit d-refresh e-command-log f-open-project g-switch-branch h-welcome i-stage-chunk j-discard-chunk k-file-menu l-branch-menu m-command-palette x-convert-hooks r-title-bar s-worktrees t-create-worktree u-remove-worktree v-lock-prune-worktree h-history h-history-unborn h-history-refresh h-commit-detail h-commit-diff h-commit-diff-split h-commit-stack g-stage-split a-stage-lines-in-split i-stage-chunk-in-split j-discard-chunk-in-split w-script-editor n-code-health o-compare-tabs)
 
 # --- Layout constants (screen coordinates; the window sits at +82+50) ---------
 # If the layout shifts, re-take a screenshot and update these. Check the rows
@@ -74,6 +74,15 @@ HEALTH_MAP_X=1013; HEALTH_MAP_Y=188         # "Map" with the details panel open 
 HEALTH_LIST_X=973; HEALTH_LIST_Y=188        # "List" with the details panel open (window 891,138)
 HEALTH_LIST_CROP="720x540+240+116"          # the hotspots list or map, window-relative, panel open
 HEALTH_DETAIL_CROP="320x660+960+116"        # the file details panel, window-relative, opens on a selection
+CMP_FILE_X=420; CMP_FILE_Y=397              # lib.rs in the Uncommitted file list
+CMP_TAB_Y=110; CMP_BRANCH_X=475; CMP_COMPARE_X=549   # the Changes tabs (Uncommitted at x 386)
+CMP_OPEN_X=1309; CMP_OPEN_Y=346             # Open File of src/lib.rs, third header of the Branch diff
+CMP_CHANGES_X=128; CMP_CHANGES_Y=144        # "Changes" row in the sidebar
+CMP_FROM_X=550; CMP_FROM_Y=147              # the From field of the Compare tab
+CMP_ANCESTOR_X=480; CMP_ANCESTOR_Y=221      # "Since common ancestor" in the Compare mode selector
+CMP_DIFF_CROP="620x720+660+44"              # the right pane of the Changes page, window-relative
+CMP_SIDEBAR_CROP="240x200+0+40"             # the top of the sidebar: Changes and Code rows, window-relative
+CMP_STATUS_CROP="1280x25+0+775"             # the status bar at the bottom, window-relative
 
 COMMIT_MSG="smoke: stage mod.rs and commit it"
 
@@ -194,6 +203,9 @@ launch_app() {
   # The window stays black until its first input event.
   xdotool mousemove "$WAKE_X" "$WAKE_Y" click 1
   sleep 1
+  # No window manager: the window is never active, so GPUI sees no focus and
+  # text fields show no suggestions. Give the app's window the X input focus.
+  xdotool windowfocus "$(xdotool search --onlyvisible --pid "$APP_PID" | head -1)" 2>/dev/null || true
 }
 
 stop_app() {
@@ -1172,6 +1184,10 @@ run_scenario() {
     v-lock-prune-worktree) scenario_v "$theme" ;;
     h-history) scenario_history "$theme" ;;
     w-script-editor) scenario_w_script_editor "$theme" ;;
+    o-compare-tabs)
+      make_compare_repo "$RUN_DIR/compare"
+      scenario_compare_tabs "$theme"
+      ;;
     *) fail "unknown scenario $name" ;;
   esac
   stop_app
@@ -1711,6 +1727,113 @@ $status"
   shoot "$RUN_DIR/health-down.png"
   differing="$(crop_changed "$selected" "$RUN_DIR/health-down.png" "$HEALTH_DETAIL_CROP")"
   [ "$differing" -gt 2000 ] || fail "Down did not select another file in the list ($differing pixels changed)"
+  stop_app
+}
+
+# --- o-compare-tabs. The Changes tabs (Uncommitted, Branch, Compare) and Open File ---
+# main: init (src/main.rs, src/lib.rs, docs/readme.md), tag v1.0. feature/billing
+# changes three files and adds one, then main gets one more line and tag v1.1.
+# feature/billing ends with an uncommitted line in src/lib.rs.
+make_compare_repo() {
+  local repo="$1"
+  rm -rf "$repo"
+  mkdir -p "$repo/src" "$repo/docs"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.name "gm smoke"
+  git -C "$repo" config user.email "smoke@example.invalid"
+  git -C "$repo" config commit.gpgsign false
+  printf 'fn main() {\n    run();\n}\n' > "$repo/src/main.rs"
+  seq -f 'line %g' 1 12 > "$repo/src/lib.rs"
+  printf '# readme\n' > "$repo/docs/readme.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "init"
+  git -C "$repo" tag v1.0
+
+  git -C "$repo" switch -q -c feature/billing
+  printf 'fn main() {\n    billing::run();\n    println!("ready");\n}\n' > "$repo/src/main.rs"
+  sed -i '6s/.*/line six changed/' "$repo/src/lib.rs"
+  printf 'pub fn charge() {}\npub fn refund() {}\n' > "$repo/src/billing.rs"
+  printf '# readme\n\nBilling flow.\n' > "$repo/docs/readme.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "billing: charge and refund"
+
+  git -C "$repo" switch -q main
+  printf 'line 13\n' >> "$repo/src/lib.rs"
+  git -C "$repo" commit -q -am "main: add line 13"
+  git -C "$repo" tag v1.1
+
+  git -C "$repo" switch -q feature/billing
+  printf 'uncommitted\n' >> "$repo/src/lib.rs"
+}
+
+scenario_compare_tabs() {
+  local repo="$RUN_DIR/compare" theme="$1" status differing
+  local uncommitted="$SMOKE_OUT/o-compare-uncommitted-$theme.png"
+  local branch="$SMOKE_OUT/o-compare-branch-$theme.png"
+  local code="$SMOKE_OUT/o-compare-open-file-$theme.png"
+  local empty="$SMOKE_OUT/o-compare-empty-$theme.png"
+  local direct="$SMOKE_OUT/o-compare-direct-$theme.png"
+  local nothing="$SMOKE_OUT/o-compare-nothing-$theme.png"
+  local ancestor="$SMOKE_OUT/o-compare-ancestor-$theme.png"
+  launch_app "$theme" "$repo"
+
+  # Uncommitted opens first; clicking lib.rs fills the diff pane.
+  shoot "$uncommitted"
+  xdotool mousemove "$CMP_FILE_X" "$CMP_FILE_Y" click 1; sleep 1.5
+  shoot "$RUN_DIR/o-file-clicked.png"
+  differing="$(crop_changed "$uncommitted" "$RUN_DIR/o-file-clicked.png" "$CMP_DIFF_CROP")"
+  [ "$differing" -gt 2000 ] || fail "clicking lib.rs did not fill the diff pane ($differing pixels changed)"
+
+  # Branch: the header names the branch, the diff is continuous with Open File buttons.
+  xdotool mousemove "$CMP_BRANCH_X" "$CMP_TAB_Y" click 1; sleep 2.5
+  shoot "$branch"
+  differing="$(crop_changed "$uncommitted" "$branch" "$CMP_DIFF_CROP")"
+  [ "$differing" -gt 20000 ] || fail "the Branch tab did not replace the Uncommitted diff ($differing pixels changed)"
+
+  # Open File on src/lib.rs (third header) opens the Code page.
+  xdotool mousemove "$CMP_OPEN_X" "$CMP_OPEN_Y" click 1; sleep 2.5
+  shoot "$code"
+  differing="$(crop_changed "$branch" "$code" "$CMP_DIFF_CROP")"
+  [ "$differing" -gt 20000 ] || fail "Open File did not open the Code page ($differing pixels changed)"
+  # The sidebar moves its highlight from Changes to Code.
+  differing="$(crop_changed "$branch" "$code" "$CMP_SIDEBAR_CROP")"
+  [ "$differing" -gt 5000 ] || fail "the sidebar did not move to Code ($differing pixels changed)"
+  status="$(git -C "$repo" status --porcelain)"
+  [ "$status" = " M src/lib.rs" ] || fail "Open File wrote to the working tree:
+$status"
+
+  # Back to Changes, then Compare with From empty.
+  xdotool mousemove "$CMP_CHANGES_X" "$CMP_CHANGES_Y" click 1; sleep 1.5
+  xdotool mousemove "$CMP_COMPARE_X" "$CMP_TAB_Y" click 1; sleep 1.5
+  shoot "$empty"
+
+  # From = v1.0, To = HEAD: four files.
+  xdotool mousemove "$CMP_FROM_X" "$CMP_FROM_Y" click 1; sleep 0.5
+  xdotool type --delay 80 "v1.0"; sleep 0.7
+  xdotool key Return; sleep 2.5
+  shoot "$direct"
+  differing="$(crop_changed "$empty" "$direct" "$CMP_DIFF_CROP")"
+  [ "$differing" -gt 20000 ] || fail "v1.0 against HEAD shows no diff ($differing pixels changed)"
+
+  # An unknown revision: the message goes under the fields, the status bar stays clear.
+  xdotool key ctrl+a; sleep 0.3
+  xdotool type --delay 80 "nope"; sleep 0.7
+  xdotool key Return; sleep 2.5
+  shoot "$nothing"
+  differing="$(crop_changed "$direct" "$nothing" "$CMP_DIFF_CROP")"
+  [ "$differing" -gt 2000 ] || fail "an unknown revision did not change the diff pane ($differing pixels changed)"
+  differing="$(crop_changed "$direct" "$nothing" "$CMP_STATUS_CROP")"
+  [ "$differing" -lt 200 ] || fail "an unknown revision changed the status bar ($differing pixels changed)"
+
+  # Since common ancestor of main and HEAD is the first commit: four files again.
+  xdotool key ctrl+a; sleep 0.3
+  xdotool type --delay 80 "main"; sleep 0.7
+  xdotool key Escape; sleep 0.3
+  xdotool key Return; sleep 1
+  xdotool mousemove "$CMP_ANCESTOR_X" "$CMP_ANCESTOR_Y" click 1; sleep 2.5
+  shoot "$ancestor"
+  differing="$(crop_changed "$nothing" "$ancestor" "$CMP_DIFF_CROP")"
+  [ "$differing" -gt 20000 ] || fail "Since common ancestor did not replace the error state ($differing pixels changed)"
   stop_app
 }
 
