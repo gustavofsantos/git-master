@@ -15,6 +15,7 @@ use crate::files::{
     HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob, ReadReport, SearchJob,
     SearchReport, TextJob, TextReport,
 };
+use crate::health_session::{HealthJob, HealthOutcome, HealthUpdate};
 use crate::history::HistoryReport;
 use crate::remote::RemoteReport;
 use crate::script::run::ScriptEvent;
@@ -41,6 +42,10 @@ enum Message {
     Text(TextReport),
     /// The blame of a provenance read was read.
     Provenance(ProvenanceReport),
+    /// The code health read with this id reports progress or a partial report (D225).
+    HealthUpdate(OperationId, HealthUpdate),
+    /// The code health read ended (D225).
+    Health(HealthOutcome),
     /// A script run asks the engine to carry out an effect. The run waits for the answer.
     ScriptEffect(EffectRequest),
     /// A Git command a script run waits for has ended (`WF4a`).
@@ -252,6 +257,14 @@ fn run(
                 let events = engine.provenance_report(report);
                 broadcast(events, &mut subscribers);
             }
+            Message::HealthUpdate(id, update) => {
+                let events = engine.health_update(id, update);
+                broadcast(events, &mut subscribers);
+            }
+            Message::Health(outcome) => {
+                let events = engine.health_report(outcome);
+                broadcast(events, &mut subscribers);
+            }
         }
     }
 }
@@ -339,6 +352,9 @@ fn spawn_file_jobs(engine: &mut Engine, reports: &Sender<Message>) {
     for job in engine.take_provenance_jobs() {
         spawn_provenance(job, reports.clone());
     }
+    for job in engine.take_health_jobs() {
+        spawn_health(job, reports.clone());
+    }
 }
 
 fn spawn_highlight(job: HighlightJob, reports: Sender<Message>) {
@@ -369,6 +385,20 @@ fn spawn_provenance(job: ProvenanceJob, reports: Sender<Message>) {
             let _ = reports.send_blocking(Message::Provenance(report));
         })
         .expect("spawn a blame thread");
+}
+
+fn spawn_health(job: HealthJob, reports: Sender<Message>) {
+    std::thread::Builder::new()
+        .name("gm-health".into())
+        .spawn(move || {
+            let id = job.id;
+            let updates = reports.clone();
+            let outcome = job.run(&mut |update| {
+                let _ = updates.send_blocking(Message::HealthUpdate(id, update));
+            });
+            let _ = reports.send_blocking(Message::Health(outcome));
+        })
+        .expect("spawn a code health thread");
 }
 
 fn spawn_index(job: IndexJob, reports: Sender<Message>) {

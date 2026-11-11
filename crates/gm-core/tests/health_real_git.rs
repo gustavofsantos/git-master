@@ -4,10 +4,15 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
+use gm_core::Engine;
+use gm_core::git::SubprocessGit;
 use gm_core::health::ingest::{ingest, read_commits, resolve, window};
 use gm_core::health::store::{HealthStore, db_path};
 use gm_core::health::{CommitRecord, FileChange};
-use gm_schema::HealthProgress;
+use gm_schema::{
+    Actor, Command as OpCommand, CommandKind, Event, HealthProgress, HealthReport, OperationId,
+    OperationState,
+};
 use sha2::{Digest, Sha256};
 
 const T0: i64 = 1_700_000_000;
@@ -297,4 +302,221 @@ fn read_commits_of_nothing_is_empty() {
     let dir = fixture();
     let cancel = AtomicBool::new(false);
     assert!(read_commits(dir.path(), &[], &cancel).unwrap().is_empty());
+}
+
+/// A repository where `a.rs` changes in five commits, `b.rs` once, and `gone.rs` is deleted at
+/// the end; two authors. Commit `k` is dated `T0 + k` days.
+fn health_repo(dir: &Path) {
+    Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    write(dir, "a.rs", b"v0\n");
+    write(dir, "b.rs", b"v0\n");
+    write(dir, "gone.rs", b"v0\n");
+    git_at(dir, ALICE, T0, &["add", "."]);
+    git_at(dir, ALICE, T0, &["commit", "-q", "-m", "root"]);
+    for k in 1_i64..=5 {
+        let author = if k % 2 == 0 { BOB } else { ALICE };
+        write(dir, "a.rs", format!("v{k}\n").as_bytes());
+        let message = format!("a {k}");
+        git_at(dir, author, T0 + k * DAY, &["commit", "-qam", &message]);
+    }
+    write(dir, "b.rs", b"v1\n");
+    git_at(dir, BOB, T0 + 6 * DAY, &["commit", "-qam", "b once"]);
+    git_at(dir, ALICE, T0 + 7 * DAY, &["rm", "-q", "gone.rs"]);
+    git_at(
+        dir,
+        ALICE,
+        T0 + 7 * DAY,
+        &["commit", "-q", "-m", "drop gone"],
+    );
+}
+
+/// An engine with `root` open, as the MCP session opens it.
+fn engine_on(root: &Path) -> Engine {
+    let git = SubprocessGit {
+        global_config: Some("/dev/null".into()),
+        ..SubprocessGit::default()
+    };
+    let mut engine = Engine::new(Box::new(git));
+    let events = engine.handle(
+        OperationId(1),
+        &OpCommand {
+            actor: Actor::Human,
+            kind: CommandKind::OpenRepo {
+                path: root.to_string_lossy().into_owned(),
+            },
+        },
+    );
+    assert_eq!(final_state(&events).0, OperationState::Done, "{events:?}");
+    engine
+}
+
+/// Runs a command as the MCP session does: the events of `handle`, then each health job run to
+/// its end and its outcome passed back.
+fn run(engine: &mut Engine, id: u64, kind: CommandKind) -> Vec<Event> {
+    let mut events = engine.handle(
+        OperationId(id),
+        &OpCommand {
+            actor: Actor::Human,
+            kind,
+        },
+    );
+    for job in engine.take_health_jobs() {
+        let outcome = job.run(&mut |_| {});
+        events.extend(engine.health_report(outcome));
+    }
+    events
+}
+
+fn load_health(rev: Option<&str>) -> CommandKind {
+    CommandKind::LoadHealth {
+        rev: rev.map(str::to_owned),
+    }
+}
+
+/// The state and detail of the last `OperationChanged` of `events`.
+fn final_state(events: &[Event]) -> (OperationState, Option<String>) {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::OperationChanged { state, detail, .. } => Some((*state, detail.clone())),
+            _ => None,
+        })
+        .expect("an operation changed state")
+}
+
+/// The last report `events` carry.
+fn loaded(events: &[Event]) -> &HealthReport {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::HealthLoaded { report, .. } => Some(report.as_ref()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no HealthLoaded in {events:?}"))
+}
+
+#[test]
+fn load_health_answers_with_the_report_of_head() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let mut engine = engine_on(dir.path());
+
+    let events = run(&mut engine, 2, load_health(None));
+
+    assert_eq!(final_state(&events).0, OperationState::Done);
+    let report = loaded(&events);
+    assert!(report.complete, "the index holds the whole window");
+    assert_eq!(report.rev, head(dir.path()));
+    assert_eq!(report.files[0].path, "a.rs");
+    assert_eq!(report.files[0].rank, 1);
+    assert!(
+        report.files.iter().all(|f| f.path != "gone.rs"),
+        "a deleted file is not reported"
+    );
+}
+
+#[test]
+fn a_second_load_of_the_same_commit_answers_from_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let mut engine = engine_on(dir.path());
+    let first = run(&mut engine, 2, load_health(None));
+
+    let events = engine.handle(
+        OperationId(3),
+        &OpCommand {
+            actor: Actor::Human,
+            kind: load_health(None),
+        },
+    );
+
+    assert!(
+        engine.take_health_jobs().is_empty(),
+        "no job for a cached report"
+    );
+    assert_eq!(final_state(&events).0, OperationState::Done);
+    assert_eq!(loaded(&events), loaded(&first));
+}
+
+#[test]
+fn a_new_commit_starts_a_job_at_a_new_rev() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let mut engine = engine_on(dir.path());
+    let before = loaded(&run(&mut engine, 2, load_health(None))).rev.clone();
+    write(dir.path(), "a.rs", b"again\n");
+    git_at(
+        dir.path(),
+        BOB,
+        T0 + 8 * DAY,
+        &["commit", "-qam", "a again"],
+    );
+
+    let events = run(&mut engine, 3, load_health(None));
+
+    let report = loaded(&events);
+    assert_eq!(report.rev, head(dir.path()));
+    assert_ne!(report.rev, before);
+    assert!(report.complete);
+}
+
+#[test]
+fn a_changed_setting_starts_a_job_with_another_config_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let mut engine = engine_on(dir.path());
+    let before = loaded(&run(&mut engine, 2, load_health(None)))
+        .config_hash
+        .clone();
+    git_at(
+        dir.path(),
+        ALICE,
+        T0,
+        &["config", "gitmaster.health.halfLife", "10"],
+    );
+
+    let events = engine.handle(
+        OperationId(3),
+        &OpCommand {
+            actor: Actor::Human,
+            kind: load_health(None),
+        },
+    );
+    assert_eq!(
+        engine.take_health_jobs().len(),
+        1,
+        "a changed setting needs a job"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, Event::HealthLoaded { .. }))
+    );
+
+    let report = loaded(&run(&mut engine, 4, load_health(None))).clone();
+    assert_ne!(report.config_hash, before);
+}
+
+#[test]
+fn a_bad_rev_fails_the_operation_with_a_message() {
+    let dir = tempfile::tempdir().unwrap();
+    health_repo(dir.path());
+    let mut engine = engine_on(dir.path());
+
+    let events = run(&mut engine, 2, load_health(Some("no-such-rev")));
+
+    let (state, detail) = final_state(&events);
+    assert_eq!(state, OperationState::Failed);
+    assert!(detail.is_some_and(|m| m.contains("no-such-rev")));
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, Event::HealthLoaded { .. }))
+    );
 }

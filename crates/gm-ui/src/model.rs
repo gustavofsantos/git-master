@@ -1526,6 +1526,9 @@ impl Model {
             | Event::WorkflowMessageSuggested { .. }
             // A transform's answer is the composer's or the dialog's to place (`WF3d`).
             | Event::TransformFinished { .. }
+            // The code health view comes with its own slice; until then its answers are accepted, not shown.
+            | Event::HealthProgress { .. }
+            | Event::HealthLoaded { .. }
             // The view opens the conversion's dialog from the event (`WF3e`).
             | Event::HooksConverted { .. }
             // The wait is kept by `gate_wait` above; each surface reads it.
@@ -1984,6 +1987,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ThreadSearchResults { id, .. }
         | Event::ThreadRead { id, .. }
         | Event::ThreadProvenance { id, .. }
+        | Event::HealthProgress { id, .. }
+        | Event::HealthLoaded { id, .. }
         | Event::ThreadEditRead { id, .. }
         | Event::ThreadMarkdown { id, .. }
         | Event::ThreadExported { id, .. }

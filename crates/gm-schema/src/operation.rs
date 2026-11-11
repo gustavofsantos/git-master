@@ -7,6 +7,7 @@ use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
+use crate::health::{HealthProgress, HealthReport};
 use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
@@ -850,6 +851,12 @@ pub enum CommandKind {
         from_line: u32,
         to_line: u32,
     },
+    /// Computes the code health (D225) of `rev`, default HEAD: the indicators of every file the
+    /// window changed. The index fills first; `HealthProgress` reports it, `HealthLoaded` answers
+    /// with the report. A read (D08), never in the command log (D28).
+    LoadHealth {
+        rev: Option<String>,
+    },
     /// Reads edit `id` with its state in the working tree and at `HEAD`. Answers
     /// `ThreadEditRead`. A read (D08).
     ReadThreadEdit {
@@ -1189,7 +1196,7 @@ impl OperationState {
 }
 
 /// What front-ends subscribe to.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     OperationChanged {
@@ -1674,6 +1681,17 @@ pub enum Event {
     ThreadProvenance {
         id: OperationId,
         provenance: ProvenanceResult,
+    },
+    /// The index of `LoadHealth` filled up to `progress`; the operation is still running.
+    HealthProgress {
+        id: OperationId,
+        progress: HealthProgress,
+    },
+    /// Answers `LoadHealth`, or, while the index still fills, a partial report (`complete` is
+    /// false) before the final one. Boxed: a report holds every file of the window.
+    HealthLoaded {
+        id: OperationId,
+        report: Box<HealthReport>,
     },
     /// Answers `ReadThreadEdit`: the edit and where its file is now.
     ThreadEditRead {

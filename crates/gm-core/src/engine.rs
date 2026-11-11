@@ -8,11 +8,12 @@ use serde_json::{Map, Value, json};
 use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
-    ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, History, MERGED_LIST_CHANGED,
-    MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE, RestackBlock,
-    RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus,
-    STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, ScorecardCommentInput, ScorecardStatus,
-    ScorecardSummary, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
+    ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, HealthReport, History,
+    MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
+    RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment,
+    ReviewStatus, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, ScorecardCommentInput,
+    ScorecardStatus, ScorecardSummary, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
+    WorktreeInspection,
 };
 use gm_schema::{resolve_kind, resolve_severity};
 
@@ -29,6 +30,9 @@ use crate::files::{
     ReadReport, SearchJob, SearchReport, TextJob, TextReport,
 };
 use crate::grep::GrepRequest;
+use crate::health::store::db_path;
+use crate::health::{config as health_config, ingest as health_ingest};
+use crate::health_session::{HealthJob, HealthOutcome, HealthUpdate};
 use crate::history::{Canceller, HistoryJob, HistoryOutcome, HistoryReport, HistoryStream};
 use crate::move_exec;
 use crate::move_preview;
@@ -137,6 +141,13 @@ pub struct Engine {
     provenance: Option<ActiveDetail>,
     /// Provenance reads accepted since the last call; see `take_provenance_jobs`.
     provenance_jobs: Vec<ProvenanceJob>,
+    /// The code health read in flight (D225), if any.
+    health: Option<ActiveDetail>,
+    /// Code health reads accepted since the last call; see `take_health_jobs`.
+    health_jobs: Vec<HealthJob>,
+    /// The last complete code health report. It answers a read of the same commit and
+    /// configuration without a job.
+    health_cache: Option<Arc<HealthReport>>,
     /// The remote operation in flight, if any. Only one runs at a time.
     remote: Option<ActiveRemote>,
     /// Remote operations accepted since the last call; see `take_remote_jobs`.
@@ -357,6 +368,9 @@ impl Engine {
             text_jobs: Vec::new(),
             provenance: None,
             provenance_jobs: Vec::new(),
+            health: None,
+            health_jobs: Vec::new(),
+            health_cache: None,
             remote: None,
             remote_jobs: Vec::new(),
             script_waiting: BTreeMap::new(),
@@ -487,6 +501,12 @@ impl Engine {
     /// a thread of its own and passes its report back to `provenance_report`.
     pub fn take_provenance_jobs(&mut self) -> Vec<ProvenanceJob> {
         std::mem::take(&mut self.provenance_jobs)
+    }
+
+    /// The code health reads accepted since the last call (D225). The caller runs each job on a
+    /// thread of its own and passes its outcome back to `health_report`.
+    pub fn take_health_jobs(&mut self) -> Vec<HealthJob> {
+        std::mem::take(&mut self.health_jobs)
     }
 
     /// The file reads accepted since the last call. The caller runs each on a
@@ -2179,6 +2199,51 @@ impl Engine {
         }
     }
 
+    /// Turns one update of the code health read in flight into events. An update for a read that
+    /// was superseded is dropped; a partial report keeps the read running.
+    pub fn health_update(&mut self, id: OperationId, update: HealthUpdate) -> Vec<Event> {
+        match &self.health {
+            Some(active) if active.op.id == id => match update {
+                HealthUpdate::Progress(progress) => vec![Event::HealthProgress { id, progress }],
+                HealthUpdate::Partial(report) => vec![Event::HealthLoaded {
+                    id,
+                    report: Box::new(report),
+                }],
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// Turns the outcome of the code health read into events (D225): the report is kept for the
+    /// next read of the same commit and configuration. An outcome for a read that was superseded,
+    /// or for a repository that was left, is dropped.
+    pub fn health_report(&mut self, outcome: HealthOutcome) -> Vec<Event> {
+        match self.health.take() {
+            Some(active) if active.op.id == outcome.id => match outcome.result {
+                Ok(report) => {
+                    let report = Arc::new(report);
+                    self.health_cache = Some(Arc::clone(&report));
+                    vec![
+                        Self::operation_changed(&active.op, OperationState::Done, None),
+                        Event::HealthLoaded {
+                            id: outcome.id,
+                            report: Box::new(report.as_ref().clone()),
+                        },
+                    ]
+                }
+                Err(message) => vec![Self::operation_changed(
+                    &active.op,
+                    OperationState::Failed,
+                    Some(message),
+                )],
+            },
+            other => {
+                self.health = other;
+                Vec::new()
+            }
+        }
+    }
+
     /// Turns the answer of a file read into events. A report for a read that
     /// was superseded, or for a repository that was left, is dropped.
     pub fn read_report(&mut self, report: ReadReport) -> Vec<Event> {
@@ -2383,6 +2448,10 @@ impl Engine {
     fn run_command(&mut self, op: &mut Op, events: &mut Vec<Event>) {
         let id = op.id;
         let command = op.command;
+        if let CommandKind::LoadHealth { rev } = &command.kind {
+            self.run_health(op, rev.as_deref(), events);
+            return;
+        }
         if let Some(started) = self.start_read(id, command) {
             match started {
                 Ok(superseded) => {
@@ -2913,6 +2982,82 @@ impl Engine {
         });
         self.text_jobs.push(TextJob { id, read, stop });
         Ok(superseded)
+    }
+
+    /// Starts the code health read of `rev` (D225). A complete report of the same commit and
+    /// configuration answers at once, from the cache. Otherwise a job is queued and any read in
+    /// flight is superseded. Returns the events of the superseded read, and the answer when the
+    /// cache holds one.
+    fn start_health(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        rev: Option<&str>,
+    ) -> Result<(Vec<Event>, Option<Box<HealthReport>>), String> {
+        let root = self.open_root()?;
+        let (sha, time) = health_ingest::resolve(&root, rev.unwrap_or("HEAD"))?;
+        let config = health_config::read(&root)?;
+        let config_hash = health_config::config_hash(&config);
+        if let Some(cached) = &self.health_cache
+            && cached.rev == sha
+            && cached.config_hash == config_hash
+            && cached.complete
+        {
+            let report = Box::new(cached.as_ref().clone());
+            return Ok((self.drop_health(), Some(report)));
+        }
+        let common = self.git.common_dir(&root).map_err(|e| e.0)?;
+        let superseded = self.drop_health();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.health = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.health_jobs.push(HealthJob {
+            id,
+            root,
+            db: db_path(&common),
+            sha,
+            time,
+            config,
+            config_hash,
+            stop,
+        });
+        Ok((superseded, None))
+    }
+
+    /// Ends the code health read: it is stopped, and a read in flight is cancelled.
+    fn drop_health(&mut self) -> Vec<Event> {
+        let Some(active) = self.health.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![Self::operation_changed(
+            &active.op,
+            OperationState::Cancelled,
+            None,
+        )]
+    }
+
+    /// Runs `LoadHealth` (D225). It answers at once from the cache, or starts the job that
+    /// answers later.
+    fn run_health(&mut self, op: &mut Op, rev: Option<&str>, events: &mut Vec<Event>) {
+        match self.start_health(op.id, &op.command.actor, &op.command.kind, rev) {
+            Ok((superseded, answer)) => {
+                events.extend(superseded);
+                self.advance(op, OperationState::Executing, events);
+                if let Some(report) = answer {
+                    self.advance(op, OperationState::Done, events);
+                    events.push(Event::HealthLoaded { id: op.id, report });
+                }
+            }
+            Err(message) => self.advance_with(op, OperationState::Failed, Some(message), events),
+        }
     }
 
     /// Starts the blame of a provenance read (D144). A read in flight is superseded: it is
@@ -3897,6 +4042,8 @@ impl Engine {
         events.extend(self.drop_stack());
         events.extend(self.drop_files());
         events.extend(self.drop_provenance());
+        events.extend(self.drop_health());
+        self.health_cache = None;
         // A resolution belongs to the repository it was started in. Its worktree is left for
         // `ResumeRestack` to remove when that repository opens again (D154).
         self.restack_resolution = None;
@@ -5732,6 +5879,7 @@ impl Engine {
                 | CommandKind::SearchThreads { .. }
                 | CommandKind::ReadThread { .. }
                 | CommandKind::ReadProvenance { .. }
+                | CommandKind::LoadHealth { .. }
                 | CommandKind::ReadThreadEdit { .. }
                 | CommandKind::ReadThreadMarkdown { .. }
                 | CommandKind::ExportThread { .. }

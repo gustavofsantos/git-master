@@ -79,6 +79,11 @@ impl Session {
         for job in self.engine.take_provenance_jobs() {
             events.extend(self.engine.provenance_report(job.run()));
         }
+        // A code health read runs its index and indicators as a job too (D225).
+        for job in self.engine.take_health_jobs() {
+            let outcome = job.run(&mut |_| {});
+            events.extend(self.engine.health_report(outcome));
+        }
         for event in &events {
             if let Event::OperationChanged {
                 id: got,
