@@ -55,6 +55,7 @@ use crate::resize;
 use crate::restack_dialog::{RestackDialog, Transition};
 use crate::review_composer::{InlineReply, ReviewDialog};
 use crate::shell_code::CodeView;
+use crate::shell_compare;
 use crate::shell_health::{self, HealthView};
 use crate::shell_history::CommitTexts;
 use crate::shell_labels::{self, LabelsView};
@@ -174,6 +175,9 @@ pub struct StatusView {
     pub(crate) sidebar_filter: BranchFilter,
     /// The input the sidebar's query is typed into.
     pub(crate) sidebar_input: Entity<TextArea>,
+    /// The **From** and **To** revisions of the Compare tab, one line each (D231 (3)).
+    pub(crate) compare_from: Entity<TextArea>,
+    pub(crate) compare_to: Entity<TextArea>,
     /// The preferences as last read or saved. A save writes all of them, so a
     /// save for one preference keeps the others.
     pub(crate) settings: AppSettings,
@@ -369,6 +373,10 @@ impl StatusView {
             cx.new(|cx| TextArea::new("Why, in one line (optional)", cx).with_lines(1, 1));
         let labels_query = cx.new(|cx| TextArea::new("Filter the labels", cx).with_lines(1, 1));
         let sidebar_input = cx.new(|cx| TextArea::new("Find a branch", cx).with_lines(1, 1));
+        let compare_from =
+            cx.new(|cx| TextArea::new("Older revision, such as v1.4.0", cx).with_lines(1, 1));
+        let compare_to =
+            cx.new(|cx| TextArea::new("Newer revision, such as HEAD", cx).with_lines(1, 1));
         let composer = cx.new(Composer::new);
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
@@ -484,6 +492,12 @@ impl StatusView {
         subscriptions.extend(shell_memories::subscriptions(&memories_query, cx));
         subscriptions.extend(shell_labels::subscriptions(&labels_query, cx));
         subscriptions.extend(shell_sidebar::subscriptions(&sidebar_input, window, cx));
+        subscriptions.extend(shell_compare::subscriptions(
+            &compare_from,
+            &compare_to,
+            window,
+            cx,
+        ));
         let mut model = Model::default();
         model.request_open(open);
         // The workspaces under the root are listed when the window starts (D183 (2)).
@@ -513,6 +527,8 @@ impl StatusView {
             sidebar_folded: Folded::default(),
             sidebar_filter: BranchFilter::default(),
             sidebar_input,
+            compare_from,
+            compare_to,
             settings,
             screen: Screen::default(),
             project_menu,
@@ -1251,12 +1267,21 @@ impl StatusView {
     /// Shows the Changes page on `tab` (D231 (1)) and reads what the tab shows. A change of tab
     /// drops the stacked diff of the old one and closes the Base picker.
     pub(crate) fn show_changes_tab(&mut self, tab: ChangesTab, cx: &mut Context<Self>) {
-        if tab != self.model.compare.tab {
+        let previous = self.model.compare.tab;
+        if tab != previous {
             self.model.compare.forget_stack();
             self.model.compare_stack.close();
         }
         self.model.compare.set_tab(tab);
         self.screen = Screen::WorkingCopy;
+        if tab == ChangesTab::Compare {
+            self.prepare_compare_fields(cx);
+            if previous != ChangesTab::Compare {
+                // The tags are listed once per opening of the tab, for the suggestions.
+                let id = self.engine.dispatch(Actor::Human, CommandKind::ListTags);
+                self.model.request_tags(id);
+            }
+        }
         self.read_changes_tab(cx);
         cx.notify();
     }

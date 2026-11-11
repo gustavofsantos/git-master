@@ -46,8 +46,11 @@ impl ChangesTab {
 pub enum RangeView {
     #[default]
     Idle,
+    /// A read in flight. The range on screen before it stays until the answer comes, so
+    /// a refresh does not blank the list; a first read has no `previous` and waits.
     Loading {
         id: OperationId,
+        previous: Option<Box<RevisionRange>>,
     },
     /// Boxed: a range is much larger than the other states.
     Shown(Box<RevisionRange>),
@@ -55,15 +58,34 @@ pub enum RangeView {
 }
 
 impl RangeView {
-    /// The read `id` was sent. Whatever was shown before is replaced by the wait.
+    /// The read `id` was sent. The range on screen stays until the answer; a read
+    /// already in flight passes on the range it kept.
     pub fn request(&mut self, id: OperationId) {
-        *self = RangeView::Loading { id };
+        let previous = match std::mem::take(self) {
+            RangeView::Shown(range) => Some(range),
+            RangeView::Loading { previous, .. } => previous,
+            RangeView::Idle | RangeView::Failed(_) => None,
+        };
+        *self = RangeView::Loading { id, previous };
+    }
+
+    /// The engine superseded the read in flight, so its answer never comes: the view
+    /// keeps the range it kept, or waits for nothing.
+    pub fn abandon(&mut self) {
+        *self = match std::mem::take(self) {
+            RangeView::Loading {
+                previous: Some(range),
+                ..
+            } => RangeView::Shown(range),
+            RangeView::Loading { previous: None, .. } => RangeView::Idle,
+            other => other,
+        };
     }
 
     /// Whether the request in flight is `id`.
     #[must_use]
     pub fn awaits(&self, id: OperationId) -> bool {
-        matches!(self, RangeView::Loading { id: wanted } if *wanted == id)
+        matches!(self, RangeView::Loading { id: wanted, .. } if *wanted == id)
     }
 
     /// Takes the answer to `id` when it is the request in flight; `false` drops a late one.
@@ -86,22 +108,100 @@ impl RangeView {
         }
     }
 
-    pub fn reset(&mut self) {
-        *self = RangeView::Idle;
-    }
-
-    #[must_use]
-    pub fn is_loading(&self) -> bool {
-        matches!(self, RangeView::Loading { .. })
-    }
-
+    /// The range on screen: the one shown, or the one kept while a read is in flight.
     #[must_use]
     pub fn range(&self) -> Option<&RevisionRange> {
         match self {
-            RangeView::Shown(range) => Some(range.as_ref()),
+            RangeView::Shown(range)
+            | RangeView::Loading {
+                previous: Some(range),
+                ..
+            } => Some(range.as_ref()),
             _ => None,
         }
     }
+}
+
+/// One of the two fields of the Compare tab (D231 (3)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    From,
+    To,
+}
+
+/// Which Compare field has focus, and whether its suggestion list is open, with the row
+/// the keys have lit. Focus or typing opens the list; Esc and a pick close it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FieldFocus {
+    field: Option<Field>,
+    open: bool,
+    highlight: usize,
+}
+
+impl FieldFocus {
+    /// The field gained focus: its list opens with the first row lit.
+    pub fn focus(&mut self, field: Field) {
+        *self = Self {
+            field: Some(field),
+            open: true,
+            highlight: 0,
+        };
+    }
+
+    /// The field lost focus. A blur of the other field is nothing to this state.
+    pub fn blur(&mut self, field: Field) {
+        if self.field == Some(field) {
+            *self = Self::default();
+        }
+    }
+
+    /// The text of `field` changed by typing: if it has focus, its list opens again.
+    pub fn typed(&mut self, field: Field) {
+        if self.field == Some(field) {
+            self.open = true;
+            self.highlight = 0;
+        }
+    }
+
+    /// Esc, or a pick: the list closes and the field keeps its focus.
+    pub fn close(&mut self) {
+        self.open = false;
+        self.highlight = 0;
+    }
+
+    /// The field whose list is on screen, if any.
+    #[must_use]
+    pub fn listed(&self) -> Option<Field> {
+        if self.open { self.field } else { None }
+    }
+
+    #[must_use]
+    pub fn highlight(&self) -> usize {
+        self.highlight
+    }
+
+    /// Up or Down over `count` rows.
+    pub fn move_highlight(&mut self, down: bool, count: usize) {
+        self.highlight = step_highlight(self.highlight, count, down);
+    }
+}
+
+/// The row an Up or Down press lights, kept within the `count` rows of the list.
+#[must_use]
+pub fn step_highlight(highlight: usize, count: usize, down: bool) -> usize {
+    if count == 0 {
+        0
+    } else if down {
+        (highlight + 1).min(count - 1)
+    } else {
+        highlight.saturating_sub(1)
+    }
+}
+
+/// The text a pick takes: the row at `index`, if the list has one.
+#[must_use]
+pub fn taken(rows: &[Suggestion], index: usize) -> Option<String> {
+    rows.get(index).map(|row| row.text.clone())
 }
 
 /// The stacked diff the view must read next: the files of a range that was just
@@ -131,6 +231,8 @@ pub struct CompareState {
     pub to: String,
     pub mode: RangeMode,
     pub compare_view: RangeView,
+    /// The Compare field with focus and its suggestion list.
+    pub focus: FieldFocus,
     /// The tag names for the pickers' suggestions, newest first.
     pub tags: Vec<String>,
     /// The `ListTags` in flight, if any.
@@ -161,23 +263,32 @@ impl CompareState {
         self.base_open = !self.base_open;
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn set_from(&mut self, from: String) {
         self.from = from;
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn set_to(&mut self, to: String) {
         self.to = to;
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
+    pub fn set_field(&mut self, field: Field, text: String) {
+        match field {
+            Field::From => self.set_from(text),
+            Field::To => self.set_to(text),
+        }
+    }
+
+    /// A field's text typed by the user: the state takes it and the field's list follows.
+    pub fn type_into(&mut self, field: Field, text: String) {
+        self.set_field(field, text);
+        self.focus.typed(field);
+    }
+
     pub fn set_mode(&mut self, mode: RangeMode) {
         self.mode = mode;
     }
 
     /// Exchanges **From** and **To**, to read the same change backwards.
-    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn swap(&mut self) {
         std::mem::swap(&mut self.from, &mut self.to);
     }
@@ -190,7 +301,6 @@ impl CompareState {
     /// Whether the Compare fields are both empty, so the view should fill them
     /// with the default branch and HEAD.
     #[must_use]
-    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn needs_defaults(&self) -> bool {
         self.from.trim().is_empty() && self.to.trim().is_empty()
     }
@@ -220,21 +330,17 @@ impl CompareState {
         }
     }
 
-    /// The Branch tab's read `id` was sent. A range read supersedes the other one,
-    /// so an answer the Compare tab still awaits never comes and it becomes idle.
+    /// The Branch tab's read `id` was sent. A range read supersedes the other one, so
+    /// the Compare tab's answer in flight never comes: it keeps the range it had.
     pub fn request_branch(&mut self, id: OperationId) {
         self.branch_view.request(id);
-        if self.compare_view.is_loading() {
-            self.compare_view.reset();
-        }
+        self.compare_view.abandon();
     }
 
     /// The Compare tab's read `id` was sent; the same supersession as `request_branch`.
     pub fn request_compare(&mut self, id: OperationId) {
         self.compare_view.request(id);
-        if self.branch_view.is_loading() {
-            self.branch_view.reset();
-        }
+        self.branch_view.abandon();
     }
 
     /// The `ListTags` `id` was sent.
@@ -379,9 +485,13 @@ pub enum Summary {
 pub fn summary(tab: ChangesTab, view: &RangeView) -> Summary {
     match view {
         RangeView::Idle => Summary::Idle,
-        RangeView::Loading { .. } => Summary::Reading,
+        RangeView::Loading { previous: None, .. } => Summary::Reading,
         RangeView::Failed(message) => Summary::Failed(message.clone()),
-        RangeView::Shown(range) => Summary::Shown {
+        RangeView::Shown(range)
+        | RangeView::Loading {
+            previous: Some(range),
+            ..
+        } => Summary::Shown {
             header: header(range, tab),
             totals: totals(range),
         },
@@ -442,20 +552,33 @@ pub fn base_rows(
     .collect()
 }
 
+/// The rows a field's suggestion list shows at most (D231 (3)).
+pub const SUGGESTION_ROWS: usize = 8;
+
 /// What a picker suggests for one typed revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
 pub struct Suggestion {
     pub text: String,
     pub kind: SuggestionKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
 pub enum SuggestionKind {
     Branch,
     RemoteBranch,
     Tag,
+}
+
+impl SuggestionKind {
+    /// The word the list shows beside a suggestion.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            SuggestionKind::Branch => "branch",
+            SuggestionKind::RemoteBranch => "remote",
+            SuggestionKind::Tag => "tag",
+        }
+    }
 }
 
 /// The suggestions for `query`, at most `limit`. Local branches come first, then
@@ -463,7 +586,6 @@ pub enum SuggestionKind {
 /// unfiltered; otherwise they are ranked by the palette's fuzzy match. A text is
 /// listed once, the first time it appears.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
 pub fn suggestions(
     query: &str,
     branches: &[BranchEntry],
@@ -612,7 +734,7 @@ mod tests {
         let mut view = RangeView::default();
         view.request(id(4));
         assert!(!view.received(id(3), range(&[], 0)));
-        assert!(view.is_loading());
+        assert!(matches!(view, RangeView::Loading { .. }));
         assert!(view.received(id(4), range(&["a.txt"], 0)));
         assert_eq!(view.range().map(|r| r.files.len()), Some(1));
         // A second answer to the same id finds nothing in flight.
@@ -626,7 +748,7 @@ mod tests {
         assert!(!view.failed(id(2), "late".into()));
         assert!(view.failed(id(4), "unknown revision v9".into()));
         assert_eq!(view, RangeView::Failed("unknown revision v9".into()));
-        view.reset();
+        view = RangeView::default();
         assert_eq!(view, RangeView::Idle);
     }
 
@@ -728,7 +850,7 @@ mod tests {
         assert_eq!(state.branch_view, RangeView::Idle);
         assert!(!state.range_received(id(5), range(&["a.txt"], 0)));
         assert_eq!(state.take_stack_request(), None);
-        assert!(state.compare_view.is_loading());
+        assert!(matches!(state.compare_view, RangeView::Loading { .. }));
     }
 
     #[test]
@@ -929,7 +1051,11 @@ mod tests {
         assert!(state.tab_view().is_none());
         state.set_tab(ChangesTab::Branch);
         state.request_branch(id(1));
-        assert!(state.tab_view().is_some_and(RangeView::is_loading));
+        assert!(
+            state
+                .tab_view()
+                .is_some_and(|view| matches!(view, RangeView::Loading { .. }))
+        );
         state.set_tab(ChangesTab::Compare);
         assert_eq!(state.tab_view(), Some(&RangeView::Idle));
     }
@@ -939,7 +1065,13 @@ mod tests {
         let shown = range(&["a", "b"], 0);
         assert_eq!(summary(ChangesTab::Branch, &RangeView::Idle), Summary::Idle);
         assert_eq!(
-            summary(ChangesTab::Branch, &RangeView::Loading { id: id(1) }),
+            summary(
+                ChangesTab::Branch,
+                &RangeView::Loading {
+                    id: id(1),
+                    previous: None,
+                }
+            ),
             Summary::Reading
         );
         assert_eq!(
@@ -991,6 +1123,89 @@ mod tests {
         assert_eq!(stack_parent(Some(&snapshot), Some("orphan")), None);
         assert_eq!(stack_parent(Some(&snapshot), None), None);
         assert_eq!(stack_parent(None, Some("feature")), None);
+    }
+
+    #[test]
+    fn a_field_lists_its_suggestions_while_it_has_focus() {
+        let mut focus = FieldFocus::default();
+        assert_eq!(focus.listed(), None);
+        focus.focus(Field::From);
+        assert_eq!(focus.listed(), Some(Field::From));
+        // Typing in the field that has focus opens its list again after an Esc.
+        focus.close();
+        assert_eq!(focus.listed(), None);
+        focus.typed(Field::From);
+        assert_eq!(focus.listed(), Some(Field::From));
+        // The other field's text does not open this one's list.
+        focus.close();
+        focus.typed(Field::To);
+        assert_eq!(focus.listed(), None);
+    }
+
+    #[test]
+    fn a_blur_closes_the_list_of_its_own_field_only() {
+        let mut focus = FieldFocus::default();
+        focus.focus(Field::To);
+        focus.blur(Field::From);
+        assert_eq!(focus.listed(), Some(Field::To));
+        focus.blur(Field::To);
+        assert_eq!(focus, FieldFocus::default());
+    }
+
+    #[test]
+    fn the_highlight_moves_within_the_rows_and_stops_at_the_ends() {
+        assert_eq!(step_highlight(0, 3, true), 1);
+        assert_eq!(step_highlight(2, 3, true), 2);
+        assert_eq!(step_highlight(1, 3, false), 0);
+        assert_eq!(step_highlight(0, 3, false), 0);
+        assert_eq!(step_highlight(5, 0, true), 0);
+        let mut focus = FieldFocus::default();
+        focus.focus(Field::From);
+        focus.move_highlight(true, 2);
+        focus.move_highlight(true, 2);
+        assert_eq!(focus.highlight(), 1);
+    }
+
+    #[test]
+    fn typing_lights_the_first_row_again() {
+        let mut focus = FieldFocus::default();
+        focus.focus(Field::From);
+        focus.move_highlight(true, 4);
+        focus.typed(Field::From);
+        assert_eq!(focus.highlight(), 0);
+    }
+
+    #[test]
+    fn a_pick_takes_the_row_text_and_nothing_past_the_list() {
+        let rows = suggestions(
+            "",
+            &[branch("main", false)],
+            &["v1".to_owned()],
+            SUGGESTION_ROWS,
+        );
+        assert_eq!(taken(&rows, 0).as_deref(), Some("main"));
+        assert_eq!(taken(&rows, 1).as_deref(), Some("v1"));
+        assert_eq!(taken(&rows, 2), None);
+        assert_eq!(taken(&[], 0), None);
+    }
+
+    #[test]
+    fn a_typed_field_sets_its_text_in_the_state() {
+        let mut state = CompareState::default();
+        state.set_tab(ChangesTab::Compare);
+        state.focus.focus(Field::To);
+        state.type_into(Field::To, "main".into());
+        assert_eq!(state.to, "main");
+        assert_eq!(state.focus.listed(), Some(Field::To));
+        state.set_field(Field::From, "v1".into());
+        assert_eq!(state.from, "v1");
+    }
+
+    #[test]
+    fn the_suggestion_kinds_have_their_words() {
+        assert_eq!(SuggestionKind::Branch.label(), "branch");
+        assert_eq!(SuggestionKind::RemoteBranch.label(), "remote");
+        assert_eq!(SuggestionKind::Tag.label(), "tag");
     }
 
     #[test]
@@ -1048,6 +1263,86 @@ mod tests {
         state.request_branch(id(2));
         assert!(state.range_received(id(2), range(&["a.txt"], 0)));
         assert!(state.take_stack_request().is_some());
+    }
+
+    #[test]
+    fn a_re_read_keeps_the_range_on_screen_until_the_answer() {
+        let mut view = RangeView::default();
+        view.request(id(1));
+        assert!(view.received(id(1), range(&["a.txt"], 0)));
+        view.request(id(2));
+        // Still shown, and no "Reading…" in place of it.
+        assert_eq!(view.range().map(|r| r.files.len()), Some(1));
+        assert_eq!(
+            summary(ChangesTab::Compare, &view),
+            Summary::Shown {
+                header: "main (a1b2c3d) → feature/billing (e4f5a6b)".into(),
+                totals: "1 file · +340 −96".into(),
+            }
+        );
+        assert!(view.received(id(2), range(&["a.txt", "b.txt"], 0)));
+        assert_eq!(view.range().map(|r| r.files.len()), Some(2));
+    }
+
+    #[test]
+    fn a_read_still_waiting_keeps_the_range_it_was_given() {
+        let mut view = RangeView::default();
+        view.request(id(1));
+        assert!(view.received(id(1), range(&["a.txt"], 0)));
+        view.request(id(2));
+        view.request(id(3));
+        assert!(!view.received(id(2), range(&[], 0)));
+        assert_eq!(view.range().map(|r| r.files.len()), Some(1));
+        assert!(view.awaits(id(3)));
+    }
+
+    #[test]
+    fn the_first_read_shows_reading_and_no_range() {
+        let mut view = RangeView::default();
+        view.request(id(1));
+        assert_eq!(view.range(), None);
+        assert_eq!(summary(ChangesTab::Compare, &view), Summary::Reading);
+    }
+
+    #[test]
+    fn a_failure_replaces_the_range_on_screen() {
+        let mut view = RangeView::default();
+        view.request(id(1));
+        assert!(view.received(id(1), range(&["a.txt"], 0)));
+        view.request(id(2));
+        assert!(view.failed(id(2), "unknown revision v9".into()));
+        assert_eq!(view.range(), None);
+        assert_eq!(
+            summary(ChangesTab::Compare, &view),
+            Summary::Failed("unknown revision v9".into())
+        );
+    }
+
+    #[test]
+    fn an_answer_replaces_the_range_and_a_late_one_is_dropped() {
+        let mut view = RangeView::default();
+        view.request(id(1));
+        assert!(view.received(id(1), range(&["a.txt"], 0)));
+        view.request(id(2));
+        view.request(id(3));
+        assert!(!view.received(id(2), range(&["late.txt"], 0)));
+        assert!(view.received(id(3), range(&["new.txt"], 0)));
+        assert_eq!(
+            view.range().map(|r| r.files[0].path.clone()),
+            Some("new.txt".into())
+        );
+    }
+
+    #[test]
+    fn a_superseded_read_of_the_other_tab_keeps_its_range() {
+        let mut state = CompareState::default();
+        state.request_compare(id(1));
+        assert!(state.range_received(id(1), range(&["a.txt"], 0)));
+        state.request_compare(id(2));
+        state.request_branch(id(3));
+        // The Compare read in flight is superseded: its last range stays on screen.
+        assert_eq!(state.compare_view.range().map(|r| r.files.len()), Some(1));
+        assert!(!matches!(state.compare_view, RangeView::Loading { .. }));
     }
 
     #[test]

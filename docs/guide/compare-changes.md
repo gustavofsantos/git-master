@@ -1,11 +1,9 @@
 ---
 title: Compare changes
 description: The tabs of the Changes page that show the uncommitted changes, the changes of the branch against its base, and the changes between any two revisions.
-status: planned
+status: partial
 order: 15
 ---
-
-> **Planned.** The tabs, the revision pickers and the read-only diff described here are not available in the app yet. The Changes page shows the uncommitted changes only.
 
 The **Changes** page has three tabs at the top of its left column. Each tab answers one question about your code: what you have not committed, what your branch brings, and what separates two revisions.
 
@@ -39,6 +37,8 @@ The tab compares the tip of the branch with the **merge base** of the branch and
 
 ## Compare two revisions
 
+> **Planned.** A field that Git cannot resolve is not marked yet, and a failed read clears the list instead of keeping the last result: the message appears under the fields.
+
 The **Compare** tab shows the changes between two revisions you name. A revision is anything Git accepts: a branch, a remote branch such as `origin/main`, a tag, a full or short commit hash, `HEAD`, or an expression such as `HEAD~3` or `v1.2^`.
 
 1. Open the **Compare** tab, or run **Compare Revisions…** from the command palette.
@@ -62,6 +62,8 @@ Comparing a revision with itself shows **No changes between these revisions.**
 
 ## Changed files and diff
 
+> **Planned.** Shift+F10 does not open the file menu yet; right-click does.
+
 Both tabs show the changed files the way a commit's file list does, and the diff of every file in one continuous view, as in the [stacked diff of a commit](diff-and-staging.md#stacked-diff-of-a-commit):
 
 - Each file has its state letter (`M`, `A`, `D`, `R` for renamed), its path (a renamed file shows `old → new`) and its `+` and `−` counts.
@@ -73,6 +75,8 @@ The same two limits apply: a file with more than 5,000 lines shows `and N more l
 The diff is read-only. Select a file and open its menu (right-click, or `Shift+F10`) to **Copy File Path**.
 
 ## Staying current
+
+> **Planned.** The Reading indicator appears at once when nothing is on screen, not after about 300 ms, and a read that keeps a previous result shows no indicator.
 
 The tab reads again by itself when the repository changes: a commit, a fetch, a checkout or any other move of a reference. A revision typed as a name, such as `main`, follows the name, so the result is up to date. A revision typed as a hash never moves.
 

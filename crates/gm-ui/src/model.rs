@@ -621,7 +621,6 @@ impl Model {
     }
 
     /// The `ListTags` `id` was sent, for the pickers' suggestions (D231 (4b)).
-    #[cfg_attr(not(test), expect(dead_code, reason = "CR3b"))]
     pub fn request_tags(&mut self, id: OperationId) {
         self.compare.request_tags(id);
     }
@@ -4437,7 +4436,10 @@ mod compare_tests {
         });
         assert_eq!(
             model.compare.compare_view,
-            RangeView::Loading { id: OperationId(5) }
+            RangeView::Loading {
+                id: OperationId(5),
+                previous: None,
+            }
         );
         let _ = model.apply(Event::RevisionRangeLoaded {
             id: OperationId(5),
@@ -4500,7 +4502,10 @@ mod compare_tests {
             range: range(&["a.txt"]),
         });
         assert_eq!(model.compare.branch_view, RangeView::Idle);
-        assert!(model.compare.compare_view.is_loading());
+        assert!(matches!(
+            model.compare.compare_view,
+            RangeView::Loading { .. }
+        ));
         let _ = model.apply(Event::RevisionRangeLoaded {
             id: OperationId(6),
             range: range(&["b.txt"]),

@@ -840,8 +840,10 @@ Requested by the author on 2026-11-11: the Changes page gets tabs for the branch
 
 - **CR0, docs and decision** (done 2026-11-11): the page, D231, this entry.
 - **CR1, engine:** `GitPort::revision_range` and `GitPort::revision_stack`, the `Command`s and `Event`s of D231 (4), the engine's supersede handling, and real-git tests in `crates/gm-core/tests/compare_real_git.rs` (branch against its base with commits landed on the base since, two tags, a rename, a binary file, a root commit, an unknown revision, a revision that starts with `-`).
-- **CR2, UI model:** the pure state of the tabs, the two pickers and the suggestions, in `gm-ui` and tested without a window; the palette actions in `action_registry.rs`.
+- **CR2, UI model** (done 2026-11-11): the pure state of the tabs, the two pickers and the suggestions, in `gm-ui` and tested without a window; the palette actions in `action_registry.rs`.
 - **CR3, UI view:** the tab bar, the pickers, the file list and the read-only stacked diff, reusing the commit view's rows; the refresh after a status refresh.
+  - **CR3a, tab bar, Branch tab and file list** (done 2026-11-11).
+  - **CR3b, Compare fields and a steady list** (done 2026-11-11): From and To with suggestions, Swap, Mode, the defaults, the tags, the errors under the fields, and a re-read that keeps the last result on screen. Known gaps of CR3: the inline Base picker is not a popover; nothing was seen in a window; the Branch tab re-reads on every status refresh.
 - **CR4, close:** a UI smoke scenario in both themes, the docs `status` and markers, this entry.
 
 ## Open the file from a diff (planned 2026-11-11; D232)

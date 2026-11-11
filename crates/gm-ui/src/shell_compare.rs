@@ -5,20 +5,23 @@
 
 use std::ops::Range;
 
-use gm_schema::{Actor, CommandKind, CommitFile};
+use gm_schema::{Actor, CommandKind, CommitFile, RangeMode};
 use gpui::{
-    Context, Div, FontWeight, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px,
-    uniform_list,
+    Context, Div, Entity, Focusable, FontWeight, MouseButton, MouseDownEvent, Stateful,
+    Subscription, Window, div, prelude::*, px, uniform_list,
 };
 
-use crate::compare::{self, BaseRow, ChangesTab, RangeView, Summary};
+use crate::compare::{self, BaseRow, ChangesTab, Field, RangeView, Summary};
 use crate::context_menu::Target;
 use crate::shell_history::file_row;
+use crate::text_area::{Down, Newline, TextArea, TextAreaEvent, Up};
 use crate::theme;
 use crate::view::StatusView;
 
 const TAB_HEIGHT: f32 = 32.;
 const ROW_HEIGHT: f32 = 24.;
+/// The label beside a Compare field: wide enough for "From" and "To".
+const FIELD_LABEL_WIDTH: f32 = 40.;
 /// The Base picker shows twelve rows; a longer list scrolls.
 const PICKER_ROWS: u8 = 12;
 
@@ -76,17 +79,155 @@ impl StatusView {
             .child(self.compare_list(cx))
     }
 
-    /// The tab area: the Base picker of the Branch tab. The Compare tab's fields come
-    /// with its own slice; until then it says what to type first.
+    /// The tab area: the Base picker of the Branch tab, or the fields of the Compare tab.
     fn compare_tab_area(&self, cx: &Context<Self>) -> Div {
         match self.model.compare.tab {
             ChangesTab::Branch => self.base_picker(cx),
-            _ => div()
-                .px_3()
-                .py_2()
-                .text_color(theme::muted())
-                .child("Type the older revision in From."),
+            ChangesTab::Compare => self.compare_fields(cx),
+            ChangesTab::Uncommitted => div(),
         }
+    }
+
+    /// The **From** and **To** fields, then the **Mode** selector. A From still empty says
+    /// what to type (D231 (3)).
+    fn compare_fields(&self, cx: &Context<Self>) -> Div {
+        let hint = self.model.compare.from.trim().is_empty().then(|| {
+            div()
+                .px_3()
+                .pb_1()
+                .text_color(theme::muted())
+                .child("Type the older revision in From.")
+        });
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .py_1()
+            .child(self.field_row(Field::From, cx))
+            .child(self.field_row(Field::To, cx))
+            .child(self.mode_selector(cx))
+            .children(hint)
+    }
+
+    /// One field: its label and text box, with its suggestions under it while it has focus.
+    /// **To** also carries the **Swap** button.
+    fn field_row(&self, field: Field, cx: &Context<Self>) -> Div {
+        let (label, area, scope) = match field {
+            Field::From => ("From", &self.compare_from, "compare-from"),
+            Field::To => ("To", &self.compare_to, "compare-to"),
+        };
+        // The keys the list uses reach it first, while the field has focus: the area never
+        // sees them. Up and Down are taken only while the list is open.
+        let view = cx.entity().downgrade();
+        let (up, down, enter) = (view.clone(), view.clone(), view);
+        let row = div()
+            .mx_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .min_w(px(0.))
+            .capture_action(move |_: &Up, _, cx| {
+                let taken = up
+                    .update(cx, |this, cx| this.move_compare_highlight(false, cx))
+                    .unwrap_or(false);
+                if taken {
+                    cx.stop_propagation();
+                }
+            })
+            .capture_action(move |_: &Down, _, cx| {
+                let taken = down
+                    .update(cx, |this, cx| this.move_compare_highlight(true, cx))
+                    .unwrap_or(false);
+                if taken {
+                    cx.stop_propagation();
+                }
+            })
+            .capture_action(move |_: &Newline, _, cx| {
+                let _ = enter.update(cx, StatusView::enter_compare_field);
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(FIELD_LABEL_WIDTH))
+                    .text_color(theme::muted())
+                    .child(label),
+            )
+            .child(div().flex_1().min_w(px(0.)).child(area.clone()))
+            .children((field == Field::To).then(|| swap_button(cx)));
+        let listed = self.model.compare.focus.listed() == Some(field);
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(row)
+            .children(listed.then(|| self.suggestion_list(field, scope, cx)))
+    }
+
+    /// The **Direct | Since common ancestor** switch (D231 (3)), with the look of the diff's
+    /// **Unified | Split**.
+    fn mode_selector(&self, cx: &Context<Self>) -> Div {
+        let current = self.model.compare.mode;
+        let segment = |mode: RangeMode, label: &'static str| {
+            let active = current == mode;
+            div()
+                .id(label)
+                .px_2()
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .cursor_pointer()
+                .when(active, |this| {
+                    this.bg(theme::panel())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                })
+                .when(!active, |this| this.text_color(theme::muted()))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.choose_compare_mode(mode, cx);
+                    }),
+                )
+        };
+        div().mx_3().my_1().flex_none().child(
+            div()
+                .p(px(2.))
+                .flex()
+                .flex_row()
+                .rounded_md()
+                .bg(theme::selected_row())
+                .child(segment(RangeMode::Direct, "Direct"))
+                .child(segment(
+                    RangeMode::SinceCommonAncestor,
+                    "Since common ancestor",
+                )),
+        )
+    }
+
+    /// The suggestions of `field` under it: the rows are at most `SUGGESTION_ROWS`, so they
+    /// are not virtualized. Nothing is drawn when no name matches.
+    fn suggestion_list(&self, field: Field, scope: &'static str, cx: &Context<Self>) -> Div {
+        let rows = self.field_suggestions(field);
+        if rows.is_empty() {
+            return div();
+        }
+        let highlight = self.model.compare.focus.highlight();
+        div()
+            .mx_3()
+            .mb_1()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded_sm()
+            .border_1()
+            .border_color(theme::hairline())
+            .children(rows.iter().enumerate().map(|(index, row)| {
+                suggestion_row(scope, field, index, row, index == highlight, cx)
+            }))
     }
 
     /// The Base button, showing the base's name, and the list it opens (D231 (2)).
@@ -362,6 +503,252 @@ impl StatusView {
         self.model.compare_stack.close();
         cx.notify();
     }
+}
+
+/// The Compare fields' subscriptions (D231 (3)): their text, Esc, and focus. Focus opens and
+/// closes a field's suggestion list; leaving a field reads the revisions again.
+pub(crate) fn subscriptions(
+    from: &Entity<TextArea>,
+    to: &Entity<TextArea>,
+    window: &mut Window,
+    cx: &mut Context<StatusView>,
+) -> Vec<Subscription> {
+    let mut subscriptions = Vec::new();
+    for (field, area) in [(Field::From, from), (Field::To, to)] {
+        let handle = area.read(cx).focus_handle(cx);
+        subscriptions.push(cx.observe(area, move |this, area, cx| {
+            this.on_compare_field_changed(field, &area, cx);
+        }));
+        subscriptions.push(cx.subscribe_in(
+            area,
+            window,
+            move |this, _, event: &TextAreaEvent, _window, cx| {
+                if *event == TextAreaEvent::Cancel {
+                    this.close_compare_list(cx);
+                }
+            },
+        ));
+        subscriptions.push(cx.on_focus_in(&handle, window, move |this, _, cx| {
+            this.on_compare_field_focus(field, cx);
+        }));
+        subscriptions.push(cx.on_focus_out(&handle, window, move |this, _, _, cx| {
+            this.on_compare_field_blur(field, cx);
+        }));
+    }
+    subscriptions
+}
+
+impl StatusView {
+    /// The Compare tab was opened: an empty pair starts with **To** at `HEAD` (the docs say so),
+    /// and the fields show what the state holds, which a new repository has emptied.
+    pub(crate) fn prepare_compare_fields(&mut self, cx: &mut Context<Self>) {
+        if self.model.compare.needs_defaults() {
+            self.model.compare.set_to("HEAD".to_owned());
+        }
+        self.sync_compare_fields(cx);
+    }
+
+    /// Sets each field's text to the state's, where it differs. The areas then notify the
+    /// change, which finds the text already in the state and does nothing.
+    pub(crate) fn sync_compare_fields(&self, cx: &mut Context<Self>) {
+        let fields = [
+            (self.compare_from.clone(), self.model.compare.from.clone()),
+            (self.compare_to.clone(), self.model.compare.to.clone()),
+        ];
+        for (area, text) in fields {
+            if area.read(cx).text() != text {
+                area.update(cx, |area, cx| area.set_text(&text, cx));
+            }
+        }
+    }
+
+    /// The field's text changed by typing. The state takes it; nothing is read until Enter or a
+    /// blur. A line break is not part of a revision, so only the first line counts.
+    pub(crate) fn on_compare_field_changed(
+        &mut self,
+        field: Field,
+        area: &Entity<TextArea>,
+        cx: &mut Context<Self>,
+    ) {
+        let text = area.read(cx).text().to_owned();
+        if text.contains('\n') {
+            let first = text.lines().next().unwrap_or("").to_owned();
+            area.update(cx, |area, cx| area.set_text(&first, cx));
+            return;
+        }
+        // The caret blinks by notifying the area; redraw only on a real change.
+        let current = match field {
+            Field::From => &self.model.compare.from,
+            Field::To => &self.model.compare.to,
+        };
+        if text == *current {
+            return;
+        }
+        self.model.compare.type_into(field, text);
+        cx.notify();
+    }
+
+    /// A field gained focus: its suggestions open.
+    pub(crate) fn on_compare_field_focus(&mut self, field: Field, cx: &mut Context<Self>) {
+        self.model.compare.focus.focus(field);
+        cx.notify();
+    }
+
+    /// A field lost focus: its list closes and the tab reads what the fields now say.
+    pub(crate) fn on_compare_field_blur(&mut self, field: Field, cx: &mut Context<Self>) {
+        self.model.compare.focus.blur(field);
+        if self.model.compare.tab == ChangesTab::Compare {
+            self.read_changes_tab(cx);
+        }
+        cx.notify();
+    }
+
+    /// Esc in a field: its open list closes.
+    pub(crate) fn close_compare_list(&mut self, cx: &mut Context<Self>) {
+        self.model.compare.focus.close();
+        cx.notify();
+    }
+
+    /// The suggestions of `field` for the text it holds now.
+    fn field_suggestions(&self, field: Field) -> Vec<compare::Suggestion> {
+        let text = match field {
+            Field::From => &self.model.compare.from,
+            Field::To => &self.model.compare.to,
+        };
+        compare::suggestions(
+            text,
+            self.model.branches.known(),
+            &self.model.compare.tags,
+            compare::SUGGESTION_ROWS,
+        )
+    }
+
+    /// Up or Down in an open list moves its highlight. `false` when no list is open, so the
+    /// keys stay with the field.
+    pub(crate) fn move_compare_highlight(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        let Some(field) = self.model.compare.focus.listed() else {
+            return false;
+        };
+        let count = self.field_suggestions(field).len();
+        self.model.compare.focus.move_highlight(down, count);
+        cx.notify();
+        true
+    }
+
+    /// Enter in a field: the highlighted suggestion is taken if a list is open with a row to
+    /// take; otherwise the revisions are read as they are.
+    pub(crate) fn enter_compare_field(&mut self, cx: &mut Context<Self>) {
+        let picked = self.model.compare.focus.listed().and_then(|field| {
+            let rows = self.field_suggestions(field);
+            compare::taken(&rows, self.model.compare.focus.highlight()).map(|text| (field, text))
+        });
+        if let Some((field, text)) = picked {
+            self.pick_compare_suggestion(field, &text, cx);
+        } else {
+            self.model.compare.focus.close();
+            self.read_changes_tab(cx);
+            cx.notify();
+        }
+    }
+
+    /// A suggestion was clicked or taken with Enter: the field takes it, its list closes and the
+    /// tab reads.
+    pub(crate) fn pick_compare_suggestion(
+        &mut self,
+        field: Field,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.compare.set_field(field, text.to_owned());
+        self.model.compare.focus.close();
+        self.sync_compare_fields(cx);
+        self.read_changes_tab(cx);
+        cx.notify();
+    }
+
+    /// **Swap**: the fields exchange their text and the tab reads the change backwards.
+    pub(crate) fn swap_compare_fields(&mut self, cx: &mut Context<Self>) {
+        self.model.compare.swap();
+        self.model.compare.focus.close();
+        self.sync_compare_fields(cx);
+        self.read_changes_tab(cx);
+        cx.notify();
+    }
+
+    /// The **Mode** switch: a different mode reads the tab again.
+    pub(crate) fn choose_compare_mode(&mut self, mode: RangeMode, cx: &mut Context<Self>) {
+        if self.model.compare.mode == mode {
+            return;
+        }
+        self.model.compare.set_mode(mode);
+        self.read_changes_tab(cx);
+        cx.notify();
+    }
+}
+
+/// The **Swap** button: exchanges the two fields and reads the change backwards.
+fn swap_button(cx: &Context<StatusView>) -> Stateful<Div> {
+    div()
+        .id("compare-swap")
+        .flex_none()
+        .px_2()
+        .h(px(ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::button_border())
+        .cursor_pointer()
+        .child("Swap")
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| this.swap_compare_fields(cx)),
+        )
+}
+
+/// One row of a field's suggestion list: the text, its kind, and the highlight. A click takes it.
+fn suggestion_row(
+    scope: &'static str,
+    field: Field,
+    index: usize,
+    row: &compare::Suggestion,
+    highlighted: bool,
+    cx: &Context<StatusView>,
+) -> Stateful<Div> {
+    let text = row.text.clone();
+    div()
+        .id((scope, index))
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .px_2()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .when(highlighted, |item| item.bg(theme::selected_row()))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(row.text.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(theme::muted())
+                .child(row.kind.label()),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                this.pick_compare_suggestion(field, &text, cx);
+            }),
+        )
 }
 
 /// One changed file of the shown range. A right click opens its menu (Copy File Path).
