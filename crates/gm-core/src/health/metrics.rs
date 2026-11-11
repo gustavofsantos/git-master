@@ -486,7 +486,8 @@ fn constraints(
         ));
     }
     if commits >= MIN_OWNER_COMMITS
-        && (ownership.top_author_share < 0.2 || ownership.minor_contributors >= 5)
+        && (ownership.top_author_share < 0.2
+            || (ownership.minor_contributors >= 5 && ownership.top_author_share < 0.5))
     {
         out.push(format!(
             "No clear owner (top author {:.0}% of commits, {} occasional authors): keep the diff small enough for one reviewer, and explain any change of behavior.",
@@ -822,6 +823,26 @@ mod tests {
         ));
         let own = file(&out, "own.rs");
         assert!(own.constraints.contains(&"No clear owner (top author 10% of commits, 0 occasional authors): keep the diff small enough for one reviewer, and explain any change of behavior.".to_owned()));
+    }
+
+    #[test]
+    fn a_file_with_a_main_author_has_an_owner_despite_occasional_authors() {
+        let mut entries: Vec<(i64, String, Vec<String>)> = Vec::new();
+        for d in 0..90 {
+            entries.push((d, "main".to_owned(), vec!["kept.rs".to_owned()]));
+        }
+        for d in 0..6 {
+            entries.push((100 + d, format!("guest{d}"), vec!["kept.rs".to_owned()]));
+        }
+        let out = compute_default(&log(&entries));
+        let kept = file(&out, "kept.rs");
+        assert_eq!(kept.ownership.minor_contributors, 6);
+        assert!(
+            !kept
+                .constraints
+                .iter()
+                .any(|c| c.starts_with("No clear owner"))
+        );
     }
 
     #[test]

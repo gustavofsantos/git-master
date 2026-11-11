@@ -1,11 +1,9 @@
 ---
 title: Code health
 description: See which files change the most, which quiet files have started to change, which files change together and how widely a file is owned, from the history of the repository, and give an agent the same picture before it edits.
-status: planned
+status: partial
 order: 65
 ---
-
-> **Planned.** Code health is not available in the app yet.
 
 When agents write much of the code, the team's understanding of a codebase can fall behind faster than the code itself shows. Code health reads how the code has changed over time, from the history Git already keeps, and shows where that matters: the files that change the most, quiet files that suddenly change a lot, files that always change together, and files that nobody clearly owns.
 
@@ -75,7 +73,7 @@ The tab has three parts:
 
 - **Dormancy breaks**, at the top: each file that has one, with how long it was quiet and how many of the last 30 active days changed it. Click a file to select it.
 - **Hotspots**: the files ranked by heat, hottest first. Each row shows the rank, the path, a heat bar, a small activity chart of the last 180 active days of the repository and the trend. The list draws only the rows you can see, so it stays fast with any number of files.
-- **The file details**, on the right, for the selected file: its rank and percentile, its activity chart, the files it changes together with and its ownership. **Open File** shows it on the **Files** tab.
+- **The file details**, on the right, for the selected file: its rank and percentile, its activity chart, the files it changes together with, its ownership and **What an agent is told**: the constraints an agent receives for it. Click a file it changes together with to select that file. **Open File** shows it on the **Files** tab.
 
 Type in the filter box above the list to show only the files under a folder, such as `src/billing`.
 
@@ -119,7 +117,7 @@ An agent reads code health through two tools of the [MCP server](../agents/mcp-s
 | The file has a dormancy break | Explain the current behavior of the file back before changing it, and keep the change small. |
 | The file is among the hottest 5% | Keep the diff small enough for one reviewer. |
 | The file changes together with another file with a degree of at least 0.5 | Review the change together with the other file. |
-| The file's most frequent author made less than 20% of its commits, or at least 5 authors made fewer than 5% each | Keep the diff small enough for one reviewer, and explain any change of behavior. |
+| The file has at least 5 commits, and its most frequent author made less than 20% of them, or less than half of them while at least 5 authors made fewer than 5% each | Keep the diff small enough for one reviewer, and explain any change of behavior. |
 
 Each answer carries the commit it was computed at and a `config_hash` of the configuration that applied, so two answers can be compared honestly. Paths and constraints come from the history of the repository, so the answer is marked `"untrusted": true`, like any other text from the repository.
 
@@ -156,8 +154,6 @@ and receives:
 ```
 
 ### The prepare skill
-
-> **Planned.** The prepare skill does not read code health yet.
 
 The `prepare` skill of the agent plugin calls `health_context` for the files a task is likely to touch and puts the constraints in its brief. For a file with a dormancy break, the agent explains the file's current behavior back before it changes it, and can propose that explanation as a [memory](memories.md), so the next session starts from it.
 
