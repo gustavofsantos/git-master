@@ -1062,6 +1062,10 @@ impl Model {
                 detail,
                 ..
             } => {
+                // A failed Compare, Branch or tags read, or the stack of a range's files, says
+                // why on its own tab or not at all, so the status bar keeps it out (D232).
+                // Checked before the reads below forget which id they await.
+                let inline = self.compare.failure_stays_inline(id) || self.compare_stack.awaits(id);
                 let text = detail
                     .clone()
                     .unwrap_or_else(|| "git could not read the commit".to_owned());
@@ -1097,7 +1101,7 @@ impl Model {
                 let message = detail.unwrap_or_else(|| "the operation failed".to_owned());
                 // A failed health read shows under the tree, not in the status bar: it is asked
                 // again on every refresh, as in a repository with no commit yet.
-                if !self.health.failed(id, message.clone()) {
+                if !inline && !self.health.failed(id, message.clone()) {
                     self.error = Some(message);
                 }
                 self.loading = false;
@@ -2359,6 +2363,38 @@ mod tests {
         assert_eq!(model.apply(failed(99, Some("stage failed"))), None);
         assert_eq!(model.error.as_deref(), Some("stage failed"));
         assert!(model.diffs_are_for("a"));
+    }
+
+    #[test]
+    fn a_failed_compare_read_stays_out_of_the_status_bar() {
+        use crate::compare::RangeView;
+        let mut model = Model::default();
+        model.request_compare_view(OperationId(5));
+        let _ = model.apply(failed(5, Some("fatal: unknown revision 'nope'")));
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model.compare.compare_view,
+            RangeView::Failed("fatal: unknown revision 'nope'".into())
+        );
+
+        model.request_branch_view(OperationId(6));
+        let _ = model.apply(failed(6, Some("fatal: bad revision")));
+        assert_eq!(model.error, None);
+
+        model.request_tags(OperationId(7));
+        let _ = model.apply(failed(7, Some("fatal: no tags")));
+        assert_eq!(model.error, None);
+        assert_eq!(model.compare.tags_id, None);
+
+        model
+            .compare_stack
+            .request(OperationId(8), 0, Vec::new(), 0);
+        let _ = model.apply(failed(8, Some("fatal: bad object")));
+        assert_eq!(model.error, None);
+        assert!(model.compare_stack.failure().is_some());
+
+        let _ = model.apply(failed(9, Some("stage failed")));
+        assert_eq!(model.error.as_deref(), Some("stage failed"));
     }
 
     #[test]

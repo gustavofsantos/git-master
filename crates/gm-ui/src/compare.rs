@@ -399,6 +399,14 @@ impl CompareState {
         self.branch_view.awaits(id) || self.compare_view.awaits(id)
     }
 
+    /// Whether `id` is a read of the Compare tabs whose failure stays out of the
+    /// status bar (D232): the range read in flight, which says why in its own field,
+    /// or the tags read, whose failure just leaves the suggestions empty.
+    #[must_use]
+    pub fn failure_stays_inline(&self, id: OperationId) -> bool {
+        self.awaits_range(id) || self.tags_id == Some(id)
+    }
+
     /// Routes git's message for a failed read to the view that awaits `id`, and
     /// drops a tag read that failed. `false` when neither awaits `id`.
     pub fn failed(&mut self, id: OperationId, message: String) -> bool {

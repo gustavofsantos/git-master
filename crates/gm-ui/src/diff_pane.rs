@@ -1555,7 +1555,9 @@ impl DiffPane {
     }
 
     /// One row: the file's path, its `+ − · chunks` counts, and on the right the
-    /// comment button and the side and layout switches.
+    /// Open File and comment buttons and the side and layout switches. On a narrow
+    /// pane the right-hand controls wrap to a second line under the path, so the
+    /// path keeps its room; the path only ellipsises when it alone does not fit.
     fn file_header(&self, cx: &Context<Self>) -> Option<Div> {
         let path = self.path()?;
         let hunks = hunks_of(match self.side {
@@ -1566,6 +1568,7 @@ impl DiffPane {
         let row = div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .justify_between()
             .gap_3()
@@ -1601,6 +1604,7 @@ impl DiffPane {
             )
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
