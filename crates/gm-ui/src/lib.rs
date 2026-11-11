@@ -16,6 +16,7 @@ mod changes;
 mod code_page;
 mod command_panel;
 mod commit_threads;
+mod compare;
 mod composer;
 mod conflict_resolver;
 mod context_actions;

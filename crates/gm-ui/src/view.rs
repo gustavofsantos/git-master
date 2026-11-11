@@ -28,6 +28,7 @@ use crate::avatar::Avatars;
 use crate::branch_delete::DeleteDialog;
 use crate::branch_filter::BranchFilter;
 use crate::branch_menu::BranchMenu;
+use crate::compare::ChangesTab;
 use crate::composer::{Composer, ComposerEvent};
 use crate::context_menu::ContextMenu;
 use crate::contexts_dialog::ContextsDialog;
@@ -1191,6 +1192,13 @@ impl StatusView {
         cx.notify();
     }
 
+    /// Shows the Changes page on `tab` (D231 (1)). The tab's own read is not sent here yet.
+    pub(crate) fn show_changes_tab(&mut self, tab: ChangesTab, cx: &mut Context<Self>) {
+        self.model.compare.set_tab(tab);
+        self.screen = Screen::WorkingCopy;
+        cx.notify();
+    }
+
     /// Replaces the composer text with the suggestion, which is then dropped.
     fn use_suggestion(&mut self, text: &str, cx: &mut Context<Self>) {
         self.composer
@@ -1498,6 +1506,7 @@ impl StatusView {
                 include_staged,
             }) => self.open_discard_file_dialog(&path, include_staged, window, cx),
             Ok(Effect::ShowHistory) => self.show_history(cx),
+            Ok(Effect::ShowChangesTab(tab)) => self.show_changes_tab(tab, cx),
             Ok(Effect::ShowStashes) => self.show_stashes(cx),
             Ok(Effect::ShowReflog) => self.show_reflog(cx),
             Ok(Effect::ShowThreads) => self.show_threads(window, cx),

@@ -17,6 +17,7 @@ use gm_schema::{
     WorktreeEntry,
 };
 
+use crate::compare::ChangesTab;
 use crate::memories::{self, Placement};
 use crate::move_file::{DropTarget, FOLDER_REASON, MISSING_FOLDER, SAME_BRANCH, SAME_WORKTREE};
 use crate::stacks::Stacks;
@@ -212,6 +213,8 @@ pub enum Effect {
     },
     /// Opens the history page and asks the engine for the commits of HEAD.
     ShowHistory,
+    /// Shows the Changes page on `tab` (D231 (1)). Reads nothing: the tab's own read follows.
+    ShowChangesTab(ChangesTab),
     /// Opens Quick Open, which finds a file by part of its path (N1).
     OpenQuickOpen,
     /// Opens the Code page (N2).
@@ -523,7 +526,7 @@ pub struct MemoryRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 122] = [
+const SPECS: [Spec; 125] = [
     spec(
         "file.stage",
         "Stage File",
@@ -874,6 +877,27 @@ const SPECS: [Spec; 122] = [
         None,
         ArgKind::None,
         Category::Repository,
+    ),
+    spec(
+        "changes.uncommitted",
+        "Show Uncommitted Changes",
+        None,
+        ArgKind::None,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "changes.branch",
+        "Show Branch Changes",
+        None,
+        ArgKind::None,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "changes.compare",
+        "Compare Revisions…",
+        None,
+        ArgKind::None,
+        Category::WorkingCopy,
     ),
     spec(
         "commit.show_pictures",
@@ -1445,6 +1469,12 @@ pub enum Action {
     UnlockWorktree,
     PruneWorktrees,
     ShowHistory,
+    /// Shows the Changes page on its Uncommitted tab (D231 (1)).
+    ShowUncommittedChanges,
+    /// Shows the Changes page on its Branch tab (D231 (1)).
+    ShowBranchChanges,
+    /// Shows the Changes page on its Compare tab (D231 (1)).
+    CompareRevisions,
     ShowAuthorPictures,
     HideAuthorPictures,
     CopyCommitHash,
@@ -2033,7 +2063,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 122] = [
+    pub const ALL: [Action; 125] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -2085,6 +2115,9 @@ impl Action {
         Action::UnlockWorktree,
         Action::PruneWorktrees,
         Action::ShowHistory,
+        Action::ShowUncommittedChanges,
+        Action::ShowBranchChanges,
+        Action::CompareRevisions,
         Action::ShowAuthorPictures,
         Action::HideAuthorPictures,
         Action::CopyCommitHash,
@@ -2497,6 +2530,9 @@ impl Action {
             | Action::NewWorktree
             | Action::PruneWorktrees
             | Action::ShowHistory
+            | Action::ShowUncommittedChanges
+            | Action::ShowBranchChanges
+            | Action::CompareRevisions
             | Action::QuickOpen
             | Action::ShowCode
             | Action::ShowCodeHealth
@@ -2652,6 +2688,9 @@ impl Action {
                 move_effect(self, args, ctx)?
             }
             (Action::ResolveConflict, _) => resolve_conflict_effect(args)?,
+            (Action::ShowUncommittedChanges, _) => Effect::ShowChangesTab(ChangesTab::Uncommitted),
+            (Action::ShowBranchChanges, _) => Effect::ShowChangesTab(ChangesTab::Branch),
+            (Action::CompareRevisions, _) => Effect::ShowChangesTab(ChangesTab::Compare),
             (action, _) if action.opens_a_page() => navigation_effect(action, args),
             (action, _) if is_choice(action) => choice_effect(action),
             (Action::CopyCommitMessage, Args::Commit(text)) => Effect::CopyMessage(text.clone()),
@@ -4803,6 +4842,35 @@ mod tests {
             Err("No repository is open.")
         );
         assert_eq!(Action::ShowHistory.id(), "history.show");
+    }
+
+    #[test]
+    fn the_changes_tab_actions_need_a_repository_and_plan_their_tab() {
+        let cases = [
+            (Action::ShowUncommittedChanges, ChangesTab::Uncommitted),
+            (Action::ShowBranchChanges, ChangesTab::Branch),
+            (Action::CompareRevisions, ChangesTab::Compare),
+        ];
+        let closed = Context {
+            repo_open: false,
+            ..ctx(&[], "")
+        };
+        for (action, tab) in cases {
+            assert_eq!(
+                action.plan(&Args::None, &ctx(&[], "")),
+                Ok(Effect::ShowChangesTab(tab)),
+                "{action:?}"
+            );
+            assert_eq!(
+                action.enabled(&Args::None, &closed),
+                Err("No repository is open."),
+                "{action:?}"
+            );
+            assert_eq!(action.shortcut_label(), None, "{action:?}");
+            assert!(action.listed_in_palette(), "{action:?}");
+        }
+        assert_eq!(Action::CompareRevisions.spec().title, "Compare Revisions…");
+        assert_eq!(Action::ShowBranchChanges.id(), "changes.branch");
     }
 
     #[test]

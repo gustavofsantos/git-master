@@ -13,6 +13,7 @@ use crate::branches::Branches;
 use crate::changes::{Summary, summarize};
 use crate::code_page::CodePage;
 use crate::commit_threads::CommitThreads;
+use crate::compare::CompareState;
 use crate::conflict_resolver::ResolverState;
 use crate::contexts_model::ContextsModel;
 use crate::file_discard::Discarding;
@@ -119,6 +120,10 @@ pub struct Model {
     pub commit: CommitPane,
     /// The stacked diff of the open commit, which replaces the commit view (H4c).
     pub commit_stack: OpenStack,
+    /// The Changes page's Branch and Compare tabs: the tab, the revisions and the reads in flight (D231).
+    pub compare: CompareState,
+    /// The stacked diff of the file a compare tab selected (D231 (4)).
+    pub compare_stack: OpenStack,
     /// The Stashes page's detail panel: the read in flight, or the selected stash's answer (B2).
     pub stash_commit: CommitPane,
     /// The Stashes page's stacked diff of the selected stash (B2).
@@ -605,6 +610,24 @@ impl DiffSlots {
 }
 
 impl Model {
+    /// The Branch tab's read `id` was sent (D231 (4b)).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn request_branch_view(&mut self, id: OperationId) {
+        self.compare.request_branch(id);
+    }
+
+    /// The Compare tab's read `id` was sent (D231 (3)).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn request_compare_view(&mut self, id: OperationId) {
+        self.compare.request_compare(id);
+    }
+
+    /// The `ListTags` `id` was sent, for the pickers' suggestions (D231 (4b)).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn request_tags(&mut self, id: OperationId) {
+        self.compare.request_tags(id);
+    }
+
     /// The detail panel of `page`.
     #[must_use]
     pub fn commit_pane(&self, page: CommitPage) -> &CommitPane {
@@ -1052,6 +1075,11 @@ impl Model {
                     .clone()
                     .unwrap_or_else(|| "git could not read the commit's diff".to_owned());
                 self.commit_stack.failed(id, diff.clone());
+                self.compare_stack.failed(id, diff.clone());
+                let revisions = detail
+                    .clone()
+                    .unwrap_or_else(|| "git could not read the revisions".to_owned());
+                self.compare.failed(id, revisions);
                 self.reflog_stack.failed(id, diff.clone());
                 self.stash_stack.failed(id, diff);
                 // A refused checkout keeps the branch; git's reason, first line only, is the notice.
@@ -1152,6 +1180,18 @@ impl Model {
                 } else {
                     self.commit.received(id, detail);
                 }
+                None
+            }
+            Event::RevisionRangeLoaded { id, range } => {
+                self.compare.range_received(id, range);
+                None
+            }
+            Event::RevisionStackLoaded { id, diffs } => {
+                self.compare_stack.received(id, diffs);
+                None
+            }
+            Event::TagsListed { id, tags } => {
+                self.compare.tags_listed(id, tags);
                 None
             }
             Event::CommitStackLoaded { id, diffs } => {
@@ -1532,11 +1572,6 @@ impl Model {
             // An inspection nobody asked for is dropped; pruning's preview is shown by its
             // dialog (W6), not here yet.
             // A plan nobody asked for in this window. The restack resolver is not shown yet (D154).
-            // The revision reads are not shown yet; a later slice (CR2) routes them to the Changes page.
-            Event::RevisionRangeLoaded { .. }
-            | Event::RevisionStackLoaded { .. }
-            // The tag suggestions of the pickers are shown by a later slice (CR2).
-            | Event::TagsListed { .. }
             | Event::RestackPlanned { .. }
             | Event::RestackResolutionStarted { .. }
             | Event::RestackResolutionFinished { .. }
@@ -1710,6 +1745,8 @@ impl Model {
         self.stashes = StashList::default();
         self.stash_commit = CommitPane::Empty;
         self.stash_stack = OpenStack::default();
+        self.compare.reset_for_new_repo();
+        self.compare_stack = OpenStack::default();
         self.review = ReviewList::default();
         self.local_review = LocalReview::default();
         self.review_files.clear();
@@ -4331,5 +4368,190 @@ mod workspace_tests {
                 .map(<[_]>::len),
             Some(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod compare_tests {
+    use super::*;
+    use gm_schema::{Actor, Change, CommitFile, FileDiff, OperationState, RevisionRange};
+
+    use crate::compare::{ChangesTab, RangeView};
+
+    fn diff(path: &str) -> FileDiff {
+        FileDiff {
+            path: path.into(),
+            old_path: None,
+            binary: false,
+            hunks: Vec::new(),
+        }
+    }
+
+    fn file(path: &str) -> CommitFile {
+        CommitFile {
+            path: path.into(),
+            old_path: None,
+            change: Change::Modified,
+            added: 1,
+            deleted: 0,
+            binary: false,
+        }
+    }
+
+    fn range(files: &[&str]) -> RevisionRange {
+        RevisionRange {
+            from_oid: "a".repeat(40),
+            to_oid: "b".repeat(40),
+            from_short: "aaaaaaa".into(),
+            to_short: "bbbbbbb".into(),
+            from_name: "main".into(),
+            to_name: "feature".into(),
+            base: "c".repeat(40),
+            tip: "b".repeat(40),
+            files: files.iter().map(|path| file(path)).collect(),
+            more_files: 0,
+            added: 1,
+            deleted: 0,
+        }
+    }
+
+    fn failed(id: u64, detail: Option<&str>) -> Event {
+        Event::OperationChanged {
+            id: OperationId(id),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_late_range_answer_is_dropped_and_the_one_in_flight_is_shown() {
+        let mut model = Model::default();
+        model.request_compare_view(OperationId(5));
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(4),
+            range: range(&["a.txt"]),
+        });
+        assert_eq!(
+            model.compare.compare_view,
+            RangeView::Loading { id: OperationId(5) }
+        );
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(5),
+            range: range(&["a.txt"]),
+        });
+        assert!(model.compare.compare_view.range().is_some());
+    }
+
+    #[test]
+    fn a_failed_range_read_keeps_gits_message_on_its_view() {
+        let mut model = Model::default();
+        model.request_compare_view(OperationId(5));
+        let _ = model.apply(failed(5, Some("fatal: unknown revision 'v9'")));
+        assert_eq!(
+            model.compare.compare_view,
+            RangeView::Failed("fatal: unknown revision 'v9'".into())
+        );
+    }
+
+    #[test]
+    fn a_failed_range_read_without_text_says_what_failed() {
+        let mut model = Model::default();
+        model.request_branch_view(OperationId(5));
+        let _ = model.apply(failed(5, None));
+        assert_eq!(
+            model.compare.branch_view,
+            RangeView::Failed("git could not read the revisions".into())
+        );
+    }
+
+    #[test]
+    fn an_empty_range_asks_for_no_stack_and_a_range_with_files_asks_for_its_own() {
+        let mut model = Model::default();
+        model.request_branch_view(OperationId(2));
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(2),
+            range: range(&[]),
+        });
+        assert_eq!(model.compare.take_stack_request(), None);
+
+        model.request_branch_view(OperationId(3));
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(3),
+            range: range(&["a.txt", "b.txt"]),
+        });
+        let request = model.compare.take_stack_request().expect("a stack request");
+        assert_eq!(request.base, "c".repeat(40));
+        assert_eq!(request.tip, "b".repeat(40));
+        assert_eq!(request.files.len(), 2);
+    }
+
+    #[test]
+    fn an_answer_for_the_other_tab_is_not_mixed_up() {
+        let mut model = Model::default();
+        model.request_branch_view(OperationId(5));
+        model.request_compare_view(OperationId(6));
+        // The engine superseded the branch read: its late answer changes nothing.
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(5),
+            range: range(&["a.txt"]),
+        });
+        assert_eq!(model.compare.branch_view, RangeView::Idle);
+        assert!(model.compare.compare_view.is_loading());
+        let _ = model.apply(Event::RevisionRangeLoaded {
+            id: OperationId(6),
+            range: range(&["b.txt"]),
+        });
+        assert_eq!(model.compare.branch_view, RangeView::Idle);
+        assert_eq!(
+            model
+                .compare
+                .compare_view
+                .range()
+                .map(|range| range.files[0].path.as_str()),
+            Some("b.txt")
+        );
+    }
+
+    #[test]
+    fn a_stacked_diff_of_a_compare_tab_goes_to_the_compare_stack() {
+        let mut model = Model::default();
+        model
+            .compare_stack
+            .request(OperationId(7), 0, Vec::new(), 0);
+        model.commit_stack.request(OperationId(8), 0, Vec::new(), 0);
+        let _ = model.apply(Event::RevisionStackLoaded {
+            id: OperationId(7),
+            diffs: vec![diff("a.txt")],
+        });
+        assert!(model.compare_stack.is_shown());
+        assert!(model.commit_stack.is_open());
+        assert!(!model.commit_stack.is_shown());
+    }
+
+    #[test]
+    fn tags_are_taken_only_for_the_read_in_flight() {
+        let mut model = Model::default();
+        model.request_tags(OperationId(3));
+        let _ = model.apply(Event::TagsListed {
+            id: OperationId(2),
+            tags: vec!["old".into()],
+        });
+        assert!(model.compare.tags.is_empty());
+        let _ = model.apply(Event::TagsListed {
+            id: OperationId(3),
+            tags: vec!["v2.0".into()],
+        });
+        assert_eq!(model.compare.tags, ["v2.0"]);
+        assert_eq!(model.compare.tags_id, None);
+    }
+
+    #[test]
+    fn a_new_repository_takes_the_compare_tab_back_to_uncommitted() {
+        let mut model = Model::default();
+        model.compare.set_tab(ChangesTab::Compare);
+        assert_eq!(model.compare.tab, ChangesTab::Compare);
+        model.compare.reset_for_new_repo();
+        assert_eq!(model.compare.tab, ChangesTab::Uncommitted);
     }
 }
