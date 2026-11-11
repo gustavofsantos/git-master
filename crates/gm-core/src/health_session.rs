@@ -123,6 +123,7 @@ impl HealthJob {
             config_hash: self.config_hash.clone(),
             complete: commits.len() == window.len(),
             files,
+            removed_churn: Vec::new(),
         })
     }
 

@@ -820,6 +820,7 @@ Requested by the author on 2026-11-11 for daily use on very large repositories a
 - **CH4, churn** (done 2026-11-11; D227, D228). **CH4a, engine:** `health.db` v2 with the hunk headers of the first-parent commits, their ingest, the pure replay into a `LineChurn` per file, the job fills `FileHealth::churn`. **CH4b, front ends:** the Health tab's churn panel and the file's churn in the details, and `churn_summary` over MCP.
 - **CH5, the prepare skill** reads `health_context` (plugin, `ai` submodule; done 2026-11-11, plugin 0.7.0).
 - **CH6, the hotspot map** (treemap).
+- **CH7, closing the gaps** (D229): complexity, removed churn, sizes, MCP budget (CH7a); survival bars, keyboard, refresh during a read, complexity in the details (CH7b); the backtest tool (CH7c); the prepare skill reads churn (CH7d); then the hotspot map (CH6) and a UI smoke scenario (CH7e).
 - **Owed:** the backtest of the research doc on a large real repository before tuning any threshold.
 
 **Measured** (release build, git/git, 11,316 commits in the 3-year window, `crates/gm-core/tests/health_measure.rs`): cold index 9.7 s (about 1,170 commits a second), an incremental pass 0.22 s, loading the window 0.26 s, the indicators 8 ms. A window of 200,000 commits would take about three minutes to index the first time, the last six months first.

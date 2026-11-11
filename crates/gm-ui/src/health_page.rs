@@ -487,6 +487,8 @@ mod tests {
             },
             constraints: Vec::new(),
             churn: None,
+            bytes: 0,
+            complexity: None,
         }
     }
 
@@ -496,6 +498,7 @@ mod tests {
             config_hash: "3fa9e1c2".to_owned(),
             complete,
             files,
+            removed_churn: Vec::new(),
         }
     }
 

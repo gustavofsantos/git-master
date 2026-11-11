@@ -85,6 +85,35 @@ pub struct FileHealth {
     /// `None` until the index holds the changes of the window, or for a file whose lines are
     /// not followed (binary).
     pub churn: Option<LineChurn>,
+    /// The size of the file at the commit, in bytes (`git ls-tree -l`); 0 when unknown.
+    pub bytes: u64,
+    /// How deeply the file's code is nested. `None` outside the measured hot set, for a
+    /// file over 1 MiB or one that is not text.
+    pub complexity: Option<Complexity>,
+}
+
+/// The nesting of a file's code, read from its indentation (docs/guide/code-health.md, D229).
+/// One level is a tab or four spaces; blank lines do not count.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Complexity {
+    /// Lines that are not blank.
+    pub lines: u32,
+    /// The deepest nesting, in whole levels.
+    pub indent_max: u32,
+    /// The mean nesting of the lines that are not blank, in levels.
+    pub indent_mean: f64,
+    /// The sum of every line's nesting, in levels, rounded: grows with size and depth.
+    pub indent_total: u32,
+    /// The share of measured files with a lower `indent_total`, 0 to 100.
+    pub percentile: f64,
+}
+
+/// The churn of a file followed in the window that does not exist at the commit: it still
+/// counts toward the folder of `path`, its path at its last change (D229).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RemovedChurn {
+    pub path: String,
+    pub churn: LineChurn,
 }
 
 /// The lines added to one file in the window, followed along the first-parent history (D228).
@@ -172,6 +201,8 @@ pub struct HealthReport {
     pub complete: bool,
     /// Every file changed in the window, hottest first (`rank` order).
     pub files: Vec<FileHealth>,
+    /// The churn of files followed in the window that no longer exist, by path order.
+    pub removed_churn: Vec<RemovedChurn>,
 }
 
 /// How far the index has been built for one commit.

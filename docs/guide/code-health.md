@@ -20,8 +20,12 @@ Every indicator is computed from the history of the repository and from your con
 | **Dormancy break** | A file that was quiet for a long time and is now changing a lot. | The people who understood it may be gone, so a change there needs the most care. |
 | **Changes together with** | Other files that change in the same commits as this one, with how often they do. | Two files that always change together depend on each other, even when the code does not say so. |
 | **Ownership** | How many authors changed the file, the share of its commits by the most frequent author, and how many authors made fewer than 5% of its commits. | A file with many occasional authors and no clear owner has nobody who holds its whole design. |
+| **Complexity** | How deeply the code of the file is nested, read from its indentation: the deepest nesting, the mean nesting of its lines, and the total indentation, which grows with both size and depth. Measured for the 1,000 hottest files. | A file that is both hot and complex is where a change is most likely to go wrong. |
+| **Churn** | How many of the lines added to the file were rewritten soon after, and how long its lines survive. See [Churn](#churn). | Code that keeps being redone was often wrong or incomplete when it landed. |
 
 Files are ranked by heat. A file's **rank** is its place in that order, and its **percentile** says how much of the repository is colder than it.
+
+Complexity reads the file at the commit you look at, as text. A file larger than 1 MiB, or one that is not text, has no complexity. One level of nesting is a tab or four spaces; two spaces count as half a level, so the numbers compare across files that indent differently. Blank lines do not count. The **complexity percentile** of a file says how much of the measured files is less complex than it, by total indentation.
 
 Ownership never names a person. Code health shows counts and shares by file, never a list of authors and never a ranking of people.
 
@@ -73,9 +77,11 @@ The tab has three parts:
 
 - **Dormancy breaks**, at the top: each file that has one, with how long it was quiet and how many of the last 30 active days changed it. Click a file to select it.
 - **Hotspots**: the files ranked by heat, hottest first. Each row shows the rank, the path, a heat bar, a small activity chart of the last 180 active days of the repository and the trend. The list draws only the rows you can see, so it stays fast with any number of files.
-- **The file details**, on the right, for the selected file: its rank and percentile, its activity chart, the files it changes together with, its ownership and **What an agent is told**: the constraints an agent receives for it. Click a file it changes together with to select that file. **Open File** shows it on the **Files** tab.
+- **The file details**, on the right, for the selected file: its rank and percentile, its activity chart, the files it changes together with, its ownership, its complexity, its churn and **What an agent is told**: the constraints an agent receives for it. Click a file it changes together with to select that file. **Open File** shows it on the **Files** tab.
 
 Type in the filter box above the list to show only the files under a folder, such as `src/billing`.
+
+With the list focused, `Up` and `Down` move the selection, `Home` and `End` go to the first and last file, `PageUp` and `PageDown` move a page, and `Enter` opens the selected file on the **Files** tab. Click the list or a row to focus it.
 
 ### Hotspot map
 
@@ -101,7 +107,7 @@ GitMaster follows each line along the first-parent history of the commit you loo
 - Lines that existed before the analysis window are not counted, and their deletion is not churn.
 - A commit you ignore with `gitmaster.health.ignoreRev` moves lines but counts nothing: the lines it deletes leave the count, and the lines it adds are not counted.
 - Excluded paths and binary files are not counted.
-- Only files that exist at the commit you look at count toward a folder.
+- The churn of a file that was deleted or moved out of the folder still counts toward the folder it was in at its last change, so deleted code is not lost from the numbers.
 
 ## Heat in the folder tree
 
@@ -113,7 +119,9 @@ The first time you open the **Health** tab in a repository, GitMaster reads the 
 
 After that, only new commits are read. A commit is read once and never again, whichever branch you look at. The window and `gitmaster mcp` share the index, so each commit is read once whichever of them sees it first.
 
-Reading runs in the background. The window stays responsive, and closing the tab or switching repositories stops the reading; it continues where it stopped the next time.
+Reading runs in the background. The window stays responsive, and closing the tab or switching repositories stops the reading; it continues where it stopped the next time. When the repository changes while the history is being read, the tab asks again as soon as the read ends, so it never stays on an older commit.
+
+An agent's call reads history for at most 20 seconds. If the index is not complete by then, the answer is partial (`complete` is false) and the next call continues the reading. Opening the **Health** tab first builds the index without that limit.
 
 > **Note.** GitMaster reads a commit-graph file when the repository has one, and never writes one. In a very large repository, running `git commit-graph write --reachable --changed-paths` yourself makes reading the history faster.
 
@@ -132,6 +140,8 @@ An agent reads code health through two tools of the [MCP server](../agents/mcp-s
 | The file is among the hottest 5% | Keep the diff small enough for one reviewer. |
 | The file changes together with another file with a degree of at least 0.5 | Review the change together with the other file. |
 | The file has at least 5 commits, and its most frequent author made less than 20% of them, or less than half of them while at least 5 authors made fewer than 5% each | Keep the diff small enough for one reviewer, and explain any change of behavior. |
+| The file is among the hottest 10% and the most complex 10% of the measured files | Change it in small steps, and add or update a test for each change of behavior. |
+| At least 10% of the lines added to the file were rewritten within 14 active days, among at least 50 such lines | Check the change against how the file's code was redone before: read its recent history first. |
 
 Each answer carries the commit it was computed at and a `config_hash` of the configuration that applied, so two answers can be compared honestly.
 
@@ -157,6 +167,8 @@ and receives:
       { "path": "src/billing/Ledger.java", "degree": 0.72, "shared_commits": 23 }
     ],
     "ownership": { "authors": 14, "top_author_share": 0.18, "minor_contributors": 9 },
+    "complexity": { "lines": 1840, "indent_max": 7, "indent_mean": 2.1, "indent_total": 3864, "percentile": 97.5 },
+    "churn": { "lines_added": 912, "rewritten_14": 74, "rewritten_share": 0.08 },
     "constraints": [
       "Hot file (rank 3 of 1240): keep the diff small enough for one reviewer.",
       "Changes together with src/billing/Ledger.java (degree 0.72): review the change together with that file.",
@@ -168,7 +180,7 @@ and receives:
 
 ### The prepare skill
 
-The `prepare` skill of the agent plugin calls `health_context` for the files a task is likely to touch and puts the constraints in its brief. For a file with a dormancy break, the agent explains the file's current behavior back before it changes it, and can propose that explanation as a [memory](memories.md), so the next session starts from it.
+The `prepare` skill of the agent plugin calls `health_context` for the files a task is likely to touch and `churn_summary` for their folders, and puts the constraints and the churn in its brief. For a file with a dormancy break, the agent explains the file's current behavior back before it changes it, and can propose that explanation as a [memory](memories.md), so the next session starts from it.
 
 ## Configuration
 

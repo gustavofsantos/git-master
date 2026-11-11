@@ -2167,6 +2167,7 @@ mod tests {
                 config_hash: "3fa9".to_owned(),
                 complete: true,
                 files: Vec::new(),
+                removed_churn: Vec::new(),
             }),
         });
         assert!(model.health.pending());

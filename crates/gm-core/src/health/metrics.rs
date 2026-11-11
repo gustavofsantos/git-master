@@ -180,6 +180,8 @@ pub fn compute<S: std::hash::BuildHasher>(
                 ownership: s.ownership.clone(),
                 constraints,
                 churn: None,
+                bytes: 0,
+                complexity: None,
             }
         })
         .collect()
