@@ -35,6 +35,7 @@ mod history_scope;
 mod hook_convert;
 mod icon;
 mod inbox;
+mod kept_views;
 mod label_curate;
 mod labels_page;
 mod local_review;

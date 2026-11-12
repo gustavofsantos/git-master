@@ -46,7 +46,7 @@ impl StatusView {
     /// Opens the folder at `path` in a window of its own (D234 (2)), or says why it cannot.
     pub(crate) fn open_in_new_window(&mut self, path: &str, cx: &mut Context<Self>) {
         if let Err(error) = spawn_window(path) {
-            self.notify_user(&format!("Could not open the worktree: {error}"), cx);
+            self.notify_user(&format!("Could not open a new window: {error}"), cx);
         }
     }
 }

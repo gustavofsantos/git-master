@@ -562,6 +562,10 @@ pub struct Switched {
     pub root: String,
     /// Whether the previous repository had the same root.
     pub same_root: bool,
+    /// The root the window showed before, when it is a different one, with the path
+    /// of the file selected in its Working Copy (D234 (3)). `None` for the first
+    /// repository and for a reopened root.
+    pub left: Option<(String, Option<String>)>,
 }
 
 /// The two sides of the selected file, ready to show. `None` means the side
@@ -705,13 +709,16 @@ impl Model {
                 if self.pending_open == Some(id) {
                     self.pending_open = None;
                     self.floor = Some(id);
-                    let same_root = self
-                        .status
-                        .as_ref()
-                        .is_some_and(|old| old.root == status.root);
+                    // Captured before the reset clears the selection.
+                    let old_root = self.status.as_ref().map(|old| old.root.clone());
+                    let same_root = old_root.as_deref() == Some(status.root.as_str());
+                    let left = old_root
+                        .filter(|_| !same_root)
+                        .map(|root| (root, self.selected.clone()));
                     self.switched = Some(Switched {
                         root: status.root.clone(),
                         same_root,
+                        left,
                     });
                     self.reset_for_repo();
                 }
@@ -1904,6 +1911,16 @@ impl Model {
         }
     }
 
+    /// Selects the file at `path`, when the status lists it. Returns whether it did.
+    pub fn select_path(&mut self, path: &str) -> bool {
+        if self.entries().iter().any(|entry| entry.path == path) {
+            self.choose(path.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+
     /// Moves the selection to the next (or previous) file. Returns whether the
     /// selected file changed.
     pub fn select_file_step(&mut self, down: bool) -> bool {
@@ -2461,9 +2478,57 @@ mod tests {
             Some(Switched {
                 root: "/b".into(),
                 same_root: false,
+                left: Some(("/r".into(), Some("a".into()))),
             })
         );
         assert_eq!(model.take_switched(), None);
+    }
+
+    #[test]
+    fn the_first_repository_has_no_root_left_behind() {
+        let mut model = Model::default();
+        model.request_open(OperationId(20));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(20),
+            status: status_at("/b", &["x"]),
+        });
+        assert_eq!(model.take_switched().map(|s| s.left), Some(None));
+    }
+
+    #[test]
+    fn leaving_a_root_without_a_selection_keeps_no_path() {
+        let mut model = Model::default();
+        let _ = model.apply(loaded(&["a"]));
+        model.request_open(OperationId(20));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(20),
+            status: status_at("/b", &["x"]),
+        });
+        assert_eq!(
+            model.take_switched().map(|s| s.left),
+            Some(Some(("/r".into(), None)))
+        );
+    }
+
+    #[test]
+    fn reopening_the_same_root_leaves_nothing_behind() {
+        let mut model = busy();
+        model.request_open(OperationId(20));
+        let _ = model.apply(Event::StatusLoaded {
+            id: OperationId(20),
+            status: status_at("/r", &["a"]),
+        });
+        assert_eq!(model.take_switched().map(|s| s.left), Some(None));
+    }
+
+    #[test]
+    fn select_path_selects_a_listed_file_only() {
+        let mut model = Model::default();
+        let _ = model.apply(loaded(&["a", "dir/b"]));
+        assert!(model.select_path("dir/b"));
+        assert_eq!(model.selected_path(), Some("dir/b"));
+        assert!(!model.select_path("gone"));
+        assert_eq!(model.selected_path(), Some("dir/b"));
     }
 
     #[test]

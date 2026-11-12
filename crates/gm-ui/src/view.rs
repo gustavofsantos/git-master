@@ -3,7 +3,7 @@
 //! the engine and renders the model; it never waits for git. Every action the
 //! window runs goes through `run_action`, which checks the action registry.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +37,7 @@ use crate::diff_rows::{Layout, gone_from_disk};
 use crate::file_discard::DiscardDialog;
 use crate::hook_convert::{self, CONVERT_TITLE};
 use crate::icon;
+use crate::kept_views::{KeptView, KeptViews};
 use crate::memory_dialogs::MemoryDialog;
 use crate::merged_branches::MergedDialog;
 use crate::message_dialog::MessageDialog;
@@ -141,6 +142,8 @@ pub struct StatusView {
     pub(crate) log_open: bool,
     pub(crate) log_scroll: ScrollHandle,
     pub(crate) model: Model,
+    /// The view of each repository root the window left, in memory only (D234 (3)).
+    pub(crate) kept_views: KeptViews,
     pub(crate) list_focus: FocusHandle,
     /// The Code page's focus: a click in the page holds it, so the window's keys reach the app.
     pub(crate) code_focus: FocusHandle,
@@ -494,6 +497,7 @@ impl StatusView {
             log_open: false,
             log_scroll: ScrollHandle::new(),
             model,
+            kept_views: KeptViews::default(),
             list_focus,
             code_focus,
             scroll: UniformListScrollHandle::new(),
@@ -752,7 +756,7 @@ impl StatusView {
         }
         if let Some(switched) = self.model.take_switched() {
             self.welcome = None;
-            self.on_switched(switched, cx);
+            self.on_switched(switched, window, cx);
         }
         if let Some(startup) = failed_start {
             self.on_start_failed(startup, cx);
@@ -1179,16 +1183,31 @@ impl StatusView {
     }
 
     /// A successful open replaced the repository: the view state of the old
-    /// one goes, and the new root joins the recent list.
-    fn on_switched(&mut self, switched: Switched, cx: &mut Context<Self>) {
+    /// one goes, and the new root joins the recent list. The view of the root left is
+    /// kept, and the view kept for the root opened comes back (D234 (3)).
+    fn on_switched(&mut self, switched: Switched, window: &mut Window, cx: &mut Context<Self>) {
         // The comments of the repository left are gone with the model's reset.
         self.sync_review_comments(cx);
         self.model.commit_stack.close();
         self.model.stash_stack.close();
         self.model.reflog_stack.close();
-        if !switched.same_root {
-            self.composer.update(cx, |composer, cx| composer.clear(cx));
+        // Read before the composer is cleared. A folder that is gone is not kept (D234 (4)).
+        if let Some((left_root, selected_path)) = switched.left.clone()
+            && Path::new(&left_root).is_dir()
+        {
+            let view = KeptView {
+                screen: self.screen,
+                selected_path,
+                commit_draft: self.composer.read(cx).text(cx),
+            };
+            self.kept_views.leave(left_root, view);
         }
+        let kept = if switched.same_root {
+            None
+        } else {
+            self.composer.update(cx, |composer, cx| composer.clear(cx));
+            self.kept_views.take(&switched.root)
+        };
         self.show_diffs(None, None, cx);
         self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         self.model.branches.clear();
@@ -1200,14 +1219,18 @@ impl StatusView {
         self.request_branch_list();
         self.request_hook_sections();
         self.request_workflow_list();
-        if self.screen == Screen::History {
-            self.refresh_history();
-        }
-        if self.screen == Screen::Code {
-            self.show_code(cx);
-        }
-        if self.screen == Screen::Health {
-            self.request_health();
+        if let Some(view) = kept {
+            self.restore_view(view, window, cx);
+        } else {
+            if self.screen == Screen::History {
+                self.refresh_history();
+            }
+            if self.screen == Screen::Code {
+                self.show_code(cx);
+            }
+            if self.screen == Screen::Health {
+                self.request_health();
+            }
         }
         // The boxes of the search and the health filter belong to the repository left behind.
         for area in [
@@ -1218,6 +1241,41 @@ impl StatusView {
             area.update(cx, |area, cx| area.set_text("", cx));
         }
         self.remember(PathBuf::from(switched.root), cx);
+    }
+
+    /// Brings back the view kept for the root just opened: its page, the commit message
+    /// draft, and the selected file when the status still lists it. The switch happens
+    /// when the status arrives, so the status is already the new one here; a file it
+    /// does not list stays unselected.
+    fn restore_view(&mut self, view: KeptView, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_screen(view.screen, window, cx);
+        self.composer
+            .update(cx, |composer, cx| composer.set_text(&view.commit_draft, cx));
+        if let Some(path) = view.selected_path
+            && self.model.select_path(&path)
+        {
+            self.load_selected(cx);
+        }
+    }
+
+    /// Shows `screen` with the same method its sidebar entry or palette action uses, so
+    /// the page loads its data.
+    fn show_screen(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) {
+        match screen {
+            Screen::Inbox => self.show_inbox(cx),
+            Screen::History => self.show_history(cx),
+            Screen::Workflows => self.show_workflows(cx),
+            Screen::Code => self.show_code(cx),
+            Screen::Search => self.show_search(window, cx),
+            Screen::Health => self.show_code_health(cx),
+            Screen::Stashes => self.show_stashes(cx),
+            Screen::Reflog => self.show_reflog(cx),
+            Screen::Threads => self.show_threads(window, cx),
+            Screen::Labels => self.show_labels(window, cx),
+            Screen::LocalReview => self.show_local_review(cx),
+            // The resolver belongs to the repository left, so its page is not brought back.
+            Screen::WorkingCopy | Screen::Conflicts => self.show_working_copy(cx),
+        }
     }
 
     /// Opens the history page and asks for the commits of HEAD. The Stashes

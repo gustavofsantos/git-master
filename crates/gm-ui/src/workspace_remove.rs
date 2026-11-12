@@ -5,6 +5,8 @@
 //! means. The window side is the `impl StatusView` at the bottom. docs/guide/workspaces.md,
 //! "Remove a workspace".
 
+use std::path::Path;
+
 use gm_schema::{
     Actor, CommandKind, OperationId, OperationState, RemovalBlocker, RemovalBlockerKind,
 };
@@ -296,11 +298,28 @@ impl StatusView {
     ) {
         match outcome {
             Ok(path) => {
-                // The window's own repository went with its folder: the window closes, and the
-                // last window quits the app (D186 (3)). Another workspace keeps the window open.
-                let here = self.model.status().map(|status| status.root.as_str());
-                if workspace_list::after_removal(&path, here) == AfterRemoval::CloseWindow {
-                    window.remove_window();
+                // The window's own repository went with its folder: the window goes back to the root
+                // it showed before, when that folder is still there (D234 (4)), and otherwise closes;
+                // the last window quits the app (D186 (3)). Another workspace keeps the window open.
+                let here = self.model.status().map(|status| status.root.clone());
+                if workspace_list::after_removal(&path, here.as_deref())
+                    == AfterRemoval::CloseWindow
+                {
+                    let previous = here
+                        .as_deref()
+                        .and_then(|root| {
+                            self.kept_views.previous_root(root).map(|prev| (root, prev))
+                        })
+                        .filter(|(_, prev)| Path::new(prev).is_dir());
+                    let Some((removed, previous)) = previous else {
+                        window.remove_window();
+                        return;
+                    };
+                    self.kept_views.forget(removed);
+                    self.workspace_removal_dialog = None;
+                    self.request_workspaces();
+                    self.open_worktree(&previous, cx);
+                    cx.notify();
                     return;
                 }
                 self.workspace_removal_dialog = None;
