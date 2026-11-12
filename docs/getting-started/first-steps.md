@@ -38,8 +38,6 @@ To open a repository from the recent list, click its entry.
 
 GitMaster shows one repository at a time. Choosing another repository in a window replaces the one shown there. Opening a worktree, a workspace or a submodule switches the same window to it, and switching back brings back the page, the selected file and the commit message you left there. **Open in New Window** still opens one in a window of its own. See [Worktrees](../guide/worktrees.md#switch-to-a-worktree).
 
-> **Planned.** Switching in place and keeping the view of each repository are not available yet: a worktree, a workspace or a submodule opens in a new window.
-
 ## The window
 
 The window has four areas: the top bar across the top, the sidebar on the left, the main area in the centre, and the status bar at the bottom.

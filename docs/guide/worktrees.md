@@ -60,8 +60,6 @@ Git refuses to check out a branch that a worktree already uses. The dialog shows
 
 ## Switch to a worktree
 
-> **Planned.** Switching in place is not available yet: a worktree opens in a new window, and the view of each worktree is not kept.
-
 1. Double-click a worktree row. The window switches to that worktree, and the **here** badge moves to its row.
 2. Double-click the main checkout's row, or any other row, to switch again.
 

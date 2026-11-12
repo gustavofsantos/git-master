@@ -908,7 +908,7 @@ Several repositories in one workspace: a superproject whose submodules are linke
   - **SW3a, read tools (D181) (done 2026-11-06; checked through the real MCP server over stdio on a two-member workspace: `workspace_status` fields, and `provenance` on a member line found the member commit and the thread with `blob_match` and `observed_commit`):** review reverted an unasked change that had taken status refreshes out of the command log. Gaps: `new_commits` is capped at 200. `workspace_status`; `provenance` on a member's path (blame in the member, threads from the workspace). Docs: `reference/mcp-tools.md`, "Tools in a workspace".
   - **SW3b, review across members (D182) (done 2026-11-06; checked in a window and over MCP: a comment from the Code page on a member's line, then `review_comment_resolve` measured the before and after text; the refs are in the workspace and none in the member clone; one member file adds about 9 ms to a snapshot):** gaps: `hash-object` applies the workspace's attributes and filters, not the member's own `.gitattributes`; `Ctrl+Shift+M` did not open the composer after a click on a line number in that run (the **Comment on line** button did), not investigated. a comment on a member's file snapshots that one file into the workspace's object store, so the before and after text and the measured change work as for the workspace's own files.
 
-## Slice 7x: one window switches between worktrees and workspaces (planned 2026-11-12; D234)
+## Slice 7x: one window switches between worktrees and workspaces (done 2026-11-12, with gaps; D234)
 
 Requested by the author on 2026-11-12. Behaviour in `docs/guide/worktrees.md` ("Switch to a worktree"), `docs/guide/workspaces.md` and `docs/getting-started/first-steps.md`, marked `Planned`.
 
@@ -916,6 +916,10 @@ Requested by the author on 2026-11-12. Behaviour in `docs/guide/worktrees.md` ("
 2. **SW2, kept views.** Per root, in memory: screen, selected Working Copy path, commit message draft; restored on return. Removing the shown workspace switches back to the previous root.
 
 **Done when:** the palette and the sidebar switch the window, switching back restores the three kept items, `make check` passes.
+
+Done: SW1 (`open_window.rs`, action registry, row menus) and SW2 (`kept_views.rs`, `Model::apply` captures the root left, `StatusView::on_switched` keeps and restores, `workspace_remove.rs` goes back to the previous root). Checked by unit tests of the models and the registry, `make lint` and `cargo test -p gm-ui`.
+
+Known gaps: nothing was seen in a window and no smoke scenario was written or run; **Open Worktree in New Window** is refused on the worktree the window shows (same rule as the switch; for the author to confirm); when the removed workspace's window cannot switch back because an open or a checkout is in flight, it stays on the removed root and says why, with no retry; kept views are keyed by the root text Git resolves, not a normalised path; the view of the root shown when the window closes is not kept (memory only, by design).
 
 ## Slice 7u: workspace UI (done 2026-11-06, with gaps; D183, D185)
 

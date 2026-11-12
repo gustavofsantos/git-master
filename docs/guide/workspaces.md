@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: partial
+status: implemented
 order: 55
 ---
 
@@ -52,8 +52,6 @@ GitMaster suggests the folder `<root>/<name>`. The root is `~/workspaces` unless
 Every member is checked before anything is created. When one cannot be added, for example because its branch is checked out in another worktree, the dialog says which and where, offers **Go to that worktree**, and creates nothing. The window switches to the new workspace.
 
 ## Work in a workspace
-
-> **Planned.** Switching in place is not available yet: a workspace and its members open in new windows, and the view of each is not kept.
 
 Opening a workspace switches the window to it, like a worktree; switching back to where you were brings back its page, selected file and commit message (see [Worktrees](worktrees.md#switch-to-a-worktree)). **Open in New Window** opens it in a window of its own instead. The Working Copy shows the workspace repository, with one row per member that says its branch and whether it has changes or commits the workspace does not point to yet. Open a member to switch to its own Working Copy, history and branches; the workspace's row in the **Workspaces** section switches back.
 
