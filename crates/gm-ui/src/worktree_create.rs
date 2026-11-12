@@ -696,7 +696,7 @@ impl StatusView {
             .map(|row| row.entry.path.clone())
     }
 
-    /// Closes the dialog and opens `path` in its own window.
+    /// Closes the dialog and switches this window to `path`.
     fn open_from_dialog(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.close_worktree_dialog(window, cx);
         self.open_worktree(path, cx);

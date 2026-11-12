@@ -1566,6 +1566,7 @@ impl StatusView {
                 self.open_worktree_dialog(branch.as_deref(), window, cx);
             }
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
+            Ok(Effect::OpenInNewWindow(path)) => self.open_in_new_window(&path, cx),
             Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
             Ok(Effect::OpenWorkspaceDialog) => self.open_workspace_dialog(window, cx),
             Ok(Effect::OpenRemoveWorkspaceDialog(path)) => {

@@ -877,7 +877,7 @@ impl StatusView {
         cx.notify();
     }
 
-    /// Closes the dialog and opens `path` in its own window: **Go to that worktree**.
+    /// Closes the dialog and switches this window to `path`: **Go to that worktree**.
     fn open_from_workspace_dialog(
         &mut self,
         path: &str,

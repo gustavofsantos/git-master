@@ -227,12 +227,12 @@ fn file_name(path: &str) -> &str {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Notice {
     pub(crate) text: String,
-    /// The folder of the worktree the change went to, for **Open Worktree**.
+    /// The folder of the worktree the change went to, for **Switch to Worktree**.
     pub(crate) open_worktree: Option<String>,
 }
 
 /// The status bar line for a finished move. `worktree` is the name the sidebar
-/// shows for a worktree target; the folder is what **Open Worktree** opens.
+/// shows for a worktree target; the folder is what **Switch to Worktree** opens.
 #[must_use]
 pub(crate) fn moved_notice(
     outcome: &MoveOutcome,
@@ -1246,7 +1246,7 @@ impl StatusView {
         drag_status(hovered.as_ref(), dragging)
     }
 
-    /// **Open Worktree** on the notice of a finished move, when the move has a worktree.
+    /// **Switch to Worktree** on the notice of a finished move, when the move has a worktree.
     pub(crate) fn open_worktree_offer(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
         let path = self.model.notice_open.clone()?;
         Some(
@@ -1258,7 +1258,7 @@ impl StatusView {
                 .cursor_pointer()
                 .text_color(theme::accent())
                 .font_weight(FontWeight::MEDIUM)
-                .child("Open Worktree")
+                .child("Switch to Worktree")
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {

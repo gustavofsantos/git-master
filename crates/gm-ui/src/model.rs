@@ -70,7 +70,7 @@ pub struct Model {
     pub notice: Option<String>,
     /// The icon drawn before the notice, if it has one.
     pub notice_icon: Option<Icon>,
-    /// The folder the notice offers to open, as **Open Worktree** does (D109).
+    /// The folder the notice offers to open, as **Switch to Worktree** does (D109).
     pub notice_open: Option<String>,
     notice_generation: u64,
     pub loading: bool,
@@ -789,7 +789,7 @@ impl Model {
                 let _ = self.move_file.answered(id, preview);
                 None
             }
-            // A finished move is the status bar's notice, with its Open Worktree offer.
+            // A finished move is the status bar's notice, with its Switch to Worktree offer.
             Event::ChangesMoved { id, moved } => {
                 if let Some(notice) = self.move_file.moved(id, &moved) {
                     self.set_notice(notice.text);

@@ -1432,7 +1432,7 @@ mod tests {
             Err("The main checkout cannot be removed.")
         );
         assert_eq!(
-            find(&top, "Open Worktree").state,
+            find(&top, "Switch to Worktree").state,
             Ok(()),
             "the main checkout can be opened"
         );
@@ -1443,7 +1443,7 @@ mod tests {
         let entries: [StatusEntry; 0] = [];
         let top = build(Stage::Actions, "", &ctx_with(&entries, ""), &[]);
         for label in [
-            "Open Worktree",
+            "Switch to Worktree",
             "Reveal Worktree in File Manager",
             "Copy Worktree Path",
             "Remove Worktree",

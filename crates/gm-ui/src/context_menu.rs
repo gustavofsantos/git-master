@@ -215,8 +215,9 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         .any(|entry| entry.path == path && entry.submodule.is_some())
     {
         items.insert(0, item(Action::OpenSubmodule, 0));
+        items.insert(1, item(Action::OpenSubmoduleNewWindow, 0));
         // A member of a workspace leads with its branch, which Check Out Branch puts back (D183).
-        items.insert(1, item(Action::CheckOutMemberBranch, 0));
+        items.insert(2, item(Action::CheckOutMemberBranch, 0));
     }
     offered_items(items, ctx)
 }
@@ -385,6 +386,7 @@ fn worktree_branch_items(path: &str, name: &str, ctx: &ActionContext<'_>) -> Vec
     offered_items(
         vec![
             Item::new(Action::OpenWorktree, worktree.clone(), 0, ctx),
+            Item::new(Action::OpenWorktreeNewWindow, worktree.clone(), 0, ctx),
             Item::new(Action::RevealWorktree, worktree.clone(), 1, ctx),
             Item::new(Action::CopyWorktreePath, worktree.clone(), 1, ctx),
             Item::new(Action::NewBranch, branch.clone(), 2, ctx),
@@ -413,6 +415,7 @@ pub(crate) fn worktree_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
     };
     let mut items = vec![
         item(Action::OpenWorktree, 0),
+        item(Action::OpenWorktreeNewWindow, 0),
         item(Action::RevealWorktree, 1),
         item(Action::CopyWorktreePath, 1),
         item(lock, 2),
@@ -430,6 +433,7 @@ pub(crate) fn workspace_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> 
     let item = |action, group| Item::new(action, target.clone(), group, ctx);
     vec![
         item(Action::OpenWorkspace, 0),
+        item(Action::OpenWorkspaceNewWindow, 0),
         item(Action::RevealWorkspace, 1),
         item(Action::RemoveWorkspace, 2),
     ]
@@ -1066,7 +1070,8 @@ mod tests {
         assert_eq!(
             titles(&branch_items("feature", &context)),
             vec![
-                "Open Worktree",
+                "Switch to Worktree",
+                "Open Worktree in New Window",
                 "Reveal Worktree in File Manager",
                 "Copy Worktree Path",
                 "New Branch…",
@@ -1116,7 +1121,8 @@ mod tests {
         assert_eq!(
             titles(&worktree_items("/r-live", &context)),
             vec![
-                "Open Worktree",
+                "Switch to Worktree",
+                "Open Worktree in New Window",
                 "Reveal Worktree in File Manager",
                 "Copy Worktree Path",
                 "Lock Worktree",
@@ -1126,7 +1132,8 @@ mod tests {
         assert_eq!(
             titles(&worktree_items("/r-locked", &context)),
             vec![
-                "Open Worktree",
+                "Switch to Worktree",
+                "Open Worktree in New Window",
                 "Reveal Worktree in File Manager",
                 "Copy Worktree Path",
                 "Unlock Worktree",
@@ -1498,6 +1505,7 @@ mod tests {
             actions,
             [
                 Action::OpenWorkspace,
+                Action::OpenWorkspaceNewWindow,
                 Action::RevealWorkspace,
                 Action::RemoveWorkspace
             ]
@@ -1521,8 +1529,9 @@ mod tests {
         let entries = [submodule];
         let items = file_items("libs/x", &ctx(&entries));
         assert_eq!(items[0].action, Action::OpenSubmodule);
-        assert_eq!(items[1].action, Action::CheckOutMemberBranch);
+        assert_eq!(items[1].action, Action::OpenSubmoduleNewWindow);
+        assert_eq!(items[2].action, Action::CheckOutMemberBranch);
         // Nothing has read the member yet, so the item says so.
-        assert_eq!(items[1].state, Err("The submodule is still being read."));
+        assert_eq!(items[2].state, Err("The submodule is still being read."));
     }
 }

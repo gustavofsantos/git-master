@@ -1,8 +1,12 @@
-//! Opens a worktree in a window of its own (slice 1c, W4; D31). One repository
-//! per window (Q11): the window is another process of this program, started
-//! with the worktree's folder, so it runs the same open as a path on the command
-//! line. The window itself does not wait for it.
+//! Opens a worktree, a workspace or a submodule (D234). **Switch to** moves this
+//! window to its folder in place: one engine per window, so the switch dispatches
+//! `OpenRepo` (see `project_menu.rs`), and the window keeps the view of each root it
+//! leaves. **Open in New Window** keeps the earlier behaviour (D31, Q11, W4): the
+//! window is another process of this program, started with the folder, so it runs
+//! the same open as a path on the command line. The window itself does not wait
+//! for it.
 
+use std::path::Path;
 use std::process::Stdio;
 
 use gpui::Context;
@@ -26,8 +30,21 @@ pub(crate) fn spawn_window(path: &str) -> std::io::Result<()> {
 }
 
 impl StatusView {
-    /// Opens the worktree at `path` in its own window, or says why it cannot.
+    /// Switches this window to the worktree, workspace or submodule folder at `path` (D234 (1)).
+    /// The root already shown does nothing; the guards of the project menu apply otherwise.
     pub(crate) fn open_worktree(&mut self, path: &str, cx: &mut Context<Self>) {
+        let shown = self
+            .model
+            .status()
+            .is_some_and(|status| status.root.trim_end_matches('/') == path.trim_end_matches('/'));
+        if shown {
+            return;
+        }
+        self.open_repo(Path::new(path), cx);
+    }
+
+    /// Opens the folder at `path` in a window of its own (D234 (2)), or says why it cannot.
+    pub(crate) fn open_in_new_window(&mut self, path: &str, cx: &mut Context<Self>) {
         if let Err(error) = spawn_window(path) {
             self.notify_user(&format!("Could not open the worktree: {error}"), cx);
         }

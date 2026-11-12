@@ -172,8 +172,10 @@ pub enum Effect {
     OpenWorktreeDialog {
         branch: Option<String>,
     },
-    /// Opens the worktree or workspace folder at this path in its own window.
+    /// Switches this window to the worktree, workspace or submodule folder at this path (D234 (1)).
     OpenWorktree(String),
+    /// Opens the worktree, workspace or submodule folder at this path in a window of its own (D234 (2)).
+    OpenInNewWindow(String),
     /// Opens the New Workspace dialog (D183 (3)).
     OpenWorkspaceDialog,
     /// Opens the Remove Workspace dialog for the workspace at this path; the dialog inspects it
@@ -522,7 +524,7 @@ pub struct MemoryRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 125] = [
+const SPECS: [Spec; 128] = [
     spec(
         "file.stage",
         "Stage File",
@@ -820,7 +822,7 @@ const SPECS: [Spec; 125] = [
     spec("remote.pull", "Pull", None, ArgKind::None, Category::Remote),
     spec(
         "worktree.open",
-        "Open Worktree",
+        "Switch to Worktree",
         None,
         ArgKind::Worktree,
         Category::Worktrees,
@@ -1261,7 +1263,7 @@ const SPECS: [Spec; 125] = [
     ),
     spec(
         "workspace.open",
-        "Open Workspace",
+        "Switch to Workspace",
         None,
         ArgKind::Workspace,
         Category::Workspaces,
@@ -1388,6 +1390,27 @@ const SPECS: [Spec; 125] = [
     spec(
         "folder.unstage",
         "Unstage Folder",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
+    spec(
+        "worktree.open_new_window",
+        "Open Worktree in New Window",
+        None,
+        ArgKind::Worktree,
+        Category::Worktrees,
+    ),
+    spec(
+        "workspace.open_new_window",
+        "Open Workspace in New Window",
+        None,
+        ArgKind::Workspace,
+        Category::Workspaces,
+    ),
+    spec(
+        "submodule.open_new_window",
+        "Open in New Window",
         None,
         ArgKind::File,
         Category::WorkingCopy,
@@ -1522,11 +1545,11 @@ pub enum Action {
     LabelDelete,
     /// Opens the provenance panel for the lines picked in the Code viewer (P4, D144).
     CodeProvenance,
-    /// Opens a checked-out submodule's folder in its own window (D175).
+    /// Switches this window to a checked-out submodule's folder (D175, D234).
     OpenSubmodule,
     /// Opens the New Workspace dialog (D183).
     NewWorkspace,
-    /// Opens a workspace's folder in its own window (D183).
+    /// Switches this window to a workspace's folder (D183, D234).
     OpenWorkspace,
     /// Opens a workspace's folder in the file manager (D183).
     RevealWorkspace,
@@ -1564,6 +1587,12 @@ pub enum Action {
     StageFolder,
     /// Unstages every file of a folder of the Changes list, from its tri-state box (slice 2).
     UnstageFolder,
+    /// Opens the worktree's folder in a window of its own (D234 (2)).
+    OpenWorktreeNewWindow,
+    /// Opens the workspace's folder in a window of its own (D234 (2)).
+    OpenWorkspaceNewWindow,
+    /// Opens the submodule's folder in a window of its own (D234 (2)).
+    OpenSubmoduleNewWindow,
 }
 
 /// The shortcut as the window shows it: the glyphs on macOS; elsewhere words,
@@ -1951,13 +1980,15 @@ fn worktree_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
         Action::RemoveWorktree if entry.is_main => Err("The main checkout cannot be removed."),
         Action::LockWorktree if entry.locked.is_some() => Err("It is already locked."),
         Action::UnlockWorktree if entry.locked.is_none() => Err("It is not locked."),
-        Action::OpenWorktree | Action::RevealWorktree if missing => {
+        Action::OpenWorktree | Action::OpenWorktreeNewWindow | Action::RevealWorktree
+            if missing =>
+        {
             Err("This worktree's folder is missing.")
         }
         Action::RemoveWorktree if missing => {
             Err("Its folder is missing. Prune the worktree instead.")
         }
-        Action::OpenWorktree | Action::RemoveWorktree if here => {
+        Action::OpenWorktree | Action::OpenWorktreeNewWindow | Action::RemoveWorktree if here => {
             Err("This window is open in this worktree.")
         }
         _ => Ok(()),
@@ -2009,7 +2040,7 @@ fn workspace_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), 
         .root
         .is_some_and(|root| root.trim_end_matches('/') == row.path.trim_end_matches('/'));
     match action {
-        Action::OpenWorkspace if here => Err(IN_THIS_WINDOW),
+        Action::OpenWorkspace | Action::OpenWorkspaceNewWindow if here => Err(IN_THIS_WINDOW),
         _ => Ok(()),
     }
 }
@@ -2039,6 +2070,9 @@ fn workspace_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
     Ok(match (action, args) {
         (Action::NewWorkspace, _) => Effect::OpenWorkspaceDialog,
         (Action::OpenWorkspace, Args::Workspace(path)) => Effect::OpenWorktree(path.clone()),
+        (Action::OpenWorkspaceNewWindow, Args::Workspace(path)) => {
+            Effect::OpenInNewWindow(path.clone())
+        }
         (Action::RevealWorkspace, Args::Workspace(path)) => Effect::Reveal(PathBuf::from(path)),
         (Action::RemoveWorkspace, Args::Workspace(path)) => {
             Effect::OpenRemoveWorkspaceDialog(path.clone())
@@ -2059,7 +2093,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 125] = [
+    pub const ALL: [Action; 128] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -2185,6 +2219,9 @@ impl Action {
         Action::UndoLastOperation,
         Action::StageFolder,
         Action::UnstageFolder,
+        Action::OpenWorktreeNewWindow,
+        Action::OpenWorkspaceNewWindow,
+        Action::OpenSubmoduleNewWindow,
     ];
 
     #[must_use]
@@ -2315,11 +2352,34 @@ impl Action {
         )
     }
 
+    /// Whether `open_effect` plans the action: a worktree or submodule folder, in this window or a
+    /// new one (D234).
+    fn is_open_effect(self) -> bool {
+        matches!(
+            self,
+            Action::OpenWorktree
+                | Action::OpenWorktreeNewWindow
+                | Action::OpenSubmodule
+                | Action::OpenSubmoduleNewWindow
+        )
+    }
+
+    /// Whether the action opens its folder in a window of its own (D234 (2)).
+    fn is_new_window(self) -> bool {
+        matches!(
+            self,
+            Action::OpenWorktreeNewWindow
+                | Action::OpenWorkspaceNewWindow
+                | Action::OpenSubmoduleNewWindow
+        )
+    }
+
     /// Whether the rule of `worktree_rule` decides the action.
     fn is_worktree_rule(self) -> bool {
         matches!(
             self,
             Action::OpenWorktree
+                | Action::OpenWorktreeNewWindow
                 | Action::RevealWorktree
                 | Action::CopyWorktreePath
                 | Action::RemoveWorktree
@@ -2334,6 +2394,7 @@ impl Action {
             self,
             Action::NewWorkspace
                 | Action::OpenWorkspace
+                | Action::OpenWorkspaceNewWindow
                 | Action::RevealWorkspace
                 | Action::RemoveWorkspace
                 | Action::CheckOutMemberBranch
@@ -2345,6 +2406,7 @@ impl Action {
         matches!(
             self,
             Action::OpenWorkspace
+                | Action::OpenWorkspaceNewWindow
                 | Action::RevealWorkspace
                 | Action::RemoveWorkspace
                 | Action::CheckOutMemberBranch
@@ -2560,7 +2622,9 @@ impl Action {
             }
             Action::RevealFile => reveal_rule(args, ctx),
             Action::ViewFile => view_file_rule(args, ctx),
-            Action::OpenSubmodule => open_submodule_rule(args, ctx),
+            Action::OpenSubmodule | Action::OpenSubmoduleNewWindow => {
+                open_submodule_rule(args, ctx)
+            }
             _ if self.is_workspace_rule() => workspace_rule(self, args, ctx),
             Action::MoveFileToBranch | Action::MoveFileToWorktree => move_rule(self, args, ctx),
             Action::DiscardFile | Action::DiscardAllChanges => discard_rule(self, args, ctx),
@@ -2655,7 +2719,7 @@ impl Action {
                 branch: Some(name.clone()),
             },
             (Action::NewWorktree, _) => Effect::OpenWorktreeDialog { branch: None },
-            (Action::OpenWorktree, Args::Worktree(path)) => Effect::OpenWorktree(path.clone()),
+            (action, _) if action.is_open_effect() => open_effect(action, args, ctx)?,
             (Action::RevealWorktree, Args::Worktree(path)) => Effect::Reveal(PathBuf::from(path)),
             (Action::RemoveWorktree, Args::Worktree(path)) => {
                 Effect::OpenRemoveDialog(path.clone())
@@ -2669,7 +2733,6 @@ impl Action {
                 stash_effect(self, args)?
             }
             (Action::CodeProvenance, _) => provenance_effect(ctx)?,
-            (Action::OpenSubmodule, _) => open_submodule_effect(args, ctx)?,
             (action, _) if action.is_workspace_effect() => workspace_effect(action, args)?,
             (Action::CommentOnSelection, _) => comment_effect(ctx)?,
             (
@@ -2960,18 +3023,27 @@ fn open_submodule_rule(args: &Args, ctx: &Context<'_>) -> Result<(), Reason> {
     }
 }
 
-/// Opens the submodule's folder, `<repository root>/<path>`, in its own window (D175).
-fn open_submodule_effect(args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
-    let Args::File(path) = args else {
-        return Err("No target for this action");
+/// Opens a worktree or submodule folder: this window switches to it, or a window of its own
+/// opens on it (D175, D183, D234). A submodule's folder is `<repository root>/<path>`.
+fn open_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Effect, Reason> {
+    let folder = match (action, args) {
+        (Action::OpenWorktree | Action::OpenWorktreeNewWindow, Args::Worktree(path)) => {
+            path.clone()
+        }
+        (Action::OpenSubmodule | Action::OpenSubmoduleNewWindow, Args::File(path)) => {
+            let root = ctx.root.ok_or("No repository is open.")?;
+            PathBuf::from(root)
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
+        }
+        _ => return Err("No target for this action"),
     };
-    let root = ctx.root.ok_or("No repository is open.")?;
-    Ok(Effect::OpenWorktree(
-        PathBuf::from(root)
-            .join(path)
-            .to_string_lossy()
-            .into_owned(),
-    ))
+    Ok(if action.is_new_window() {
+        Effect::OpenInNewWindow(folder)
+    } else {
+        Effect::OpenWorktree(folder)
+    })
 }
 
 /// View File: the reveal rule, and a submodule has no file to view (D175).
@@ -3977,6 +4049,7 @@ mod tests {
     fn the_worktree_actions_that_act_on_a_listed_worktree_take_a_worktree() {
         let on_a_worktree = [
             Action::OpenWorktree,
+            Action::OpenWorktreeNewWindow,
             Action::RevealWorktree,
             Action::CopyWorktreePath,
             Action::RemoveWorktree,
@@ -4542,6 +4615,23 @@ mod tests {
         assert_eq!(
             Action::OpenWorktree.enabled(&target, &own),
             Err("This window is open in this worktree.")
+        );
+        assert_eq!(Action::OpenWorktree.spec().title, "Switch to Worktree");
+        assert_eq!(
+            Action::OpenWorktreeNewWindow.plan(&target, &context),
+            Ok(Effect::OpenInNewWindow("/r-feature".to_owned()))
+        );
+        assert_eq!(
+            Action::OpenWorktreeNewWindow.enabled(&target, &own),
+            Err("This window is open in this worktree.")
+        );
+        assert_eq!(
+            Action::OpenWorktreeNewWindow.id(),
+            "worktree.open_new_window"
+        );
+        assert_eq!(
+            Action::OpenWorktreeNewWindow.spec().title,
+            "Open Worktree in New Window"
         );
     }
 
@@ -7519,6 +7609,43 @@ mod tests {
     }
 
     #[test]
+    fn open_submodule_in_new_window_shares_the_rule_and_plans_a_new_window() {
+        let entries = [
+            submodule_row("libs/x"),
+            entry("a.rs", None, Some(Change::Modified)),
+        ];
+        let out = read_submodules("libs/x", true);
+        let closed = read_submodules("libs/x", false);
+        let args = Args::File("libs/x".into());
+        let context = with_submodules(&entries, &out);
+        assert_eq!(
+            Action::OpenSubmoduleNewWindow.enabled(&args, &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::OpenSubmoduleNewWindow.enabled(&args, &with_submodules(&entries, &closed)),
+            Err("This submodule is not checked out.")
+        );
+        assert_eq!(
+            Action::OpenSubmoduleNewWindow.enabled(&Args::File("a.rs".into()), &context),
+            Err("Only a submodule opens in its own window.")
+        );
+        assert_eq!(
+            Action::OpenSubmoduleNewWindow.plan(&args, &context),
+            Ok(Effect::OpenInNewWindow("/repo/libs/x".to_owned()))
+        );
+        assert_eq!(
+            Action::OpenSubmoduleNewWindow.id(),
+            "submodule.open_new_window"
+        );
+        assert_eq!(
+            Action::OpenSubmoduleNewWindow.spec().title,
+            "Open in New Window"
+        );
+        assert_eq!(Action::OpenSubmoduleNewWindow.spec().args, ArgKind::File);
+    }
+
+    #[test]
     fn a_submodule_row_refuses_discard_view_move_and_hunks() {
         let entries = [submodule_row("libs/x")];
         let out = read_submodules("libs/x", true);
@@ -7709,6 +7836,27 @@ mod tests {
         assert_eq!(
             Action::OpenWorkspace.plan(&other, &context),
             Ok(Effect::OpenWorktree("/w/billing".into()))
+        );
+        assert_eq!(Action::OpenWorkspace.spec().title, "Switch to Workspace");
+        assert_eq!(
+            Action::OpenWorkspaceNewWindow.enabled(&here, &context),
+            Err("Open in this window.")
+        );
+        assert_eq!(
+            Action::OpenWorkspaceNewWindow.enabled(&other, &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::OpenWorkspaceNewWindow.plan(&other, &context),
+            Ok(Effect::OpenInNewWindow("/w/billing".into()))
+        );
+        assert_eq!(
+            Action::OpenWorkspaceNewWindow.spec().title,
+            "Open Workspace in New Window"
+        );
+        assert_eq!(
+            Action::OpenWorkspaceNewWindow.spec().args,
+            ArgKind::Workspace
         );
         assert_eq!(
             Action::RevealWorkspace.plan(&other, &context),
