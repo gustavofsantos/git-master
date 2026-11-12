@@ -4,6 +4,7 @@
 -- The approval shows that name before anything is created.
 local M = {}
 
+---@type gitmaster.Meta
 M.meta = {
   name = "branch-from-ticket",
   description = "Create and check out a branch named from a ticket key",
@@ -12,6 +13,8 @@ M.meta = {
   inputs = { ticket = { type = "string", prompt = "Ticket key" } },
 }
 
+---@param ctx gitmaster.Ctx
+---@param input gitmaster.Input
 function M.execute(ctx, input)
   local r = ctx.exec({ "ticket-branch-name", input.inputs.ticket }, { timeout = "30s" })
   if ctx.approve("Create branch " .. r.text .. "?") then

@@ -4,12 +4,15 @@
 -- The prompt is in the argv; change it to suit your team's commit style.
 local M = {}
 
+---@type gitmaster.Meta
 M.meta = {
   name = "suggest-commit-message",
   description = "Suggest a commit message from the staged diff",
   trigger = { on = "manual" },
 }
 
+---@param ctx gitmaster.Ctx
+---@param input gitmaster.Input
 function M.execute(ctx, input)
   for _ = 1, 3 do
     local r = ctx.exec({ "llm-cli", "-p", "Write a conventional commit message for this diff. Reply with the message only, as plain text, without code fences." },

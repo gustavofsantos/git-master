@@ -12,7 +12,7 @@ use gm_core::command_log::CommandLog;
 use gm_core::watch::{Notice, Notices, WatchHandle};
 use gm_schema::{
     Actor, CommandKind, ConflictSite, DiffSide, Event, FeatureSet, FileDiff, HistoryScope,
-    OperationId, OperationState,
+    OperationId,
 };
 use gpui::{
     ClipboardItem, Context, Div, Entity, FocusHandle, KeyDownEvent, Render, ScrollHandle,
@@ -34,7 +34,6 @@ use crate::context_menu::ContextMenu;
 use crate::contexts_dialog::ContextsDialog;
 use crate::diff_pane::{DiffPane, DiffPaneEvent};
 use crate::diff_rows::{Layout, gone_from_disk};
-use crate::editor_theme;
 use crate::file_discard::DiscardDialog;
 use crate::hook_convert::{self, CONVERT_TITLE};
 use crate::icon;
@@ -77,11 +76,9 @@ use crate::title_bar;
 use crate::transform_run::{self, Field};
 use crate::welcome::{self, Startup, Welcome};
 use crate::window_chrome;
-use crate::workflow_editor;
 use crate::workflow_inputs::WorkflowInputsDialog;
 use crate::workflow_review::WorkflowReviewDialog;
 use crate::workflow_run::fill_for_message;
-use crate::workflows_page::is_conflict;
 use crate::workspace_create::WorkspaceDialog;
 use crate::workspace_remove::RemoveWorkspaceDialog;
 use crate::worktree_create::WorktreeDialog;
@@ -91,7 +88,6 @@ use crate::{
     CopyCurrentBranch, FocusNext, FocusPrev, OpenPalette, OpenQuickOpen, OpenSearch,
     RunWorkflowKey, StartPath, UndoLastOperation,
 };
-use gpui_component::input::InputState;
 
 /// The key context of the change list. Its keys work only while the list has
 /// focus, so typing into the message is never taken as a key.
@@ -240,13 +236,8 @@ pub struct StatusView {
     pub(crate) workflow_inputs_dialog: Option<WorkflowInputsDialog>,
     /// The "Run this version?" dialog, while the engine waits for a review of a script.
     pub(crate) workflow_review_dialog: Option<WorkflowReviewDialog>,
-    /// The editor of the Workflows page's Script tab; its text is the page's buffer.
-    pub(crate) workflow_source: Entity<InputState>,
-    /// The subscription to `workflow_source`'s changes; replaced with the editor.
-    pub(crate) workflow_source_sub: Subscription,
-    /// Set when the page's buffer is another document than the editor's: the editor is then
-    /// rebuilt on the next frame, so its undo history starts with the new file.
-    pub(crate) workflow_editor_stale: bool,
+    /// The Script tab of the Workflows page: the file's text on screen and its scroll (D233).
+    pub(crate) script_view: crate::shell_workflows::ScriptView,
     /// The Result pane of the conflict resolver; its text is the resolver's result (C3b).
     pub(crate) conflict_result: Entity<TextArea>,
     /// The delete-branch dialog, while it is open.
@@ -339,9 +330,7 @@ impl StatusView {
         // keys override the global ones for it.
         let start_dir = std::path::PathBuf::from(&start.path);
         let open = engine.dispatch(Actor::Human, CommandKind::OpenRepo { path: start.path });
-        if theme::follow(window.appearance()) {
-            editor_theme::apply(cx);
-        }
+        theme::follow(window.appearance());
         let list_focus = cx.focus_handle();
         list_focus.focus(window);
         let code_focus = cx.focus_handle();
@@ -381,8 +370,6 @@ impl StatusView {
         let diff_pane = cx.new(DiffPane::new);
         let commit_diff_pane = cx.new(DiffPane::read_only);
         let compare_diff_pane = cx.new(DiffPane::read_only);
-        let workflow_source = workflow_editor::new_editor("", window, cx);
-        let workflow_source_sub = workflow_editor::subscribe(&workflow_source, window, cx);
         let conflict_result = cx.new(|cx| {
             TextArea::new("Result", cx)
                 .with_lines(24, usize::MAX)
@@ -470,9 +457,7 @@ impl StatusView {
             // Also fires when the compositor answers the decoration request, so
             // the title bar appears or goes as soon as the grant is known.
             cx.observe_window_appearance(window, |_, window, cx| {
-                if theme::follow(window.appearance()) {
-                    editor_theme::apply(cx);
-                }
+                theme::follow(window.appearance());
                 cx.notify();
             }),
         ];
@@ -561,9 +546,7 @@ impl StatusView {
             review_reply: None,
             workflow_inputs_dialog: None,
             workflow_review_dialog: None,
-            workflow_source,
-            workflow_source_sub,
-            workflow_editor_stale: true,
+            script_view: crate::shell_workflows::ScriptView::new(),
             conflict_result,
             delete_dialog: None,
             discard_dialog: None,
@@ -1042,16 +1025,6 @@ impl StatusView {
                 self.request_workflow_list();
                 self.workflow_run_ended(*run, cx);
                 true
-            }
-            // A save refused because the file changed on disk: the listing is read
-            // again, so Overwrite expects the hash now on disk.
-            Event::OperationChanged {
-                state: OperationState::Failed,
-                detail: Some(detail),
-                ..
-            } if self.model.workflows_page.is_saving() && is_conflict(detail) => {
-                self.request_workflow_list();
-                false
             }
             // The new file joins the listing, and its folder opens so the user can edit it.
             Event::WorkflowCreated { path, .. } => {
@@ -1650,8 +1623,6 @@ impl StatusView {
             Ok(Effect::ShowSearch) => self.show_search(window, cx),
             Ok(Effect::ViewFile { path, line }) => self.view_file(&path, line, cx),
             Ok(Effect::ShowProvenance(ask)) => self.show_provenance(&ask, cx),
-            Ok(Effect::SaveWorkflow) => self.save_workflow(false, cx),
-            Ok(Effect::RevertWorkflow) => self.revert_workflow(cx),
             Ok(Effect::OpenDeleteWorkflow) => self.ask_delete_workflow(cx),
             Ok(Effect::DryRunWorkflow) => self.dry_run_workflow(cx),
             Ok(Effect::SetAuthorPictures(on)) => self.set_author_pictures(on, cx),
@@ -2088,7 +2059,6 @@ impl Render for StatusView {
         self.sync_thread_rows();
         let (sidebar_width, left_width, commit_height) = self.fitted_sizes(window);
         window_chrome::sync_client_inset(window);
-        self.refresh_workflow_editor(window, cx);
         let app = div()
             .size_full()
             .relative()
@@ -2131,7 +2101,7 @@ impl Render for StatusView {
                     }
                 },
             ))
-            .on_action(cx.listener(Self::save_workflow_action))
+            .on_action(cx.listener(Self::open_workflow_in_editor_action))
             .on_action(cx.listener(|this, action: &RunWorkflowKey, window, cx| {
                 this.run_action(
                     Action::RunWorkflow,

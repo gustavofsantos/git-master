@@ -25,6 +25,7 @@ use crate::commit_detail::{DetailJob, DetailReport};
 use crate::commit_diff::{StackJob, StackReport};
 use crate::conflict::{self, Hunk, Segment};
 use crate::contexts_session;
+use crate::external_editor;
 use crate::files::{
     Building, FilesSession, HighlightJob, HighlightReport, IndexJob, IndexReport, ReadJob,
     ReadReport, SearchJob, SearchReport, TextJob, TextReport,
@@ -2753,7 +2754,7 @@ impl Engine {
             | CommandKind::LoadWorkflowRun { .. }
             | CommandKind::DryRunWorkflow { .. }
             | CommandKind::CheckWorkflowScript { .. }
-            | CommandKind::SaveWorkflowFile { .. }
+            | CommandKind::OpenWorkflowInEditor { .. }
             | CommandKind::DeleteWorkflowFile { .. } => self.workflow_command(id, actor, kind),
             _ if threads_session::is_threads_command(kind) => self.threads_command(id, actor, kind),
             _ if contexts_session::is_contexts_command(kind) => {
@@ -5613,11 +5614,9 @@ impl Engine {
                 self.dry_run_workflow(id, source, inputs)
             }
             CommandKind::CheckWorkflowScript { source } => Ok(check_workflow_script(id, source)),
-            CommandKind::SaveWorkflowFile {
-                path,
-                source,
-                expected_hash,
-            } => self.save_workflow_file(id, actor, path, source, expected_hash.as_deref()),
+            CommandKind::OpenWorkflowInEditor { path } => {
+                self.open_workflow_in_editor(id, actor, path)
+            }
             CommandKind::DeleteWorkflowFile {
                 path,
                 expected_hash,
@@ -5720,19 +5719,15 @@ impl Engine {
         }])
     }
 
-    /// Writes the workflow file at `path`, which must be in a workflows directory
-    /// (never a repository). With `expected_hash` the file on disk must still hash
-    /// to it; without, the file must not exist. Human only. It writes no Git
-    /// state, so it is not in the command log.
-    fn save_workflow_file(
-        &mut self,
+    /// Starts the person's editor on the workflow file at `path`, which must be in a workflows
+    /// directory (D233). Human only. It writes nothing, so it is not in the command log.
+    fn open_workflow_in_editor(
+        &self,
         id: OperationId,
         actor: &Actor,
         path: &str,
-        source: &str,
-        expected_hash: Option<&str>,
     ) -> Result<Vec<Event>, String> {
-        only_a_human(actor, "save a workflow file")?;
+        only_a_human(actor, "open a workflow in the editor")?;
         let root = self.open_root()?;
         let dirs = workflow_session::workflow_dirs(
             self.git.as_ref(),
@@ -5740,47 +5735,30 @@ impl Engine {
             self.workflow_user_dir.as_deref(),
         )?;
         let repository = workflow_session::repository_dir(self.git.as_ref(), &root);
-        if let Some(user) = self.workflow_user_dir.as_deref()
-            && Path::new(path).parent() == Some(user)
-            && !user.exists()
-        {
-            std::fs::create_dir_all(user)
-                .map_err(|e| format!("could not create {}: {e}", user.display()))?;
-        }
-        // The repository's folder is created only by a save into it (D219 (2)).
-        if let Some(folder) = repository.as_deref()
-            && Path::new(path).parent() == Some(folder)
-            && !folder.exists()
-        {
-            std::fs::create_dir_all(folder)
-                .map_err(|e| format!("could not create {}: {e}", folder.display()))?;
-        }
         let file = workflow_session::workflow_file(&root, &dirs, repository.as_deref(), path)?;
-        if u64::try_from(source.len()).unwrap_or(u64::MAX) > loader::MAX_FILE {
-            return Err("the workflow is larger than 256 KiB".to_owned());
+        if !file.is_file() {
+            return Err(format!("{} does not exist", file.display()));
         }
-        match expected_hash {
-            Some(hash) => check_hash(&file, hash)?,
-            None if std::fs::symlink_metadata(&file).is_ok() => {
-                return Err(format!("a file already exists at {}", file.display()));
-            }
-            None => {}
-        }
-        workflow_session::write_atomically(&file, source)?;
-        let mut events = vec![
-            Event::WorkflowFileSaved {
-                id,
-                path: path.to_owned(),
-                hash: loader::sha256_hex(source.as_bytes()),
-            },
-            self.scripts_listed(id, &root)?,
-        ];
-        events.extend(self.drop_stale_requests(&root));
-        Ok(events)
+        let configured = self
+            .git
+            .config_values(&root, external_editor::EDITOR_KEY)
+            .map_err(|e| e.0)?
+            .pop();
+        let login_path = self.git.login_path();
+        let program = external_editor::open(
+            configured.as_deref(),
+            &file,
+            login_path.get().map(String::as_str),
+        )?;
+        Ok(vec![Event::WorkflowOpenedInEditor {
+            id,
+            path: path.to_owned(),
+            program,
+        }])
     }
 
     /// Moves the workflow file at `path` to the trash folder, when it still hashes
-    /// to `expected_hash`. Human only. Like a save, it is not in the command log.
+    /// to `expected_hash`. Human only. It writes no Git state, so it is not in the command log.
     fn delete_workflow_file(
         &mut self,
         id: OperationId,
@@ -5873,7 +5851,8 @@ impl Engine {
     }
 
     /// The scripts as the front ends list them. Reads only, apart from the `.api/` reference
-    /// that is written once per session when its version changed (D102).
+    /// that is written once per session when its version changed (D102) and the language
+    /// server's settings of a workflows folder that has none (D233).
     fn list_scripts(&mut self, id: OperationId) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
         let mut events = self.drop_stale_requests(&root);
@@ -5890,8 +5869,24 @@ impl Engine {
                 ));
             }
         }
+        self.write_repository_editor_settings(&root);
         events.push(listed);
         Ok(events)
+    }
+
+    /// Points the Lua language server at the definitions of the user's folder from the
+    /// repository's workflows folder, when that folder exists and has no settings yet (D233). The
+    /// folder is in `.git/`, never in the working tree. A failure is not reported: the workflows
+    /// still load, and only completion in an editor is missing there.
+    fn write_repository_editor_settings(&self, root: &Path) {
+        let Some(user) = self.workflow_user_dir.as_deref() else {
+            return;
+        };
+        if let Some(folder) = workflow_session::repository_dir(self.git.as_ref(), root)
+            && folder.is_dir()
+        {
+            let _ = api_docs::write_editor_settings(&folder, &api_docs::library_of(user));
+        }
     }
 
     /// The `WorkflowsListed` event of the open repository's scripts.
@@ -5923,6 +5918,15 @@ impl Engine {
                 .workflow_user_dir
                 .as_ref()
                 .map(|dir| dir.display().to_string()),
+            directories: workflow_session::workflow_dirs(
+                self.git.as_ref(),
+                root,
+                self.workflow_user_dir.as_deref(),
+            )
+            .unwrap_or_default()
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect(),
             templates: script_templates::all()
                 .iter()
                 .map(|template| template.name.to_owned())
@@ -6199,7 +6203,7 @@ impl Engine {
                 | CommandKind::CreateWorkflowFromTemplate { .. }
                 | CommandKind::SetWorkflowEnabled { .. }
                 | CommandKind::CopyBuiltinWorkflow { .. }
-                | CommandKind::SaveWorkflowFile { .. }
+                | CommandKind::OpenWorkflowInEditor { .. }
                 | CommandKind::DeleteWorkflowFile { .. }
                 | CommandKind::DismissWorkflowRequest { .. }
                 | CommandKind::ListReviewComments { .. }

@@ -609,30 +609,27 @@ pub enum CommandKind {
     LoadWorkflowRun {
         run: i64,
     },
-    /// Dry run of `source`, the workflow text the editor holds (not a saved
-    /// file): runs it with every `ctx` call answered by the dry host, so nothing is
+    /// Dry run of `source`, the text of a workflow: runs it with every `ctx` call answered by the dry host, so nothing is
     /// performed, and answers `WorkflowDryRun` with the calls it would make. `inputs` is an object of input values; a declared input
     /// it does not give is `""`. Writes nothing, and is never recorded.
     DryRunWorkflow {
         source: String,
         inputs: serde_json::Value,
     },
-    /// Checks `source`, the workflow text the editor holds, without running it: the
+    /// Checks `source`, the text of a workflow, without running it: the
     /// problems `inspect` finds (a syntax error, a missing `execute`, a bad `M.meta`), each
     /// with its line. Answers `WorkflowChecked`, with no problems when the text loads. Nothing
     /// is written and nothing is run, so agents may ask too; never recorded.
     CheckWorkflowScript {
         source: String,
     },
-    /// Writes `source` to the `.lua` file at `path`, which must be inside
-    /// the user's workflows directories (never a repository). With
-    /// `expected_hash`, refuses when the file on disk no longer hashes to it
-    /// (changed elsewhere). A new file passes `None`. Answers
-    /// `WorkflowFileSaved`. Human only.
-    SaveWorkflowFile {
+    /// Opens the workflow file at `path` in the person's editor (D233): the command of the Git
+    /// config key `gitmaster.editor` with the file as its last argument, or the system's default
+    /// application for the file when the key is not set. The file must be a `.lua` file of a
+    /// workflows directory. The editor is started and left alone. Nothing is written, so it is
+    /// not recorded. Answers `WorkflowOpenedInEditor`. Human only.
+    OpenWorkflowInEditor {
         path: String,
-        source: String,
-        expected_hash: Option<String>,
     },
     /// Moves the workflow file at `path` to the trash folder of the app's data
     /// directory, when it still hashes to `expected_hash`. Answers
@@ -1472,6 +1469,11 @@ pub enum Event {
         ignored: Vec<String>,
         /// The user's workflows directory, whether or not it exists yet.
         user_dir: Option<String>,
+        /// Every directory workflow files are read from, in reading order, whether or not it
+        /// exists yet. The watcher follows them, so a file edited in another program is listed
+        /// again (D233).
+        #[serde(default)]
+        directories: Vec<String>,
         /// Names of the built-in templates `CreateWorkflowFromTemplate` takes.
         templates: Vec<String>,
     },
@@ -1496,11 +1498,11 @@ pub enum Event {
         id: OperationId,
         diagnostics: Vec<WorkflowDiagnostic>,
     },
-    /// The file at `path` now holds what was saved; `hash` is its new sha256.
-    WorkflowFileSaved {
+    /// The editor `program` was started on the workflow file at `path` (D233).
+    WorkflowOpenedInEditor {
         id: OperationId,
         path: String,
-        hash: String,
+        program: String,
     },
     /// The file was moved to `trashed_to`.
     WorkflowFileDeleted {

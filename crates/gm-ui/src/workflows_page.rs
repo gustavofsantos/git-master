@@ -1,6 +1,7 @@
-//! The Workflows page's model (design/screens.md, D76): which script is open, the buffer typed
-//! into its file and what the file held when it was loaded or last saved, the diagnostics of the
-//! buffer, the save in flight, the dry run of the buffer, and the runs of the open script. Plain
+//! The Workflows page's model (design/screens.md, D233): which script is open, the text of its
+//! file as the last listing read it, the diagnostics of that text, its dry run, and the runs of
+//! the open script. The page shows the file and never writes it: the person edits it in their
+//! own editor, and each listing brings the new text. Plain
 //! data and pure functions; the screen is in `shell_workflows`, and the engine's answers reach
 //! this model through `Model::apply`.
 
@@ -36,17 +37,6 @@ impl Tab {
             Tab::Runs => "Runs",
         }
     }
-}
-
-/// Where the last save stands. `Saving` lasts while the engine writes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum SaveState {
-    #[default]
-    Idle,
-    Saving,
-    Failed(String),
-    /// The file changed on disk since it was loaded: Reload or Overwrite.
-    Conflict,
 }
 
 /// The review line of the open workflow (`WF3b`, D101): whether its version is reviewed, and whether
@@ -152,9 +142,6 @@ pub fn run_controls(awaiting: Option<(i64, &str)>, active: Option<i64>) -> RunCo
     }
 }
 
-/// The engine's words for a save that found the file changed.
-const CONFLICT_TEXT: &str = "changed on disk";
-
 /// The last dry run answered: the text it walked and what it found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DryRunAnswer {
@@ -162,24 +149,17 @@ struct DryRunAnswer {
     result: WorkflowDryRun,
 }
 
-/// The workflow open on the page: its file, the buffer and what the file held.
+/// The workflow open on the page: its file and the text the latest listing read from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Open {
     path: String,
     name: String,
-    /// A built-in workflow: its script is read-only, and only Copy to Edit changes it (`WF4b`).
+    /// A built-in workflow: it has no file, and only Copy to Edit makes one (`WF4b`).
     builtin: bool,
-    /// The text on disk as the page last loaded or saved it. The buffer is
-    /// dirty while it differs from this.
-    baseline: String,
-    /// The buffer, as typed.
+    /// The file as the latest listing read it.
     text: String,
-    /// The hash of the file the buffer was loaded from; a save expects it.
-    loaded_hash: String,
-    /// The file as the latest listing read it, with its hash: what Reload and
-    /// Overwrite take.
-    disk_source: String,
-    disk_hash: String,
+    /// The hash of that text; a delete expects it.
+    hash: String,
 }
 
 /// The Workflows page's state. Reset when the repository changes.
@@ -195,15 +175,6 @@ pub struct WorkflowsPage {
     checking: Option<(OperationId, String)>,
     /// The text of a check request not yet sent; `track_check` takes it.
     pending_check: Option<String>,
-    /// Counts the edits of the buffer, so a check can wait for the typing to pause.
-    edits: u64,
-    save: SaveState,
-    /// The save the engine is writing: its operation and the text it writes.
-    saving: Option<(OperationId, String)>,
-    /// The text of a save request not yet sent; `track_save` takes it.
-    pending_save: Option<String>,
-    /// The path of the workflow the user asked for while the buffer was dirty.
-    asked_switch: Option<String>,
     /// Whether the delete confirmation is showing.
     asking_delete: bool,
     /// The runs of the open workflow, once read.
@@ -231,8 +202,9 @@ pub struct PageState<'a> {
     pub shown: bool,
     /// The name of the open workflow.
     pub name: Option<&'a str>,
-    pub dirty: bool,
-    pub saving: bool,
+    /// The path of the open workflow's file, which the person can open in an editor. `None` for
+    /// a built-in workflow, which has none.
+    pub file: Option<&'a str>,
 }
 
 impl WorkflowsPage {
@@ -251,18 +223,10 @@ impl WorkflowsPage {
         self.open.as_ref().map(|open| open.name.as_str())
     }
 
-    /// The buffer; empty when no workflow is open.
+    /// The text of the open file; empty when no workflow is open.
     #[must_use]
     pub fn text(&self) -> &str {
         self.open.as_ref().map_or("", |open| open.text.as_str())
-    }
-
-    /// Whether the buffer holds text the file on disk does not.
-    #[must_use]
-    pub fn dirty(&self) -> bool {
-        self.open
-            .as_ref()
-            .is_some_and(|open| open.text != open.baseline)
     }
 
     #[must_use]
@@ -270,32 +234,17 @@ impl WorkflowsPage {
         self.tab
     }
 
-    /// Every problem the last check of the buffer found, by line. Empty when the text loads.
+    /// Every problem the last check of the text found, by line. Empty when the text loads.
     #[must_use]
     pub fn diagnostics(&self) -> &[WorkflowDiagnostic] {
         &self.diagnostics
     }
 
-    /// Whether a check answered for the buffer as it was last checked: before the first answer,
+    /// Whether a check answered for the text as it was last checked: before the first answer,
     /// the Script tab says it is checking.
     #[must_use]
     pub fn check_answered(&self) -> bool {
         self.checked_source.is_some()
-    }
-
-    #[must_use]
-    pub fn save_state(&self) -> &SaveState {
-        &self.save
-    }
-
-    #[must_use]
-    pub fn is_saving(&self) -> bool {
-        self.saving.is_some()
-    }
-
-    #[must_use]
-    pub fn asked_switch(&self) -> Option<&str> {
-        self.asked_switch.as_deref()
     }
 
     #[must_use]
@@ -343,12 +292,15 @@ impl WorkflowsPage {
         PageState {
             shown,
             name: self.name(),
-            dirty: self.dirty(),
-            saving: self.is_saving(),
+            file: self
+                .open
+                .as_ref()
+                .filter(|open| !open.builtin)
+                .map(|open| open.path.as_str()),
         }
     }
 
-    /// Asks for a dry run of the buffer. The request is tracked by `track_dry_run` once the
+    /// Asks for a dry run of the file's text. The request is tracked by `track_dry_run` once the
     /// window has sent it.
     pub fn dry_run_request(&mut self) -> Option<CommandKind> {
         let open = self.open.as_ref()?;
@@ -377,7 +329,7 @@ impl WorkflowsPage {
         }
     }
 
-    /// The last dry run, when it walked the buffer as it is now.
+    /// The last dry run, when it walked the file's text as it is now.
     #[must_use]
     pub fn dry_run_result(&self) -> Option<&WorkflowDryRun> {
         let answer = self.dry_run.as_ref()?;
@@ -385,7 +337,7 @@ impl WorkflowsPage {
             .then_some(&answer.result)
     }
 
-    /// Whether a dry run answered before the buffer changed.
+    /// Whether a dry run answered before the file changed.
     #[must_use]
     pub fn dry_run_stale(&self) -> bool {
         self.dry_run.is_some() && self.dry_run_result().is_none()
@@ -401,9 +353,8 @@ impl WorkflowsPage {
         self.dry_run = None;
     }
 
-    /// Follows the engine's listing. The open file takes the listed hash and
-    /// source; while the buffer is clean, the buffer takes the listed source
-    /// too, so an outside edit shows. A file the listing no longer has closes.
+    /// Follows the engine's listing. The open file takes the listed hash and source, so an
+    /// edit made in the person's editor shows. A file the listing no longer has closes.
     pub fn listed(&mut self, workflows: &[WorkflowInfo]) {
         let Some(open) = self.open.as_mut() else {
             return;
@@ -412,18 +363,12 @@ impl WorkflowsPage {
             self.close();
             return;
         };
-        open.name = info.name.clone();
-        open.disk_hash = info.hash.clone();
-        open.disk_source = info.source.clone();
-        if open.text == open.baseline {
-            open.baseline = info.source.clone();
-            open.text = info.source.clone();
-            open.loaded_hash = info.hash.clone();
-        }
+        open.name.clone_from(&info.name);
+        open.hash.clone_from(&info.hash);
+        open.text.clone_from(&info.source);
     }
 
-    /// Opens the workflow at `path` from the listing. With unsaved changes to
-    /// another file, it asks first and returns `false`.
+    /// Opens the workflow at `path` from the listing. `false` when the listing has no such file.
     pub fn select(&mut self, path: &str, workflows: &[WorkflowInfo]) -> bool {
         if self.path() == Some(path) {
             return true;
@@ -431,53 +376,11 @@ impl WorkflowsPage {
         let Some(info) = workflows.iter().find(|info| info.path == path) else {
             return false;
         };
-        if self.dirty() {
-            self.asked_switch = Some(path.to_owned());
-            return false;
-        }
         self.open_file(info);
         true
     }
 
-    /// The answer to "Unsaved changes": drops the buffer and opens the file asked for.
-    pub fn discard_and_switch(&mut self, workflows: &[WorkflowInfo]) {
-        if let Some(path) = self.asked_switch.take()
-            && let Some(info) = workflows.iter().find(|info| info.path == path)
-        {
-            self.open_file(info);
-        }
-    }
-
-    /// The answer to "Unsaved changes": keeps the buffer and the open file.
-    pub fn keep_editing(&mut self) {
-        self.asked_switch = None;
-    }
-
-    /// Replaces the buffer with what the user typed.
-    pub fn edit(&mut self, text: &str) {
-        let Some(open) = self.open.as_mut() else {
-            return;
-        };
-        if open.text == text {
-            return;
-        }
-        text.clone_into(&mut open.text);
-        self.edits += 1;
-    }
-
-    /// The number of edits so far. A check scheduled after an edit runs only if no edit
-    /// came after it: see `check_is_latest`.
-    #[must_use]
-    pub fn check_generation(&self) -> u64 {
-        self.edits
-    }
-
-    #[must_use]
-    pub fn check_is_latest(&self, generation: u64) -> bool {
-        self.edits == generation
-    }
-
-    /// Asks for a check of the buffer, unless the last accepted check or one in flight already
+    /// Asks for a check of the file's text, unless the last accepted check or one in flight already
     /// answered for this text. The request is tracked by `track_check` once the window has
     /// sent it.
     pub fn check_request(&mut self) -> Option<CommandKind> {
@@ -507,7 +410,7 @@ impl WorkflowsPage {
     }
 
     /// The answer to a check. It is kept only when it answers the check in flight and the
-    /// buffer still holds the text that check read; an answer for an older edit is dropped.
+    /// file still holds the text that check read; an answer for an older text is dropped.
     pub fn checked(&mut self, id: OperationId, diagnostics: Vec<WorkflowDiagnostic>) {
         let Some((op, source)) = self.checking.take() else {
             return;
@@ -523,24 +426,6 @@ impl WorkflowsPage {
         diagnostics.sort_by_key(|diagnostic| diagnostic.line);
         self.diagnostics = diagnostics;
         self.checked_source = Some(source);
-    }
-
-    /// Throws the unsaved changes away: the buffer goes back to the file on disk as loaded.
-    pub fn revert(&mut self) {
-        if let Some(open) = self.open.as_mut() {
-            open.text = open.baseline.clone();
-            self.save = SaveState::Idle;
-        }
-    }
-
-    /// Takes the file as the listing last read it, dropping the buffer.
-    pub fn reload(&mut self) {
-        if let Some(open) = self.open.as_mut() {
-            open.text = open.disk_source.clone();
-            open.baseline = open.disk_source.clone();
-            open.loaded_hash = open.disk_hash.clone();
-            self.save = SaveState::Idle;
-        }
     }
 
     /// Shows `tab`. The Runs tab asks for the open workflow's runs; the request
@@ -606,61 +491,8 @@ impl WorkflowsPage {
         (self.run == Some(run)).then_some(CommandKind::LoadWorkflowRun { run })
     }
 
-    /// The save the buffer asks for. Without `overwrite` it expects the hash the
-    /// buffer was loaded from, and needs unsaved changes; with it, it expects
-    /// the hash now on disk. The text is tracked by `track_save` once sent.
-    pub fn save_request(&mut self, overwrite: bool) -> Option<CommandKind> {
-        let open = self.open.as_ref()?;
-        if open.builtin || self.saving.is_some() || (!overwrite && !self.dirty()) {
-            return None;
-        }
-        let expected = if overwrite {
-            open.disk_hash.clone()
-        } else {
-            open.loaded_hash.clone()
-        };
-        self.pending_save = Some(open.text.clone());
-        Some(CommandKind::SaveWorkflowFile {
-            path: open.path.clone(),
-            source: open.text.clone(),
-            expected_hash: (!expected.is_empty()).then_some(expected),
-        })
-    }
-
-    /// Records the operation that writes the file the last save request sent.
-    pub fn track_save(&mut self, id: OperationId) {
-        if let Some(text) = self.pending_save.take() {
-            self.saving = Some((id, text));
-            self.save = SaveState::Saving;
-        }
-    }
-
-    /// The file was written: it now holds the text that was saved, with `hash`.
-    pub fn saved(&mut self, id: OperationId, hash: &str) {
-        let Some((op, text)) = self.saving.take() else {
-            return;
-        };
-        if op != id {
-            self.saving = Some((op, text));
-            return;
-        }
-        if let Some(open) = self.open.as_mut() {
-            open.baseline.clone_from(&text);
-            hash.clone_into(&mut open.loaded_hash);
-            hash.clone_into(&mut open.disk_hash);
-            open.disk_source = text;
-        }
-        self.save = SaveState::Idle;
-    }
-
-    /// The save operation ended without writing. A conflict is the engine's
-    /// "changed on disk"; any other failure keeps its reason.
-    pub fn operation_ended(
-        &mut self,
-        id: OperationId,
-        state: OperationState,
-        detail: Option<&str>,
-    ) {
+    /// An operation of the page ended: a read that failed stops being waited for.
+    pub fn operation_ended(&mut self, id: OperationId, state: OperationState) {
         if !state.is_terminal() {
             return;
         }
@@ -679,19 +511,6 @@ impl WorkflowsPage {
         if state != OperationState::Done && self.checking.as_ref().map(|(op, _)| *op) == Some(id) {
             self.checking = None;
         }
-        // A done save waits for its `WorkflowFileSaved`, which carries the new hash.
-        if state == OperationState::Done || self.saving.as_ref().map(|(op, _)| *op) != Some(id) {
-            return;
-        }
-        self.saving = None;
-        self.save = match (state, detail) {
-            (OperationState::Failed, Some(text)) if is_conflict(text) => SaveState::Conflict,
-            (OperationState::Failed, Some(text)) => SaveState::Failed(text.to_owned()),
-            (OperationState::Failed, None) => {
-                SaveState::Failed("The file could not be saved.".to_owned())
-            }
-            _ => SaveState::Idle,
-        };
     }
 
     /// The delete confirmation opens for the open workflow.
@@ -701,7 +520,7 @@ impl WorkflowsPage {
         }
     }
 
-    /// Whether the open workflow is a built-in one: read-only, with no file to save or delete.
+    /// Whether the open workflow is a built-in one: it has no file to open or delete.
     #[must_use]
     pub fn is_builtin(&self) -> bool {
         self.open.as_ref().is_some_and(|open| open.builtin)
@@ -712,14 +531,14 @@ impl WorkflowsPage {
         self.asking_delete = false;
     }
 
-    /// The request that moves the open file to the trash, expecting the hash it
-    /// was loaded from. Closes the confirmation.
+    /// The request that moves the open file to the trash, expecting the hash the listing
+    /// last read. Closes the confirmation.
     pub fn delete_request(&mut self) -> Option<CommandKind> {
         let open = self.open.as_ref()?;
         if open.builtin {
             return None;
         }
-        let expected_hash = open.loaded_hash.clone();
+        let expected_hash = open.hash.clone();
         let path = open.path.clone();
         self.asking_delete = false;
         Some(CommandKind::DeleteWorkflowFile {
@@ -743,11 +562,8 @@ impl WorkflowsPage {
             path: info.path.clone(),
             name: info.name.clone(),
             builtin: info.builtin(),
-            baseline: info.source.clone(),
             text: info.source.clone(),
-            loaded_hash: info.hash.clone(),
-            disk_source: info.source.clone(),
-            disk_hash: info.hash.clone(),
+            hash: info.hash.clone(),
         });
     }
 
@@ -759,13 +575,7 @@ impl WorkflowsPage {
     }
 }
 
-/// Whether a save's failure text is the engine's conflict answer.
-#[must_use]
-pub fn is_conflict(text: &str) -> bool {
-    text.to_ascii_lowercase().contains(CONFLICT_TEXT)
-}
-
-/// The text of one diagnostic in the editor: `line N: message`.
+/// The text of one diagnostic under the script: `line N: message`.
 #[must_use]
 pub fn diagnostic_text(diagnostic: &WorkflowDiagnostic) -> String {
     if diagnostic.line == 0 {
@@ -1028,58 +838,43 @@ return M
         let (page, _) = opened();
         assert_eq!(page.name(), Some("ticket-branch"));
         assert_eq!(page.text(), SAMPLE);
-        assert!(!page.dirty());
         assert!(page.diagnostics().is_empty());
+        assert_eq!(page.state(true).file, Some("/w/ticket.lua"));
+    }
+
+    /// The file changed outside the app: the next listing reads `text` from it.
+    fn edit(page: &mut WorkflowsPage, text: &str) {
+        let path = page.path().expect("a workflow is open").to_owned();
+        let name = page.name().expect("a workflow is open").to_owned();
+        page.listed(&[info(&path, &name, text, "edited")]);
     }
 
     #[test]
-    fn typing_makes_the_buffer_dirty_and_reverting_clears_it() {
+    fn a_listing_with_a_new_text_shows_the_outside_edit_and_a_delete_expects_its_hash() {
         let (mut page, _) = opened();
-        page.edit(&format!("{SAMPLE}# note\n"));
-        assert!(page.dirty());
-        page.revert();
-        assert!(!page.dirty());
-        assert_eq!(page.text(), SAMPLE);
-    }
-
-    #[test]
-    fn switching_with_unsaved_changes_asks_and_keeps_the_buffer() {
-        let (mut page, mut listed) = opened();
-        listed.push(info("/w/other.lua", "other", "return {}", "h2"));
-        page.edit("changed");
-        assert!(!page.select("/w/other.lua", &listed));
-        assert_eq!(page.asked_switch(), Some("/w/other.lua"));
-        assert_eq!(page.path(), Some("/w/ticket.lua"));
-        assert!(page.dirty());
-        page.keep_editing();
-        assert_eq!(page.asked_switch(), None);
-        assert_eq!(page.text(), "changed");
-    }
-
-    #[test]
-    fn discarding_opens_the_file_that_was_asked_for() {
-        let (mut page, mut listed) = opened();
-        listed.push(info("/w/other.lua", "other", "return {}", "h2"));
-        page.edit("changed");
-        page.select("/w/other.lua", &listed);
-        page.discard_and_switch(&listed);
-        assert_eq!(page.path(), Some("/w/other.lua"));
-        assert!(!page.dirty());
-        assert_eq!(page.asked_switch(), None);
-    }
-
-    #[test]
-    fn a_listing_with_a_new_hash_updates_a_clean_buffer_only() {
-        let (mut page, listed) = opened();
-        let changed = vec![info("/w/ticket.lua", "ticket-branch", "return {}\n", "h9")];
-        page.listed(&changed);
+        page.listed(&[info("/w/ticket.lua", "renamed", "return {}\n", "h9")]);
         assert_eq!(page.text(), "return {}\n");
-        assert!(!page.dirty());
+        assert_eq!(page.name(), Some("renamed"));
+        page.ask_delete();
+        assert_eq!(
+            page.delete_request(),
+            Some(CommandKind::DeleteWorkflowFile {
+                path: "/w/ticket.lua".into(),
+                expected_hash: "h9".into(),
+            })
+        );
+    }
 
-        page.edit("mine");
-        page.listed(&listed);
-        assert_eq!(page.text(), "mine");
-        assert!(page.dirty());
+    #[test]
+    fn the_page_names_the_file_of_a_user_workflow_and_none_for_a_built_in() {
+        let (page, _) = opened();
+        assert_eq!(page.state(true).file, Some("/w/ticket.lua"));
+        assert_eq!(WorkflowsPage::default().state(true).file, None);
+        let mut built_in = info("builtin:x", "x", SAMPLE, "h");
+        built_in.title = Some("X".into());
+        let mut page = WorkflowsPage::default();
+        assert!(page.select("builtin:x", std::slice::from_ref(&built_in)));
+        assert_eq!(page.state(true).file, None);
     }
 
     #[test]
@@ -1091,116 +886,7 @@ return M
     }
 
     #[test]
-    fn a_save_sends_the_loaded_hash_and_a_saved_answer_clears_the_dirty_flag() {
-        let (mut page, _) = opened();
-        assert_eq!(page.save_request(false), None, "nothing to save yet");
-        page.edit("return {}\n");
-        let kind = page.save_request(false).expect("dirty buffer saves");
-        assert_eq!(
-            kind,
-            CommandKind::SaveWorkflowFile {
-                path: "/w/ticket.lua".into(),
-                source: "return {}\n".into(),
-                expected_hash: Some("h1".into()),
-            }
-        );
-        page.track_save(id(7));
-        assert!(page.is_saving());
-        assert_eq!(page.save_state(), &SaveState::Saving);
-        page.saved(id(7), "h2");
-        assert!(!page.dirty());
-        assert!(!page.is_saving());
-        assert_eq!(page.save_state(), &SaveState::Idle);
-        let again = page.save_request(false);
-        assert_eq!(again, None, "a saved file is clean");
-    }
-
-    #[test]
-    fn a_save_that_finds_the_file_changed_is_a_conflict_and_overwrite_takes_the_disk_hash() {
-        let (mut page, _) = opened();
-        page.edit("mine");
-        let _ = page.save_request(false);
-        page.track_save(id(3));
-        page.operation_ended(
-            id(3),
-            OperationState::Failed,
-            Some("the file changed on disk; reload it"),
-        );
-        assert_eq!(page.save_state(), &SaveState::Conflict);
-        assert!(!page.is_saving());
-        assert!(page.dirty(), "the buffer is kept for the user to decide");
-
-        let overwrite = page.save_request(true).expect("overwrite sends");
-        assert!(matches!(
-            overwrite,
-            CommandKind::SaveWorkflowFile { expected_hash: Some(ref hash), .. } if hash == "h1"
-        ));
-    }
-
-    #[test]
-    fn a_listing_that_saw_the_outside_edit_lets_overwrite_expect_the_new_hash() {
-        let (mut page, _) = opened();
-        page.edit("mine");
-        page.listed(&[info("/w/ticket.lua", "ticket-branch", "theirs", "h5")]);
-        assert_eq!(page.text(), "mine", "a dirty buffer is kept");
-        let kind = page.save_request(true).expect("overwrite sends");
-        assert!(matches!(
-            kind,
-            CommandKind::SaveWorkflowFile { expected_hash: Some(ref hash), .. } if hash == "h5"
-        ));
-    }
-
-    #[test]
-    fn reload_takes_the_listed_source_and_hash() {
-        let (mut page, _) = opened();
-        page.edit("mine");
-        page.listed(&[info("/w/ticket.lua", "ticket-branch", "theirs", "h5")]);
-        page.reload();
-        assert_eq!(page.text(), "theirs");
-        assert!(!page.dirty());
-        assert_eq!(page.save_request(false), None);
-    }
-
-    #[test]
-    fn another_failure_keeps_its_reason_and_a_cancel_is_quiet() {
-        let (mut page, _) = opened();
-        page.edit("x");
-        let _ = page.save_request(false);
-        page.track_save(id(4));
-        page.operation_ended(id(4), OperationState::Failed, Some("disk full"));
-        assert_eq!(page.save_state(), &SaveState::Failed("disk full".into()));
-
-        let _ = page.save_request(false);
-        page.track_save(id(5));
-        page.operation_ended(id(5), OperationState::Cancelled, None);
-        assert_eq!(page.save_state(), &SaveState::Idle);
-    }
-
-    #[test]
-    fn a_done_operation_waits_for_the_saved_event() {
-        let (mut page, _) = opened();
-        page.edit("x");
-        let _ = page.save_request(false);
-        page.track_save(id(6));
-        page.operation_ended(id(6), OperationState::Done, None);
-        assert!(page.is_saving());
-        page.saved(id(6), "h7");
-        assert!(!page.dirty());
-    }
-
-    #[test]
-    fn a_save_answer_for_another_operation_is_ignored() {
-        let (mut page, _) = opened();
-        page.edit("x");
-        let _ = page.save_request(false);
-        page.track_save(id(8));
-        page.saved(id(99), "h");
-        assert!(page.is_saving());
-        assert!(page.dirty());
-    }
-
-    #[test]
-    fn the_delete_confirmation_sends_the_loaded_hash_and_closes() {
+    fn the_delete_confirmation_sends_the_listed_hash_and_closes() {
         let (mut page, _) = opened();
         page.cancel_delete();
         assert!(!page.asking_delete());
@@ -1224,7 +910,7 @@ return M
         let mut page = WorkflowsPage::default();
         page.ask_delete();
         assert!(!page.asking_delete());
-        assert_eq!(page.save_request(true), None);
+        assert_eq!(page.state(true).file, None);
         assert_eq!(page.delete_request(), None);
         assert_eq!(page.show_tab(Tab::Runs), None);
     }
@@ -1267,7 +953,7 @@ return M
     fn a_failed_runs_read_says_so() {
         let (mut page, _) = opened();
         page.track_runs(id(11));
-        page.operation_ended(id(11), OperationState::Failed, Some("no repo"));
+        page.operation_ended(id(11), OperationState::Failed);
         assert!(page.runs_failed());
         assert_eq!(page.runs(), None);
     }
@@ -1338,13 +1024,6 @@ return M
         page.track_runs(id(1));
         page.reset();
         assert_eq!(page, WorkflowsPage::default());
-    }
-
-    #[test]
-    fn conflicts_are_recognised_by_the_engine_wording_only() {
-        assert!(is_conflict("The file changed on disk; reload it."));
-        assert!(is_conflict("Changed on disk"));
-        assert!(!is_conflict("permission denied"));
     }
 
     #[test]
@@ -1467,7 +1146,7 @@ return M
         assert!(blocks[0].1.contains("ENG-1"));
     }
 
-    /// A script that is not the open file's text: the dry run walks whatever the buffer holds.
+    /// A script that is not the open file's text: the dry run walks whatever the file holds.
     const FLOW: &str = "return {}\n-- a second line\n";
 
     fn page_with(source: &str) -> WorkflowsPage {
@@ -1504,7 +1183,7 @@ return M
         assert!(!page.dry_run_pending());
         assert!(!page.dry_run_stale());
 
-        page.edit(&format!("{FLOW}# note\n"));
+        edit(&mut page, &format!("{FLOW}# note\n"));
         assert_eq!(page.dry_run_result(), None);
         assert!(page.dry_run_stale());
         page.dismiss_dry_run();
@@ -1519,7 +1198,7 @@ return M
     }
 
     #[test]
-    fn a_check_request_asks_for_the_buffer_once_per_text() {
+    fn a_check_request_asks_once_per_text() {
         let mut page = page_with(FLOW);
         assert!(page.check_request().is_some(), "a new file is checked");
         page.track_check(id(30));
@@ -1533,7 +1212,7 @@ return M
             "the answered text is not asked again"
         );
 
-        page.edit(&format!("{FLOW}x\n"));
+        edit(&mut page, &format!("{FLOW}x\n"));
         assert_eq!(
             page.check_request(),
             Some(CommandKind::CheckWorkflowScript {
@@ -1547,7 +1226,7 @@ return M
         let mut page = page_with(FLOW);
         let _ = page.check_request();
         page.track_check(id(40));
-        page.edit("return 1\n");
+        edit(&mut page, "return 1\n");
         let _ = page.check_request();
         page.track_check(id(41));
 
@@ -1561,16 +1240,16 @@ return M
     }
 
     #[test]
-    fn a_check_answer_for_text_no_longer_in_the_buffer_is_dropped() {
+    fn a_check_answer_for_text_the_file_no_longer_holds_is_dropped() {
         let mut page = page_with(FLOW);
         let _ = page.check_request();
         page.track_check(id(50));
-        page.edit("changed while checking\n");
+        edit(&mut page, "changed while checking\n");
         page.checked(id(50), vec![problem(3, "stale")]);
         assert!(page.diagnostics().is_empty());
         assert!(
             page.check_request().is_some(),
-            "the buffer is checked again after the answer"
+            "the text is checked again after the answer"
         );
     }
 
@@ -1583,10 +1262,10 @@ return M
         let lines: Vec<u32> = page.diagnostics().iter().map(|d| d.line).collect();
         assert_eq!(lines, [2, 9]);
 
-        page.edit("another\n");
+        edit(&mut page, "another\n");
         let _ = page.check_request();
         page.track_check(id(61));
-        page.operation_ended(id(61), OperationState::Failed, Some("no"));
+        page.operation_ended(id(61), OperationState::Failed);
         assert!(
             page.check_request().is_some(),
             "a failed check can be asked again"
@@ -1594,22 +1273,11 @@ return M
     }
 
     #[test]
-    fn the_check_generation_moves_with_each_edit_only() {
-        let mut page = page_with(FLOW);
-        let first = page.check_generation();
-        page.edit(FLOW);
-        assert_eq!(page.check_generation(), first, "the same text is no edit");
-        page.edit("x\n");
-        assert!(!page.check_is_latest(first));
-        assert!(page.check_is_latest(page.check_generation()));
-    }
-
-    #[test]
     fn a_failed_dry_run_is_no_longer_pending() {
         let mut page = page_with(FLOW);
         let _ = page.dry_run_request();
         page.track_dry_run(id(7));
-        page.operation_ended(id(7), OperationState::Failed, Some("no"));
+        page.operation_ended(id(7), OperationState::Failed);
         assert!(!page.dry_run_pending());
     }
 
@@ -1765,29 +1433,24 @@ return M
     }
 
     #[test]
-    fn a_built_in_is_never_reviewed_by_hand_and_has_no_file_to_save_or_delete() {
+    fn a_built_in_is_never_reviewed_by_hand_and_has_no_file_to_open_or_delete() {
         let shipped = built_in("restack-stale-after-fetch", "t", false);
         assert_eq!(review_line(Some(&shipped)), None);
 
         let mut page = WorkflowsPage::default();
         assert!(page.select(&shipped.path, std::slice::from_ref(&shipped)));
         assert!(page.is_builtin());
-        assert_eq!(page.save_request(false), None);
-        assert_eq!(page.save_request(true), None);
+        assert_eq!(page.state(true).file, None);
         page.ask_delete();
         assert!(!page.asking_delete());
         assert_eq!(page.delete_request(), None);
     }
 
     #[test]
-    fn a_user_file_still_saves_and_deletes() {
+    fn a_user_file_opens_in_an_editor_and_deletes() {
         let (mut page, _) = opened();
         assert!(!page.is_builtin());
-        page.edit("changed");
-        assert!(matches!(
-            page.save_request(false),
-            Some(CommandKind::SaveWorkflowFile { .. })
-        ));
+        assert!(page.state(true).file.is_some());
         page.ask_delete();
         assert!(page.asking_delete());
     }

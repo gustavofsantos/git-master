@@ -28,8 +28,6 @@ const ICONS: &[(&str, &[u8])] = icons![
     "check-fill",
     "star",
     "star-fill",
-    "circle",
-    "circle-fill",
     "folder",
     "folder-fill",
     "git-branch",

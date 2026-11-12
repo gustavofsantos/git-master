@@ -5,6 +5,7 @@
 -- on your agent's version and are your choice: add them to the exec call below.
 local M = {}
 
+---@type gitmaster.Meta
 M.meta = {
   name = "review-invariants",
   description = "Review the change against the rules that every change must keep",
@@ -19,6 +20,8 @@ local INVARIANTS = table.concat({
   "- No secret, token or password is written into code, tests or logs.",
 }, "\n")
 
+---@param ctx gitmaster.Ctx
+---@param input gitmaster.Input
 function M.execute(ctx, input)
   local branch = input.repo.branch
   if branch == nil then

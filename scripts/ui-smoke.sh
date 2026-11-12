@@ -64,7 +64,6 @@ STACK_LIST_CROP="1040x520+322+222"           # the stacked diff's list, screen c
 WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120               # "Split" in the Working Copy diff header
 SPLIT_OLD_CHECK_X=809; SPLIT_NEW_CHECK_X=1120             # gutter checkboxes of the split cells (old, new), split view of the Working Copy
 MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: the -/+ pair row (entry, ledger)
-WF_EDITOR_X=982; WF_EDITOR_Y=650            # the blank area under the script's last line (window 900,600): a click there puts the caret at the end
 WF_TAB_RUNS_X=500; WF_TAB_RUNS_Y=180        # the Runs tab of the Workflows page (Script tab is the default)
 WF_FIRST_RUN_X=600; WF_FIRST_RUN_Y=240      # the first row of the Runs list
 HEALTH_CODE_X=120; HEALTH_CODE_Y=227        # "Code" row in the sidebar (window y 177)
@@ -578,10 +577,12 @@ scenario_history() {
   [ "$differing" -lt 2000 ] || fail "the Working Copy did not come back ($differing pixels differ)"
 }
 
-# --- 3w. A Lua workflow edited, saved and run from the Workflows page ---------
-# smoke-hello.lua is written before the app starts. Its trigger.key binds Ctrl+Alt+H, so the
-# run goes through the same review dialog as the palette. The editor's text is checked on the
-# screen only as ink; the file, the save and the run's journal are checked with grep.
+# --- 3w. A Lua workflow shown, edited outside the app and run from the Workflows page ---
+# smoke-hello.lua is written before the app starts. The app has no editor (D233): the Script
+# tab shows the file, follows an edit made by another program, and Open in Editor starts the
+# command of gitmaster.editor on it. Its trigger.key binds Ctrl+Alt+H, so the run goes through
+# the same review dialog as the palette. The script's text is checked on the screen only as
+# ink; the editor's start and the run's journal are checked with grep.
 write_script_fixture() {
   mkdir -p "$1"
   cat > "$1/smoke-hello.lua" <<'EOF'
@@ -616,23 +617,33 @@ scenario_w_script_editor() {
   read -r differing _ <<<"$differing"
   [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
   [ "$differing" -gt 20000 ] || fail "the Workflows page did not open ($differing pixels changed)"
-  # The script's text is ink in the editor: a blank editor has none.
+  # The script's text is ink in the Script tab: a blank tab has none.
   convert "$SMOKE_OUT/w-script-editor-page-$theme.png" -crop "900x260+340+200" +repage "$RUN_DIR/w-editor.png"
   ink="$(convert "$RUN_DIR/w-editor.png" -colorspace gray -threshold 50% -negate -format '%[fx:mean]' info:)"
   awk -v d="$ink" 'BEGIN { exit !(d > 0.0005) }' || fail "the Script tab shows no text (ink $ink)"
 
-  # Type at the end of the script and save with Ctrl+S: the file on disk must have the edit.
-  xdotool mousemove "$WF_EDITOR_X" "$WF_EDITOR_Y" click 1; sleep 0.5
-  xdotool key ctrl+End; sleep 0.3
-  xdotool key Return
-  xdotool type --delay 20 -- "-- smoke edit"; sleep 0.5
-  xdotool key Return; sleep 1
+  # Another program edits the file: nobody asks the app, and the tab shows the new lines.
+  printf -- '-- smoke edit\n-- a second line the tab must show\n' >> "$file"; sleep 3
   shoot "$SMOKE_OUT/w-script-editor-edited-$theme.png"
-  xdotool key ctrl+s; sleep 1.5
-  grep -qxF -- '-- smoke edit' "$file" || fail "the save did not write the edit to $file"
-  grep -q 'hello from smoke' "$file" || fail "the save lost the script's own text in $file"
+  differing="$(compare -metric AE "$SMOKE_OUT/w-script-editor-page-$theme.png" "$SMOKE_OUT/w-script-editor-edited-$theme.png" null: 2>&1 || true)"
+  read -r differing _ <<<"$differing"
+  [[ "$differing" =~ ^[0-9]+$ ]] || fail "could not compare screenshots: $differing"
+  [ "$differing" -gt 150 ] || fail "the Script tab did not follow the edit made outside the app ($differing pixels changed)"
 
-  # The shortcut runs the saved version. The first run of a version asks once: Enter confirms.
+  # Ctrl+E starts the command of gitmaster.editor with the file as its last argument.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\n' "$RUN_DIR/smoke-editor-opened.txt" > "$RUN_DIR/smoke-editor.sh"
+  chmod +x "$RUN_DIR/smoke-editor.sh"
+  git -C "$RUN_DIR/repo" config gitmaster.editor "'$RUN_DIR/smoke-editor.sh' --smoke"
+  rm -f "$RUN_DIR/smoke-editor-opened.txt"
+  xdotool key ctrl+e; sleep 2
+  shoot "$SMOKE_OUT/w-script-editor-opened-$theme.png"
+  [ -f "$RUN_DIR/smoke-editor-opened.txt" ] || fail "Ctrl+E did not start the command of gitmaster.editor"
+  [ "$(sed -n 1p "$RUN_DIR/smoke-editor-opened.txt")" = "--smoke" ] || fail "the editor did not get its own argument first"
+  grep -qF 'smoke-hello.lua' "$RUN_DIR/smoke-editor-opened.txt" || fail "the editor did not get the workflow file"
+  git -C "$RUN_DIR/repo" config --unset gitmaster.editor
+  grep -qxF -- '-- smoke edit' "$file" || fail "opening the editor changed $file"
+
+  # The shortcut runs the version on disk. The first run of a version asks once: Enter confirms.
   xdotool key ctrl+alt+h; sleep 1.5
   shoot "$SMOKE_OUT/w-script-editor-review-$theme.png"
   xdotool key Return; sleep 2

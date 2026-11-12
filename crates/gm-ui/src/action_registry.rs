@@ -300,13 +300,9 @@ pub enum Effect {
     OpenThreadsSettings,
     /// Opens one of the Labels page's dialogs (P4).
     OpenLabelDialog(LabelDialog),
-    /// Writes the open workflow's buffer to its file.
-    SaveWorkflow,
-    /// Drops the open workflow's unsaved changes.
-    RevertWorkflow,
     /// Opens the confirmation that moves the open workflow's file to the trash.
     OpenDeleteWorkflow,
-    /// Asks the engine for a dry run of the open workflow's buffer.
+    /// Asks the engine for a dry run of the open workflow's file.
     DryRunWorkflow,
     /// Turns the Gravatar lookup of author pictures on or off (D110).
     SetAuthorPictures(bool),
@@ -787,15 +783,15 @@ const SPECS: [Spec; 125] = [
         Category::Workflows,
     ),
     spec(
-        "workflow.save",
-        "Save Workflow",
-        Some("⌘S"),
+        "workflow.open_in_editor",
+        "Open Workflow in Editor",
+        Some("⌘E"),
         ArgKind::None,
         Category::Workflows,
     ),
     spec(
-        "workflow.revert",
-        "Revert Workflow",
+        "workflow.copy_path",
+        "Copy Workflow Path",
         None,
         ArgKind::None,
         Category::Workflows,
@@ -1455,8 +1451,8 @@ pub enum Action {
     ReloadWorkflows,
     OpenWorkflowsFolder,
     ShowWorkflows,
-    SaveWorkflow,
-    RevertWorkflow,
+    OpenWorkflowInEditor,
+    CopyWorkflowPath,
     DeleteWorkflow,
     DryRunWorkflow,
     Fetch,
@@ -2101,8 +2097,8 @@ impl Action {
         Action::ReloadWorkflows,
         Action::OpenWorkflowsFolder,
         Action::ShowWorkflows,
-        Action::SaveWorkflow,
-        Action::RevertWorkflow,
+        Action::OpenWorkflowInEditor,
+        Action::CopyWorkflowPath,
         Action::DeleteWorkflow,
         Action::DryRunWorkflow,
         Action::Fetch,
@@ -2378,8 +2374,8 @@ impl Action {
                 | Action::NewWorkflowFromTemplate
                 | Action::ReloadWorkflows
                 | Action::OpenWorkflowsFolder
-                | Action::SaveWorkflow
-                | Action::RevertWorkflow
+                | Action::OpenWorkflowInEditor
+                | Action::CopyWorkflowPath
                 | Action::DeleteWorkflow
                 | Action::DryRunWorkflow
         )
@@ -3167,20 +3163,7 @@ fn workflow_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), R
         Action::NewWorkflowFromTemplate => template_rule(args, ctx),
         Action::ReloadWorkflows => repository_open(ctx),
         Action::OpenWorkflowsFolder => workflows_folder(ctx).map(|_| ()),
-        Action::SaveWorkflow => {
-            if page_open(ctx)?.dirty {
-                Ok(())
-            } else {
-                Err("Nothing to save: the file has no changes.")
-            }
-        }
-        Action::RevertWorkflow => {
-            if page_open(ctx)?.dirty {
-                Ok(())
-            } else {
-                Err("Nothing to revert: the file has no changes.")
-            }
-        }
+        Action::OpenWorkflowInEditor | Action::CopyWorkflowPath => page_file(ctx).map(|_| ()),
         Action::DeleteWorkflow => page_open(ctx).map(|_| ()),
         Action::DryRunWorkflow => dry_run_rule(ctx),
         _ => ctx
@@ -3214,8 +3197,12 @@ fn workflow_effect(action: Action, args: &Args, ctx: &Context<'_>) -> Result<Eff
             }])
         }
         (Action::ReloadWorkflows, _) => Effect::Send(vec![CommandKind::ListWorkflows]),
-        (Action::SaveWorkflow, _) => Effect::SaveWorkflow,
-        (Action::RevertWorkflow, _) => Effect::RevertWorkflow,
+        (Action::OpenWorkflowInEditor, _) => {
+            Effect::Send(vec![CommandKind::OpenWorkflowInEditor {
+                path: page_file(ctx)?.to_owned(),
+            }])
+        }
+        (Action::CopyWorkflowPath, _) => Effect::Copy(page_file(ctx)?.to_owned()),
         (Action::DeleteWorkflow, _) => Effect::OpenDeleteWorkflow,
         (Action::DryRunWorkflow, _) => Effect::DryRunWorkflow,
         (Action::OpenWorkflowsFolder, _) => Effect::Reveal(PathBuf::from(workflows_folder(ctx)?)),
@@ -3259,10 +3246,15 @@ fn page_open<'a>(ctx: &Context<'a>) -> Result<PageState<'a>, Reason> {
     if page.name.is_none() {
         return Err("No workflow is open.");
     }
-    if page.saving {
-        return Err("Wait for the save to finish.");
-    }
     Ok(page)
+}
+
+/// The path of the open workflow's file, for the actions that hand it to another program. A
+/// built-in workflow has no file.
+fn page_file<'a>(ctx: &Context<'a>) -> Result<&'a str, Reason> {
+    page_open(ctx)?
+        .file
+        .ok_or("A built-in workflow has no file: use Copy to Edit first.")
 }
 
 /// The reason of the workflows folder when the engine has no folder to give.
@@ -3313,10 +3305,6 @@ fn workflow_run_rule<'a>(args: &Args, ctx: &Context<'a>) -> Result<&'a WorkflowI
     }
     if workflow.trigger != "manual" {
         return Err("Only manual workflows can be run from here.");
-    }
-    // The run reads the file on disk, so the edit in the page must be saved first.
-    if ctx.workflows.page.dirty && ctx.workflows.page.name == Some(workflow.name.as_str()) {
-        return Err("Save first");
     }
     Ok(workflow)
 }
@@ -5939,79 +5927,41 @@ mod tests {
 
     #[test]
     fn the_page_actions_need_the_page_with_an_open_file() {
-        let page = |shown, name, dirty, saving| PageState {
-            shown,
-            name,
-            dirty,
-            saving,
-        };
+        let page = |shown, name, file| PageState { shown, name, file };
         let closed = with_workflows(WorkflowCtx::default());
         assert_eq!(
-            Action::SaveWorkflow.enabled(&Args::None, &closed),
+            Action::OpenWorkflowInEditor.enabled(&Args::None, &closed),
             Err("Open the Workflows page first.")
         );
-        let clean = with_workflows(WorkflowCtx {
-            page: page(true, Some("w"), false, false),
+        let open = with_workflows(WorkflowCtx {
+            page: page(true, Some("w"), Some("/w/w.lua")),
             ..WorkflowCtx::default()
         });
         assert_eq!(
-            Action::SaveWorkflow.enabled(&Args::None, &clean),
-            Err("Nothing to save: the file has no changes.")
+            Action::OpenWorkflowInEditor.plan(&Args::None, &open),
+            Ok(Effect::Send(vec![CommandKind::OpenWorkflowInEditor {
+                path: "/w/w.lua".into(),
+            }]))
         );
         assert_eq!(
-            Action::RevertWorkflow.enabled(&Args::None, &clean),
-            Err("Nothing to revert: the file has no changes.")
+            Action::CopyWorkflowPath.plan(&Args::None, &open),
+            Ok(Effect::Copy("/w/w.lua".into()))
         );
         assert_eq!(
-            Action::DeleteWorkflow.plan(&Args::None, &clean),
+            Action::DeleteWorkflow.plan(&Args::None, &open),
             Ok(Effect::OpenDeleteWorkflow)
         );
-        let dirty = with_workflows(WorkflowCtx {
-            page: page(true, Some("w"), true, false),
+        // A built-in workflow is open, and it has no file to hand to an editor.
+        let built_in = with_workflows(WorkflowCtx {
+            page: page(true, Some("w"), None),
             ..WorkflowCtx::default()
         });
-        assert_eq!(
-            Action::SaveWorkflow.plan(&Args::None, &dirty),
-            Ok(Effect::SaveWorkflow)
-        );
-        assert_eq!(
-            Action::RevertWorkflow.plan(&Args::None, &dirty),
-            Ok(Effect::RevertWorkflow)
-        );
-        let saving = with_workflows(WorkflowCtx {
-            page: page(true, Some("w"), true, true),
-            ..WorkflowCtx::default()
-        });
-        assert_eq!(
-            Action::SaveWorkflow.enabled(&Args::None, &saving),
-            Err("Wait for the save to finish.")
-        );
-    }
-
-    #[test]
-    fn run_waits_for_the_save_of_the_open_workflow_only() {
-        let listed = [
-            workflow("w", "manual", &[], None),
-            workflow("other", "manual", &[], None),
-        ];
-        let dirty_w = with_workflows(WorkflowCtx {
-            listed: Some(&listed),
-            page: PageState {
-                shown: true,
-                name: Some("w"),
-                dirty: true,
-                saving: false,
-            },
-            ..WorkflowCtx::default()
-        });
-        assert_eq!(
-            Action::RunWorkflow.enabled(&Args::Workflow("w".into()), &dirty_w),
-            Err("Save first")
-        );
-        assert_eq!(
-            Action::RunWorkflow.enabled(&Args::Workflow("other".into()), &dirty_w),
-            Ok(())
-        );
+        for action in [Action::OpenWorkflowInEditor, Action::CopyWorkflowPath] {
+            assert_eq!(
+                action.enabled(&Args::None, &built_in),
+                Err("A built-in workflow has no file: use Copy to Edit first.")
+            );
+        }
     }
 
     #[test]
@@ -6055,7 +6005,12 @@ mod tests {
             Ok(Effect::ShowWorkflows)
         );
         assert_eq!(Action::ShowWorkflows.id(), "workflow.show");
-        assert_eq!(Action::SaveWorkflow.spec().shortcut, Some("⌘S"));
+        assert_eq!(Action::OpenWorkflowInEditor.spec().shortcut, Some("⌘E"));
+        assert_eq!(
+            Action::OpenWorkflowInEditor.spec().title,
+            "Open Workflow in Editor"
+        );
+        assert_eq!(Action::CopyWorkflowPath.id(), "workflow.copy_path");
     }
 
     #[test]

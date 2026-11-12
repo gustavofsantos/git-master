@@ -1,7 +1,7 @@
 //! Which changed paths can change what the status shows. Pure: the caller
 //! supplies the paths relative to the git dir or to the worktree root.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// Whether `path` is git's own state inside a worktree (`.git`, or anything
 /// under a `.git` directory). Those paths are read through the git dir.
@@ -62,6 +62,23 @@ pub fn threads_database_changed(rel: &Path) -> bool {
         && matches!(file.to_str(), Some("threads.db" | "threads.db-wal"))
 }
 
+/// Whether `path` is a workflow file directly inside one of `dirs`, the folders workflows are
+/// read from, or one of those folders itself (it was created or removed). Hidden names are not
+/// workflows: the `.api` folder, the editor's swap files and the temporary files of a save.
+pub fn workflow_changed(path: &Path, dirs: &[PathBuf]) -> bool {
+    if dirs.iter().any(|dir| dir == path) {
+        return true;
+    }
+    let hidden = path
+        .file_name()
+        .is_none_or(|name| name.to_string_lossy().starts_with('.'));
+    !hidden
+        && path.extension().is_some_and(|ext| ext == "lua")
+        && path
+            .parent()
+            .is_some_and(|parent| dirs.iter().any(|dir| dir == parent))
+}
+
 /// Whether `rel`, relative to the common dir, is the `gitmaster` folder itself,
 /// which is created by the first thread capture.
 pub fn threads_dir_appeared(rel: &Path) -> bool {
@@ -88,6 +105,51 @@ pub fn changes_tracked_set(rel: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lua_file_directly_inside_a_workflows_folder_is_a_workflow_change() {
+        let dirs = [
+            PathBuf::from("/cfg/workflows"),
+            PathBuf::from("/r/.git/gitmaster/workflows"),
+        ];
+        assert!(workflow_changed(Path::new("/cfg/workflows/a.lua"), &dirs));
+        assert!(workflow_changed(
+            Path::new("/r/.git/gitmaster/workflows/review.lua"),
+            &dirs
+        ));
+        // The folder itself: it was created or removed.
+        assert!(workflow_changed(Path::new("/cfg/workflows"), &dirs));
+        // What the app and an editor write beside the workflows.
+        assert!(!workflow_changed(Path::new("/cfg/workflows/.api"), &dirs));
+        assert!(!workflow_changed(
+            Path::new("/cfg/workflows/.luarc.json"),
+            &dirs
+        ));
+        assert!(!workflow_changed(
+            Path::new("/cfg/workflows/.a.lua.swp"),
+            &dirs
+        ));
+        assert!(!workflow_changed(
+            Path::new("/cfg/workflows/.hidden.lua"),
+            &dirs
+        ));
+        assert!(!workflow_changed(Path::new("/cfg/workflows/a.lua~"), &dirs));
+        assert!(!workflow_changed(
+            Path::new("/cfg/workflows/notes.md"),
+            &dirs
+        ));
+        // Not directly inside, or in another folder.
+        assert!(!workflow_changed(
+            Path::new("/cfg/workflows/.api/gitmaster.lua"),
+            &dirs
+        ));
+        assert!(!workflow_changed(
+            Path::new("/cfg/workflows/sub/a.lua"),
+            &dirs
+        ));
+        assert!(!workflow_changed(Path::new("/elsewhere/a.lua"), &dirs));
+        assert!(!workflow_changed(Path::new("/cfg/workflows/a.lua"), &[]));
+    }
 
     #[test]
     fn only_the_thread_database_and_its_wal_are_threads_changes() {

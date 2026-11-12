@@ -38,9 +38,10 @@ pub enum Language {
     Html,
     Css,
     Clojure,
+    Lua,
 }
 
-const LANGUAGES: [Language; 18] = [
+const LANGUAGES: [Language; 19] = [
     Language::Rust,
     Language::Python,
     Language::Go,
@@ -59,6 +60,7 @@ const LANGUAGES: [Language; 18] = [
     Language::Html,
     Language::Css,
     Language::Clojure,
+    Language::Lua,
 ];
 
 impl Language {
@@ -105,6 +107,8 @@ impl Language {
             Language::Css => Some(tree_sitter_css::LANGUAGE.into()),
             #[cfg(feature = "syntax-clojure-orchard")]
             Language::Clojure => Some(tree_sitter_clojure_orchard::LANGUAGE.into()),
+            #[cfg(feature = "syntax-lua")]
+            Language::Lua => Some(tree_sitter_lua::LANGUAGE.into()),
             #[allow(unreachable_patterns)]
             _ => None,
         }
@@ -137,6 +141,7 @@ impl Language {
             Language::Html => include_str!("../queries/html/highlights.scm").to_owned(),
             Language::Css => include_str!("../queries/css/highlights.scm").to_owned(),
             Language::Clojure => include_str!("../queries/clojure/highlights.scm").to_owned(),
+            Language::Lua => include_str!("../queries/lua/highlights.scm").to_owned(),
         }
     }
 }
@@ -175,6 +180,7 @@ pub fn language_for_path(path: &str) -> Option<Language> {
                 "html" | "htm" => Language::Html,
                 "css" => Language::Css,
                 "clj" | "cljs" | "cljc" | "cljd" | "edn" | "bb" => Language::Clojure,
+                "lua" | "luau" => Language::Lua,
                 _ => return None,
             }
         }
@@ -553,6 +559,8 @@ mod tests {
             ("app.cljs", Language::Clojure),
             ("shared.cljc", Language::Clojure),
             ("deps.edn", Language::Clojure),
+            ("workflow.lua", Language::Lua),
+            ("types.luau", Language::Lua),
         ];
         for (path, language) in cases {
             assert_eq!(language_for_path(path), Some(language), "{path}");
@@ -682,6 +690,28 @@ mod tests {
                 .iter()
                 .any(|n| n.starts_with('4'))
         );
+    }
+
+    #[test]
+    fn lua_is_colored_by_role_with_ctx_as_the_context_object() {
+        let text = "-- note\nlocal M = {}\nM.meta = { name = \"x\", review = true }\nfunction M.execute(ctx, input)\n  for i = 1, 3 do\n    if i == 2 then continue end\n  end\n  ctx.branch.create({ name = \"a\" })\n  return nil\nend\nreturn M\n";
+        let spans = run(Language::Lua, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Comment), Some("-- note"));
+        let keywords = texts(text, &spans, SyntaxRole::Keyword);
+        for word in [
+            "local", "function", "for", "if", "return", "end", "continue",
+        ] {
+            assert!(keywords.contains(&word), "{word}: {keywords:?}");
+        }
+        assert!(texts(text, &spans, SyntaxRole::String).contains(&"\"x\""));
+        assert!(texts(text, &spans, SyntaxRole::Number).contains(&"3"));
+        assert!(texts(text, &spans, SyntaxRole::Constant).contains(&"true"));
+        assert!(texts(text, &spans, SyntaxRole::Constant).contains(&"nil"));
+        assert!(texts(text, &spans, SyntaxRole::Property).contains(&"name"));
+        let functions = texts(text, &spans, SyntaxRole::Function);
+        assert!(functions.contains(&"execute"), "{functions:?}");
+        assert!(functions.contains(&"create"), "{functions:?}");
+        assert!(texts(text, &spans, SyntaxRole::Variable).contains(&"ctx"));
     }
 
     #[test]

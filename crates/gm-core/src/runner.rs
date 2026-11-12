@@ -123,7 +123,7 @@ impl EngineHandle {
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
-    spawn_engine(git, false)
+    spawn_engine(git, false, Box::new(|_| {}))
 }
 
 /// The engine of the app, which runs the workflows on their triggers (D155(4)).
@@ -132,7 +132,7 @@ pub fn spawn(git: Box<dyn GitPort>) -> EngineHandle {
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn_app(git: Box<dyn GitPort>) -> EngineHandle {
-    spawn_engine(git, true)
+    spawn_engine(git, true, Box::new(|_| {}))
 }
 
 /// Like `spawn`, with the workflow triggers on or off as `triggers` says: tests use it to
@@ -142,10 +142,27 @@ pub fn spawn_app(git: Box<dyn GitPort>) -> EngineHandle {
 ///
 /// If the OS cannot start the engine thread.
 pub fn spawn_with(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
-    spawn_engine(git, triggers)
+    spawn_engine(git, triggers, Box::new(|_| {}))
 }
 
-fn spawn_engine(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
+/// Like `spawn`, with `setup` run on the engine before its first command: tests use it to point
+/// the engine at folders of their own, such as the user's workflows folder.
+///
+/// # Panics
+///
+/// If the OS cannot start the engine thread.
+pub fn spawn_configured(
+    git: Box<dyn GitPort>,
+    setup: Box<dyn FnOnce(&mut Engine) + Send>,
+) -> EngineHandle {
+    spawn_engine(git, false, setup)
+}
+
+fn spawn_engine(
+    git: Box<dyn GitPort>,
+    triggers: bool,
+    setup: Box<dyn FnOnce(&mut Engine) + Send>,
+) -> EngineHandle {
     let (tx, rx) = async_channel::unbounded::<Message>();
     let busy = Arc::new(AtomicBool::new(false));
     let thread_busy = Arc::clone(&busy);
@@ -171,6 +188,7 @@ fn spawn_engine(git: Box<dyn GitPort>, triggers: bool) -> EngineHandle {
             let mut engine = Engine::new(git);
             engine.set_script_link(link);
             engine.set_triggers(triggers);
+            setup(&mut engine);
             run(engine, &rx, &thread_busy, &reports_to);
         })
         .expect("spawn the engine thread");

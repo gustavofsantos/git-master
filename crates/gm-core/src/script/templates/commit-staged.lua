@@ -3,6 +3,7 @@
 -- to see before the commit is made.
 local M = {}
 
+---@type gitmaster.Meta
 M.meta = {
   name = "commit-staged",
   description = "Commit the staged changes with the message you give",
@@ -10,6 +11,8 @@ M.meta = {
   inputs = { message = { type = "string", prompt = "Commit message" } },
 }
 
+---@param ctx gitmaster.Ctx
+---@param input gitmaster.Input
 function M.execute(ctx, input)
   if ctx.approve("Commit the staged changes with message: " .. input.inputs.message) then
     ctx.commit.create({ message = input.inputs.message })

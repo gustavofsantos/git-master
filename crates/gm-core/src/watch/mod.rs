@@ -15,6 +15,9 @@
 //! - the refs, `refs/` and `packed-refs` in the git dir or the common dir: after
 //!   a quiet period the engine compares the branch tips and fires `refs.changed`
 //!   (`WF3a`);
+//! - the workflow folders the last listing named (`WorkflowsListed.directories`), each
+//!   non-recursively: a `.lua` file written, renamed or removed there by another program, such as
+//!   the person's editor, lists the workflows again after a quiet period (D233);
 //! - the worktree: the root and each directory holding tracked files
 //!   (`set::watch_dirs`); changes whose paths `check-ignore` reports as ignored
 //!   are dropped, so `target/` and `node_modules/` cost nothing;
@@ -174,6 +177,10 @@ pub fn spawn_with(
         threads_last: None,
         refs_first: None,
         refs_last: None,
+        workflow_wanted: Vec::new(),
+        workflow_dirs: BTreeSet::new(),
+        workflows_first: None,
+        workflows_last: None,
     };
     std::thread::Builder::new()
         .name("gm-watch".into())
@@ -213,6 +220,14 @@ struct Worker {
     refs_first: Option<Instant>,
     /// When the last ref change of the pending burst came.
     refs_last: Option<Instant>,
+    /// The folders workflows are read from, as the last listing named them, existing or not.
+    workflow_wanted: Vec<PathBuf>,
+    /// Those of `workflow_wanted` that `os` watches.
+    workflow_dirs: BTreeSet<PathBuf>,
+    /// When the first workflow file change of the pending burst came.
+    workflows_first: Option<Instant>,
+    /// When the last workflow file change of the pending burst came.
+    workflows_last: Option<Instant>,
 }
 
 impl Worker {
@@ -225,6 +240,7 @@ impl Worker {
                 .into_iter()
                 .chain(self.threads_due())
                 .chain(self.refs_due())
+                .chain(self.workflows_due())
                 .min();
             let timeout = due.map(|due| if due <= now { BUSY_POLL } else { due - now });
             let first = match timeout {
@@ -251,6 +267,15 @@ impl Worker {
                 self.refs_first = None;
                 self.refs_last = None;
                 self.engine.refs_changed();
+            }
+            if self.workflows_due().is_some_and(|due| due <= now) {
+                self.workflows_first = None;
+                self.workflows_last = None;
+                // The listing reads the files again; the window shows the new text (D233).
+                if self.root.is_some() {
+                    self.engine
+                        .dispatch(Actor::Human, CommandKind::ListWorkflows);
+                }
             }
             // Without an open repository there is nothing to refresh; the request waits.
             if self.root.is_some() && self.coalescer.should_start(now, self.engine.is_busy()) {
@@ -304,6 +329,10 @@ impl Worker {
             Event::OperationChanged { id, state, .. } if state.is_terminal() => {
                 self.coalescer.finished(id, now);
             }
+            Event::WorkflowsListed { directories, .. } => {
+                self.workflow_wanted = directories.into_iter().map(PathBuf::from).collect();
+                self.sync_workflow_dirs();
+            }
             _ => {}
         }
     }
@@ -329,6 +358,9 @@ impl Worker {
         self.threads_last = None;
         self.refs_first = None;
         self.refs_last = None;
+        self.workflow_dirs.clear();
+        self.workflows_first = None;
+        self.workflows_last = None;
         self.root = Some(root.to_path_buf());
         match self.install(root) {
             Ok(dirs) => {
@@ -398,6 +430,40 @@ impl Worker {
         }
     }
 
+    /// Brings the workflow watches in line with the folders of the last listing that exist. A
+    /// folder that cannot be watched is left out: its files are read at the next listing.
+    fn sync_workflow_dirs(&mut self) {
+        let Some(os) = self.os.as_mut() else {
+            self.workflow_dirs.clear();
+            return;
+        };
+        let wanted: BTreeSet<PathBuf> = self
+            .workflow_wanted
+            .iter()
+            .filter(|dir| dir.is_dir())
+            .cloned()
+            .collect();
+        for dir in self.workflow_dirs.difference(&wanted) {
+            let _ = os.unwatch(dir);
+        }
+        let mut watched = BTreeSet::new();
+        for dir in wanted {
+            if self.workflow_dirs.contains(&dir)
+                || os.watch(&dir, RecursiveMode::NonRecursive).is_ok()
+            {
+                watched.insert(dir);
+            }
+        }
+        self.workflow_dirs = watched;
+    }
+
+    /// When the pending workflow file change lists the workflows again, if there is one.
+    fn workflows_due(&self) -> Option<Instant> {
+        let first = self.workflows_first?;
+        let last = self.workflows_last?;
+        Some((last + DEBOUNCE).min(first + MAX_WAIT))
+    }
+
     /// Notes a change of the thread database. The event goes out after a quiet
     /// period, or once `MAX_WAIT` has passed since the burst began.
     fn note_threads_change(&mut self, now: Instant) {
@@ -463,6 +529,7 @@ impl Worker {
     fn degrade(&mut self, reason: String) {
         self.os = None;
         self.dirs = None;
+        self.workflow_dirs.clear();
         if !self.degraded {
             self.degraded = true;
             let _ = self.notices.try_send(Notice::Degraded { reason });
@@ -492,7 +559,9 @@ impl Worker {
         let mut threads_touched = false;
         let mut threads_folder_appeared = false;
         let mut refs_touched = false;
+        let mut workflows_touched = false;
         for path in paths.drain(..) {
+            workflows_touched |= filter::workflow_changed(&path, &self.workflow_wanted);
             if let Ok(rel) = path
                 .strip_prefix(&git_dir)
                 .or_else(|_| path.strip_prefix(&common_dir))
@@ -528,6 +597,10 @@ impl Worker {
         }
         if refs_touched {
             self.note_refs_change(now);
+        }
+        if workflows_touched {
+            self.workflows_first.get_or_insert(now);
+            self.workflows_last = Some(now);
         }
         if tracked_set_changed && let Err(reason) = self.sync_worktree(&root) {
             self.degrade(reason);

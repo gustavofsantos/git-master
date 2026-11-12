@@ -1,7 +1,9 @@
 //! The reference files the app writes next to the user's workflows (design/workflow-scripts.md,
-//! D102): `.api/API.md`, the type file for editors, and a short `SKILL.md` for agents. They are
-//! generated from the `ctx` surface (which comes from the action catalog), so they cannot drift
-//! from the code. A directory whose name starts with a dot is not read as a workflow source.
+//! D102, D233): `.api/API.md`, the type files for editors (`gitmaster.lua` for the Lua language
+//! server, `ctx.d.luau` for a Luau one) and a short `SKILL.md` for agents, plus the `.luarc.json`
+//! that points the Lua language server at them. They are generated from the `ctx` surface (which
+//! comes from the action catalog), so they cannot drift from the code. A directory whose name
+//! starts with a dot is not read as a workflow source.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -11,12 +13,14 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+use super::lua_types::{self, LUA_TYPES_FILE, LUARC_FILE};
 use super::meta::{self, Concurrency};
 use super::port::Budgets;
 use super::surface::{ArgShape, CtxFn, CtxSurface, HELPERS};
 use crate::script::catalog::{self, FieldKind, FieldSpec, Level};
 
-/// The type file's name. Luau's definition-file format, for editors with a Luau language server.
+/// The Luau type file's name. Luau's definition-file format, for editors with a Luau language
+/// server. The Lua language server reads `lua_types::LUA_TYPES_FILE` instead.
 pub const TYPES_FILE: &str = "ctx.d.luau";
 
 const API_DIR: &str = ".api";
@@ -29,22 +33,26 @@ const VERSION_FILE: &str = "VERSION";
 pub struct ApiFiles {
     pub api_md: String,
     pub types: String,
+    /// The definition file of the Lua language server (D233).
+    pub lua_types: String,
     pub skill_md: String,
 }
 
-/// Generates the three files for `surface`. `version` is the app version, shown in the header.
+/// Generates the files for `surface`. `version` is the app version, shown in the header.
 #[must_use]
 pub fn generate(surface: &CtxSurface, version: &str) -> ApiFiles {
     ApiFiles {
         api_md: api_md(surface, version),
         types: types(surface),
+        lua_types: lua_types::lua_types(surface),
         skill_md: skill_md(),
     }
 }
 
-/// Writes `<workflows_dir>/.api/` (`API.md`, the type file, `SKILL.md` and `VERSION`) when it is
+/// Writes `<workflows_dir>/.api/` (`API.md`, the type files, `SKILL.md` and `VERSION`) when it is
 /// missing or was written by another version or by other content. Returns whether it wrote.
-/// Creates the directories. Never touches anything outside `.api/`.
+/// Creates the directories. Outside `.api/` it writes one file, `.luarc.json`, and only when the
+/// folder has none (`write_editor_settings`).
 ///
 /// # Errors
 ///
@@ -57,6 +65,7 @@ pub fn write_if_stale(workflows_dir: &Path, version: &str) -> io::Result<bool> {
     let wanted = [
         (API_FILE, files.api_md.as_bytes()),
         (TYPES_FILE, files.types.as_bytes()),
+        (LUA_TYPES_FILE, files.lua_types.as_bytes()),
         (SKILL_FILE, files.skill_md.as_bytes()),
         (VERSION_FILE, stamp.as_bytes()),
     ];
@@ -69,7 +78,31 @@ pub fn write_if_stale(workflows_dir: &Path, version: &str) -> io::Result<bool> {
         write_atomic(&dir, name, bytes)?;
         wrote = true;
     }
+    wrote |= write_editor_settings(workflows_dir, API_DIR)?;
     Ok(wrote)
+}
+
+/// Writes `.luarc.json` into `folder`, a folder of workflows, when it has none, so the Lua
+/// language server completes `ctx` there (D233). `library` is the folder of the definition file:
+/// `.api` for the user's folder, and the absolute path of that `.api` for any other folder. A
+/// file that exists is the person's and is never replaced. Returns whether it wrote.
+///
+/// # Errors
+///
+/// Fails when the file cannot be written.
+pub fn write_editor_settings(folder: &Path, library: &str) -> io::Result<bool> {
+    if folder.join(LUARC_FILE).exists() {
+        return Ok(false);
+    }
+    write_atomic(folder, LUARC_FILE, lua_types::luarc(library).as_bytes())?;
+    Ok(true)
+}
+
+/// The folder of the definition files of `workflows_dir`, as `write_editor_settings` takes it
+/// for another folder.
+#[must_use]
+pub fn library_of(workflows_dir: &Path) -> String {
+    workflows_dir.join(API_DIR).to_string_lossy().into_owned()
 }
 
 /// Writes through a temporary name in the same folder, then renames it over the file.
@@ -79,11 +112,12 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temporary, dir.join(name))
 }
 
-/// sha256 of the three generated files, lowercase hex. It goes into `VERSION` with the version.
+/// sha256 of the generated files, lowercase hex. It goes into `VERSION` with the version.
 fn digest(files: &ApiFiles) -> String {
     let mut hasher = Sha256::new();
     hasher.update(files.api_md.as_bytes());
     hasher.update(files.types.as_bytes());
+    hasher.update(files.lua_types.as_bytes());
     hasher.update(files.skill_md.as_bytes());
     let mut hex = String::new();
     for byte in hasher.finalize() {
@@ -99,12 +133,15 @@ fn digest(files: &ApiFiles) -> String {
 
 const MODULE_SKELETON: &str = r#"local M = {}
 
+---@type gitmaster.Meta
 M.meta = {
   name = "my-workflow",
   description = "One line that says what the workflow does",
   trigger = { on = "manual" },
 }
 
+---@param ctx gitmaster.Ctx
+---@param input gitmaster.Input
 function M.execute(ctx, input)
   -- the work goes here
 end
@@ -260,7 +297,7 @@ fn api_md(surface: &CtxSurface, version: &str) -> String {
     para(
         &mut out,
         &format!(
-            "Version {version}. This file is generated from the action catalog. The app rewrites it when its version changes, so do not edit it. The file `ctx.d.luau` in this folder holds the same signatures as Luau types, for an editor with a Luau language server."
+            "Version {version}. This file is generated from the action catalog. The app rewrites it when its version changes, so do not edit it. The file `gitmaster.lua` in this folder holds the same signatures as a definition file of the Lua language server, and `ctx.d.luau` holds them as Luau types: an editor with one of those language servers completes `ctx` from them."
         ),
     );
     module_section(&mut out);
@@ -286,7 +323,7 @@ fn module_section(out: &mut String) {
     code(out, "lua", MODULE_SKELETON);
     para(
         out,
-        "- `M.meta` is read when GitMaster loads the file, in a sandbox without `ctx`. No logic runs then.\n- `M.execute(ctx, input)` runs the workflow. `ctx` is the only way the script acts. `input` holds data only.",
+        "- `M.meta` is read when GitMaster loads the file, in a sandbox without `ctx`. No logic runs then.\n- `M.execute(ctx, input)` runs the workflow. `ctx` is the only way the script acts. `input` holds data only.\n- The `---@type` and `---@param` lines are comments to GitMaster. A Lua language server reads them, with `.api/gitmaster.lua`, to complete `M.meta`, `ctx` and `input` in an editor. Keep them in a file you write.",
     );
 }
 
@@ -910,7 +947,7 @@ fn luau_type(kind: FieldKind) -> &'static str {
 }
 
 /// The Luau type of a call's result (D105, D106).
-fn result_type(path: &str) -> &'static str {
+pub(super) fn result_type(path: &str) -> &'static str {
     match path {
         "exec" => "ExecResult",
         "approve" => "boolean",
@@ -941,7 +978,7 @@ fn skill_md() -> String {
     out.push_str("---\n\n");
     out.push_str("# Writing GitMaster workflows\n\n");
     out.push_str("- Write one `.lua` file in the workflows folder, the folder that holds this `.api/` folder: `~/.config/gitmaster/workflows/` (under `$XDG_CONFIG_HOME` when that is set). Do not write into the working tree of a repository. A review for one task goes in `.git/gitmaster/workflows/` of that repository, when the person asks for it.\n");
-    out.push_str("- `.api/ctx.d.luau` has the `ctx` signatures as Luau types, for an editor.\n");
+    out.push_str("- `.api/gitmaster.lua` has the `ctx` signatures for the Lua language server, and `.api/ctx.d.luau` has them as Luau types. Keep the `---@type gitmaster.Meta` and `---@param` lines of the module in a file you write: the person's editor completes from them.\n");
     out.push_str("- Read `.api/API.md` first. It lists every `ctx` function with its arguments, effect level and outcomes, and the shape of `M.meta`.\n");
     out.push_str("- Check, dry-run and test, and repeat until each passes:\n");
     out.push_str("  1. `gitmaster workflow check <file>`. Fix every `file:line: message`.\n");
@@ -963,17 +1000,17 @@ fn skill_md() -> String {
 // ---------------------------------------------------------------------------------------------
 
 /// The namespace of a catalog name: `branch` for `branch.create`, `""` for a top-level function.
-fn namespace(path: &str) -> &str {
+pub(super) fn namespace(path: &str) -> &str {
     path.split_once('.').map_or("", |(ns, _)| ns)
 }
 
 /// The name of a function inside its namespace: `create` for `branch.create`.
-fn method(path: &str) -> &str {
+pub(super) fn method(path: &str) -> &str {
     path.split_once('.').map_or(path, |(_, method)| method)
 }
 
 /// The functions grouped by namespace, sorted; the top level is the group `""`.
-fn grouped(surface: &CtxSurface) -> BTreeMap<&str, Vec<&CtxFn>> {
+pub(super) fn grouped(surface: &CtxSurface) -> BTreeMap<&str, Vec<&CtxFn>> {
     let mut groups: BTreeMap<&str, Vec<&CtxFn>> = BTreeMap::new();
     for f in surface.functions() {
         groups.entry(namespace(f.path)).or_default().push(f);
@@ -982,7 +1019,7 @@ fn grouped(surface: &CtxSurface) -> BTreeMap<&str, Vec<&CtxFn>> {
 }
 
 /// `branch` becomes `Branch`, `restack` becomes `Restack`; `wait` becomes `Wait`.
-fn pascal(path: &str) -> String {
+pub(super) fn pascal(path: &str) -> String {
     path.split('.')
         .map(|segment| {
             let mut chars = segment.chars();
@@ -1069,7 +1106,7 @@ fn meta_type(field: &str) -> String {
     }
 }
 
-fn meta_help(field: &str) -> &'static str {
+pub(super) fn meta_help(field: &str) -> &'static str {
     match field {
         "name" => "The name of the workflow. One line, at most 80 characters. Required.",
         "description" => "One line that says what the workflow does. At most 200 characters.",
@@ -1087,7 +1124,7 @@ fn meta_help(field: &str) -> &'static str {
     }
 }
 
-fn trigger_help(field: &str) -> &'static str {
+pub(super) fn trigger_help(field: &str) -> &'static str {
     match field {
         "on" => "The trigger. Required. See the list below.",
         "match" => {
@@ -1098,7 +1135,7 @@ fn trigger_help(field: &str) -> &'static str {
     }
 }
 
-fn input_field_help(field: &str) -> &'static str {
+pub(super) fn input_field_help(field: &str) -> &'static str {
     match field {
         "type" => "The type of the input. The default is `string`.",
         "prompt" => "What the dialog asks. The default is the name of the input.",
@@ -1191,6 +1228,8 @@ mod tests {
             assert!(files.api_md.contains(text), "API.md lacks {what}: {text}");
         }
         assert!(files.skill_md.contains("ctx.d.luau"));
+        assert!(files.skill_md.contains("gitmaster.lua"));
+        assert!(files.api_md.contains("gitmaster.lua"));
         assert!(files.skill_md.contains("`summary`"));
         assert!(files.skill_md.lines().count() < 60, "SKILL.md stays short");
     }
@@ -1372,7 +1411,44 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names.len(), 4, "no temporary files are left: {names:?}");
+        assert_eq!(names.len(), 5, "no temporary files are left: {names:?}");
+    }
+
+    #[test]
+    fn the_definition_file_and_the_settings_are_written_with_the_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(write_if_stale(root, "1.0.0").unwrap());
+        assert_eq!(
+            fs::read_to_string(root.join(".api").join(LUA_TYPES_FILE)).unwrap(),
+            generate(&surface(), "1.0.0").lua_types
+        );
+        let settings = fs::read_to_string(root.join(LUARC_FILE)).unwrap();
+        assert!(settings.contains("\".api\""), "{settings}");
+    }
+
+    #[test]
+    fn settings_the_person_wrote_are_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join(LUARC_FILE), "{}").unwrap();
+        assert!(write_if_stale(root, "1.0.0").unwrap());
+        assert!(!write_editor_settings(root, ".api").unwrap());
+        assert_eq!(fs::read_to_string(root.join(LUARC_FILE)).unwrap(), "{}");
+    }
+
+    #[test]
+    fn another_folder_points_at_the_definitions_of_the_users_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user");
+        let repository = dir.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let library = library_of(&user);
+        assert!(write_editor_settings(&repository, &library).unwrap());
+        let settings = fs::read_to_string(repository.join(LUARC_FILE)).unwrap();
+        let value: Value = serde_json::from_str(&settings).unwrap();
+        assert_eq!(value["workspace.library"][0], library.as_str());
+        assert!(!repository.join(".api").exists());
     }
 
     #[test]

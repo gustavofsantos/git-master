@@ -1,6 +1,6 @@
 //! The engine's side of workflow scripts (design/workflow-scripts.md): the Git actions a run takes
 //! through the engine's `GitPort`, the directories scripts are read from, and the files of the
-//! Workflows page (save atomically, delete to the trash). The engine's methods that drive them
+//! Workflows page (open in the editor, delete to the trash). The engine's methods that drive them
 //! live in `engine`.
 
 use std::path::{Path, PathBuf};

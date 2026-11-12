@@ -6,6 +6,7 @@
 -- on your agent's version and are your choice: add them to the exec call below.
 local M = {}
 
+---@type gitmaster.Meta
 M.meta = {
   name = "review-for-task",
   description = "Review the change against one task you name",
@@ -19,6 +20,8 @@ local TASK = table.concat({
   "Name each place where the change departs from the task.",
 }, "\n")
 
+---@param ctx gitmaster.Ctx
+---@param input gitmaster.Input
 function M.execute(ctx, input)
   local branch = input.repo.branch
   if branch == nil then

@@ -1,6 +1,6 @@
-; Highlights of the Lua of the workflow script editor (D151). The component looks up each capture
-; by its exact name (`SyntaxColors::style`), so only the names it paints are used here: an
-; unknown name would be plain text. Where two rules overlap, the later one wins.
+; Highlights of Lua, for the file viewer and the Script tab of the Workflows page (D233). Written
+; for GitMaster; workflows run as Luau, so two of its words are colored too. Where two rules
+; overlap, the later one wins.
 
 ; Keywords. `continue` and `export` are Luau only: the Lua grammar reads them as identifiers, so
 ; they are matched by their text. `type` is not a keyword here, because it is a Lua builtin too.
@@ -97,5 +97,5 @@
     method: (identifier) @function))
 
 ; The context object of a workflow. It is painted like `self` in other languages.
-((identifier) @variable.special
-  (#eq? @variable.special "ctx"))
+((identifier) @variable.builtin
+  (#eq? @variable.builtin "ctx"))

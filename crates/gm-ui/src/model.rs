@@ -1436,7 +1436,7 @@ impl Model {
             } => {
                 self.workflows.operation_changed(id);
                 self.workflows_page
-                    .operation_ended(id, state, detail.as_deref());
+                    .operation_ended(id, state);
                 // A gate that vetoed the operation says why, where the operation's errors show (`WF3c`).
                 if let (OperationState::Vetoed, Some(text)) = (state, &detail) {
                     self.error = Some(text.clone());
@@ -1504,12 +1504,15 @@ impl Model {
                 self.workflows_page.checked(id, diagnostics);
                 None
             }
-            Event::WorkflowFileSaved { id, hash, .. } => {
-                self.workflows_page.saved(id, &hash);
-                None
-            }
             Event::WorkflowFileDeleted { path, .. } => {
                 self.workflows_page.deleted(&path);
+                None
+            }
+            Event::WorkflowOpenedInEditor { path, program, .. } => {
+                // The editor is another program: the status bar says it was started.
+                let file = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+                self.set_notice(format!("Opened {file} with {program}."));
+                self.notice_icon = Some(Icon::CheckCircle);
                 None
             }
             Event::WorkflowCreated { path, .. } | Event::WorkflowCopied { path, .. } => {
@@ -2057,7 +2060,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkflowRunLoaded { id, .. }
         | Event::WorkflowDryRun { id, .. }
         | Event::WorkflowChecked { id, .. }
-        | Event::WorkflowFileSaved { id, .. }
+        | Event::WorkflowOpenedInEditor { id, .. }
         | Event::WorkflowFileDeleted { id, .. }
         | Event::ReviewCommentsListed { id, .. }
         | Event::ReviewSnapshotText { id, .. }

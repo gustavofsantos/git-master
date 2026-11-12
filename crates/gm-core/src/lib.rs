@@ -14,6 +14,7 @@ pub mod contexts;
 mod contexts_session;
 pub mod diff;
 mod engine;
+pub mod external_editor;
 pub mod fake;
 pub mod file_index;
 mod files;
@@ -76,6 +77,6 @@ pub use port::{
     BlameRead, CommitSnapshot, DetailRead, DiscardOutcome, FileListRead, FileMerge, GitError,
     GitPort, GrepRead, HistoryRevs, RefMove, RemoteRun, ReviewSide, TreeMerge,
 };
-pub use runner::{EngineHandle, spawn, spawn_app, spawn_with};
+pub use runner::{EngineHandle, spawn, spawn_app, spawn_configured, spawn_with};
 pub use script_session::{EffectRequest, ScriptJob, ScriptLink, ScriptReport};
 pub use threads_session::{ProvenanceJob, ProvenanceReport};

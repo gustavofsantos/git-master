@@ -26,7 +26,6 @@ mod contexts_model;
 mod diff_pane;
 mod diff_rows;
 mod editor;
-mod editor_theme;
 mod file_discard;
 mod fuzzy;
 mod gate_wait;
@@ -39,7 +38,6 @@ mod inbox;
 mod label_curate;
 mod labels_page;
 mod local_review;
-mod lua_language;
 mod markdown;
 mod memories;
 mod memory_dialogs;
@@ -70,7 +68,7 @@ mod review_composer;
 mod review_files;
 mod review_run;
 mod review_scorecards;
-mod script_completion;
+mod script_view;
 mod shell_code;
 mod shell_commit;
 mod shell_compare;
@@ -117,7 +115,6 @@ mod treemap;
 mod view;
 mod welcome;
 mod window_chrome;
-mod workflow_editor;
 mod workflow_inputs;
 mod workflow_keys;
 mod workflow_review;
@@ -135,10 +132,9 @@ mod worktree_remove;
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
 use gpui::{
-    App, AppContext, Application, Bounds, Global, KeyBinding, Menu, MenuItem, TitlebarOptions,
+    App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, actions, px, size,
 };
-use gpui_component::Root;
 
 use crate::theme::ThemeMode;
 use crate::view::{KEY_CONTEXT, StatusView};
@@ -159,7 +155,7 @@ actions!(
         OpenQuickOpen,
         OpenSearch,
         CopyCurrentBranch,
-        SaveWorkflow,
+        OpenWorkflowInEditor,
         UndoLastOperation,
     ]
 );
@@ -203,20 +199,6 @@ pub fn run(
                 .and_then(ThemeMode::from_name)
                 .unwrap_or(ThemeMode::System);
             theme::set_mode(mode);
-            // The component's theme follows the palette in use. The OS appearance is not
-            // known yet, so `StatusView` applies it again once the window reports it.
-            // The Lua grammar of the script editor (D151) is known before the first window.
-            lua_language::register();
-            editor_theme::apply(cx);
-            // The component binds its keys when it is set up; keep them, since the app clears
-            // the keymap when it rebinds workflow shortcuts (see `bind_keys_with_workflows`).
-            let component_keys = cx
-                .key_bindings()
-                .borrow()
-                .bindings()
-                .cloned()
-                .collect::<Vec<_>>();
-            cx.set_global(ComponentKeys(component_keys));
             bind_keys(cx);
             quit_with_the_window(cx);
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
@@ -250,13 +232,10 @@ pub fn run(
                 app_id: Some("gitmaster".into()),
                 ..WindowOptions::default()
             };
-            // The component's `Input` needs the window root to be a `Root` (D152). `Root` draws
-            // its own padding and border; `window_chrome` moves the view back over them.
             let opened = cx.open_window(options, move |window, cx| {
-                let view = cx.new(|cx| {
+                cx.new(|cx| {
                     StatusView::new(engine, command_log, watch, start, features, window, cx)
-                });
-                cx.new(|cx| Root::new(view, window, cx))
+                })
             });
             if let Err(error) = opened {
                 eprintln!("gitmaster: {error}");
@@ -265,16 +244,6 @@ pub fn run(
             cx.activate(true);
         });
 }
-
-/// The key bindings the component adds when it is set up (its inputs, `Root`), kept so they can
-/// be bound again after the keymap is cleared.
-struct ComponentKeys(Vec<KeyBinding>);
-
-impl Global for ComponentKeys {}
-
-/// The context of the window root `Root`. Its own Tab binding moves focus with GPUI's order,
-/// which would skip this app's focus cycle, so Tab is bound here to the app's actions instead.
-const ROOT_CONTEXT: &str = "Root";
 
 /// The list keys are scoped to the list's context, so they never fire while
 /// typing into the message or the diff pane. Tab and the quit key
@@ -292,14 +261,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-z", UndoLastOperation, Some(KEY_CONTEXT)),
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrev, None),
-        KeyBinding::new("tab", FocusNext, Some(ROOT_CONTEXT)),
-        KeyBinding::new("shift-tab", FocusPrev, Some(ROOT_CONTEXT)),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-k", OpenPalette, None),
         KeyBinding::new("secondary-p", OpenQuickOpen, None),
         KeyBinding::new("secondary-shift-f", OpenSearch, None),
         KeyBinding::new("alt-secondary-c", CopyCurrentBranch, None),
-        KeyBinding::new("secondary-s", SaveWorkflow, None),
+        KeyBinding::new("secondary-e", OpenWorkflowInEditor, None),
         KeyBinding::new("secondary-shift-m", diff_pane::CommentOnSelection, None),
     ]);
     composer::bind_keys(cx);
@@ -313,17 +280,9 @@ fn bind_keys(cx: &mut App) {
 pub(crate) fn built_in_keys(cx: &App) -> Vec<(String, String)> {
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
-    // The component's bindings are not the app's: they clash with nothing the user types.
-    let component: Vec<&str> = cx
-        .global::<ComponentKeys>()
-        .0
-        .iter()
-        .map(|binding| binding.action().name())
-        .collect();
     keymap
         .bindings()
         .filter(|binding| binding.action().name() != RUN_WORKFLOW_KEY)
-        .filter(|binding| !component.contains(&binding.action().name()))
         .filter_map(|binding| match binding.keystrokes() {
             [only] => Some((
                 only.unparse(),
@@ -338,8 +297,6 @@ pub(crate) fn built_in_keys(cx: &App) -> Vec<(String, String)> {
 /// Shortcuts GPUI cannot parse are skipped; the plan already left out the ones that clash.
 pub(crate) fn bind_keys_with_workflows(cx: &mut App, bound: &[workflow_keys::WorkflowKey]) {
     cx.clear_key_bindings();
-    let component = cx.global::<ComponentKeys>().0.clone();
-    cx.bind_keys(component);
     bind_keys(cx);
     for key in bound {
         if gpui::Keystroke::parse(&key.keystroke).is_err() {
@@ -402,7 +359,7 @@ mod tests {
             "secondary-p",
             "secondary-shift-f",
             "alt-secondary-c",
-            "secondary-s",
+            "secondary-e",
         ] {
             let binding = KeyBinding::new(keys, Refresh, Some(KEY_CONTEXT));
             assert_eq!(binding.keystrokes().len(), 1, "{keys}");

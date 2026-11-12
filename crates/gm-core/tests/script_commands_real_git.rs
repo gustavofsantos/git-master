@@ -336,7 +336,13 @@ fn the_api_reference_is_written_next_to_the_scripts_once() {
     init_repo(repo.path());
     let mut harness = Harness::open(repo.path(), flows.path());
     harness.send(CommandKind::ListWorkflows);
-    for file in ["API.md", "ctx.d.luau", "SKILL.md", "VERSION"] {
+    for file in [
+        "API.md",
+        "ctx.d.luau",
+        "gitmaster.lua",
+        "SKILL.md",
+        "VERSION",
+    ] {
         assert!(flows.path().join(".api").join(file).exists(), "{file}");
     }
     // A repository is never written to.
@@ -1000,122 +1006,143 @@ fn a_dry_run_of_a_script_with_a_syntax_error_returns_the_error() {
     assert_eq!(dry.stop, "");
 }
 
+#[cfg(unix)]
 #[test]
-fn saving_creates_updates_and_refuses_a_stale_hash_and_a_file_outside_the_folders() {
+fn opening_in_the_editor_starts_the_configured_command_on_a_workflow_file_only() {
+    use std::os::unix::fs::PermissionsExt;
     let repo = tempfile::tempdir().unwrap();
     let flows = tempfile::tempdir().unwrap();
+    let tools = tempfile::tempdir().unwrap();
     init_repo(repo.path());
+    write(flows.path(), "make-branch.lua", BRANCH);
+    // The "editor" writes its arguments into the folder it was started in.
+    let editor = tools.path().join("my editor.sh");
+    std::fs::write(&editor, "#!/bin/sh\nprintf '%s\\n' \"$@\" > opened.txt\n").unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        repo.path(),
+        &[
+            "config",
+            "gitmaster.editor",
+            &format!("'{}' --wait", editor.display()),
+        ],
+    );
     let mut harness = Harness::open(repo.path(), flows.path());
-    let path = flows.path().join("new-flow.lua").display().to_string();
+    let path = flows.path().join("make-branch.lua").display().to_string();
 
-    // A new file passes no hash.
-    let events = harness.send(CommandKind::SaveWorkflowFile {
-        path: path.clone(),
-        source: BRANCH.to_owned(),
-        expected_hash: None,
-    });
+    // An agent cannot start a program on the person's desktop.
+    let agent = harness.send_as(
+        Actor::Agent {
+            name: "claude".into(),
+        },
+        CommandKind::OpenWorkflowInEditor { path: path.clone() },
+    );
+    assert!(failure(&agent).unwrap().contains("only a human"));
+
+    let events = harness.send(CommandKind::OpenWorkflowInEditor { path: path.clone() });
     assert_eq!(failure(&events), None);
-    let saved_hash = events
-        .iter()
-        .find_map(|e| match e {
-            Event::WorkflowFileSaved { hash, .. } => Some(hash.clone()),
-            _ => None,
-        })
-        .expect("saved");
-    assert_eq!(saved_hash, sha256(BRANCH));
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), BRANCH);
-    let listing = harness.listing();
     assert!(
-        listing
-            .iter()
-            .any(|w| w.path == path && w.hash == saved_hash)
+        events.iter().any(|e| matches!(
+            e,
+            Event::WorkflowOpenedInEditor { path: opened, program, .. }
+                if *opened == path && *program == editor.display().to_string()
+        )),
+        "{events:#?}"
     );
-
-    // A creation over an existing file is refused.
-    let again = harness.send(CommandKind::SaveWorkflowFile {
-        path: path.clone(),
-        source: "x".into(),
-        expected_hash: None,
-    });
-    assert!(failure(&again).is_some());
-
-    // The right hash replaces the file.
-    let edited = format!("{BRANCH}-- edited\n");
-    let events = harness.send(CommandKind::SaveWorkflowFile {
-        path: path.clone(),
-        source: edited.clone(),
-        expected_hash: Some(saved_hash.clone()),
-    });
-    assert_eq!(failure(&events), None);
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
-
-    // A stale hash is a conflict, and the file keeps what is on disk.
-    let stale = harness.send(CommandKind::SaveWorkflowFile {
-        path: path.clone(),
-        source: "lost\n".into(),
-        expected_hash: Some(saved_hash),
-    });
+    let written = flows.path().join("opened.txt");
+    for _ in 0..500 {
+        if std::fs::read_to_string(&written).is_ok_and(|text| text.lines().count() == 2) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let canonical = std::fs::canonicalize(flows.path())
+        .unwrap()
+        .join("make-branch.lua");
     assert_eq!(
-        failure(&stale).as_deref(),
-        Some("the file changed on disk; reload it")
+        std::fs::read_to_string(&written).unwrap(),
+        format!("--wait\n{}\n", canonical.display())
     );
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+    // The file is as it was: opening writes nothing.
+    assert_eq!(
+        std::fs::read_to_string(flows.path().join("make-branch.lua")).unwrap(),
+        BRANCH
+    );
 
-    // Only a .lua file in a workflows folder is written.
-    let toml = flows.path().join("x.toml").display().to_string();
-    let not_lua = harness.send(CommandKind::SaveWorkflowFile {
-        path: toml,
-        source: "a = 1\n".into(),
-        expected_hash: None,
+    // Only a workflow file that exists is opened.
+    let missing = harness.send(CommandKind::OpenWorkflowInEditor {
+        path: flows.path().join("gone.lua").display().to_string(),
     });
-    assert!(failure(&not_lua).unwrap().contains("must end in .lua"));
+    assert!(failure(&missing).unwrap().contains("does not exist"));
     let elsewhere = tempfile::tempdir().unwrap();
-    let outside = harness.send(CommandKind::SaveWorkflowFile {
+    write(elsewhere.path(), "out.lua", BRANCH);
+    let outside = harness.send(CommandKind::OpenWorkflowInEditor {
         path: elsewhere.path().join("out.lua").display().to_string(),
-        source: BRANCH.to_owned(),
-        expected_hash: None,
     });
     assert!(
         failure(&outside)
             .unwrap()
             .contains("is not a workflows directory")
     );
-    assert!(!elsewhere.path().join("out.lua").exists());
+    let not_lua = harness.send(CommandKind::OpenWorkflowInEditor {
+        path: flows.path().join(".luarc.json").display().to_string(),
+    });
+    assert!(failure(&not_lua).unwrap().contains("must end in .lua"));
 }
 
 #[test]
-fn a_saved_edit_is_unreviewed_until_it_is_reviewed_again() {
+fn an_editor_that_cannot_start_is_reported_with_the_setting() {
+    let repo = tempfile::tempdir().unwrap();
+    let flows = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    write(flows.path(), "make-branch.lua", BRANCH);
+    git(
+        repo.path(),
+        &["config", "gitmaster.editor", "gm-no-such-editor-program"],
+    );
+    let mut harness = Harness::open(repo.path(), flows.path());
+    let events = harness.send(CommandKind::OpenWorkflowInEditor {
+        path: flows.path().join("make-branch.lua").display().to_string(),
+    });
+    let reason = failure(&events).expect("a failure");
+    assert!(
+        reason.contains("cannot start `gm-no-such-editor-program` (gitmaster.editor)"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn the_listing_writes_the_language_server_files_for_both_workflow_folders() {
     let repo = tempfile::tempdir().unwrap();
     let flows = tempfile::tempdir().unwrap();
     init_repo(repo.path());
     write(flows.path(), "make-branch.lua", BRANCH);
     let mut harness = Harness::open(repo.path(), flows.path());
-    harness.review("make-branch");
-    let hash = harness
-        .listing()
-        .iter()
-        .find(|w| w.name == "make-branch")
-        .unwrap()
-        .hash
-        .clone();
+    let folder = repo.path().join(".git").join("gitmaster").join("workflows");
 
-    let path = flows.path().join("make-branch.lua").display().to_string();
-    let edited = format!("{BRANCH}-- saved\n");
-    let events = harness.send(CommandKind::SaveWorkflowFile {
-        path,
-        source: edited,
-        expected_hash: Some(hash),
-    });
-    assert_eq!(failure(&events), None);
+    // The repository's folder is not created for the settings.
+    harness.listing();
+    assert!(flows.path().join(".api").join("gitmaster.lua").is_file());
+    let own = std::fs::read_to_string(flows.path().join(".luarc.json")).unwrap();
+    assert!(own.contains("\".api\""), "{own}");
+    assert!(!folder.exists());
 
-    let events = harness.send(run("make-branch", &[("name", "feat/z")]));
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, Event::WorkflowReviewRequested { .. })),
-        "{events:#?}"
+    // Once it exists, its settings point at the definitions of the user's folder.
+    std::fs::create_dir_all(&folder).unwrap();
+    harness.listing();
+    let settings = std::fs::read_to_string(folder.join(".luarc.json")).unwrap();
+    let library = flows.path().join(".api").display().to_string();
+    assert!(settings.contains(&library), "{settings}");
+    assert!(!folder.join(".api").exists());
+    assert_eq!(git(repo.path(), &["status", "--porcelain"]), "");
+
+    // Settings the person changed stay.
+    std::fs::write(folder.join(".luarc.json"), "{}").unwrap();
+    harness.listing();
+    assert_eq!(
+        std::fs::read_to_string(folder.join(".luarc.json")).unwrap(),
+        "{}"
     );
-    assert_eq!(git(repo.path(), &["branch", "--list", "feat/z"]), "");
 }
 
 #[test]

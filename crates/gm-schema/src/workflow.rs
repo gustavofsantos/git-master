@@ -23,7 +23,7 @@ pub struct WorkflowInfo {
     pub error: Option<String>,
     /// Every warning of a loaded workflow, as `line N: message`.
     pub warnings: Vec<String>,
-    /// The file as read, for the editor; empty when it could not be read.
+    /// The file as read, for the Script tab; empty when it could not be read.
     pub source: String,
     /// Whether the person reviewed this version of the text (D101).
     #[serde(default)]
@@ -216,7 +216,7 @@ pub struct WorkflowDryRun {
     pub stop: String,
 }
 
-/// One problem of a script's text, as the editor shows it.
+/// One problem of a script's text, as the Script tab shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowDiagnostic {
     /// 1-based; 0 when the problem has no single line.

@@ -295,21 +295,6 @@ pub fn sync_client_inset(window: &mut Window) {
     window.set_client_inset(inset);
 }
 
-/// The space gpui-component's `Root` puts around the window's content, per side as `[top, right,
-/// bottom, left]`: its padding, and the 1px border after it. Zero where the window is tiled, and
-/// on platforms that draw the frame, since `Root` adds neither there.
-#[must_use]
-pub fn root_overhang(window: &Window) -> [Pixels; 4] {
-    let pads = gpui_component::window_paddings(window);
-    let side = |pad: Pixels| if pad > px(0.) { pad + px(1.) } else { px(0.) };
-    [
-        side(pads.top),
-        side(pads.right),
-        side(pads.bottom),
-        side(pads.left),
-    ]
-}
-
 /// The window's root, wrapped in the frame the app draws when it draws one:
 /// a transparent margin around `app`, which gets rounded corners, a 1px
 /// outline and a drop shadow that falls into the margin. The resize band goes
@@ -322,20 +307,9 @@ pub fn framed(window: &Window, app: Div) -> Div {
     };
     let edge = margins(tiling, SHADOW_MARGIN);
     let corners = radii(tiling);
-    let overhang = root_overhang(window);
-    let outer = if overhang == [px(0.); 4] {
-        div().size_full().relative()
-    } else {
-        // Root's padding and border sit around this view; the view is moved over them, so the
-        // frame is drawn at the window's edge as before.
-        div()
-            .absolute()
-            .top(-overhang[0])
-            .right(-overhang[1])
-            .bottom(-overhang[2])
-            .left(-overhang[3])
-    };
-    outer
+    div()
+        .size_full()
+        .relative()
         .pt(edge.top)
         .pr(edge.right)
         .pb(edge.bottom)

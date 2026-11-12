@@ -16,11 +16,6 @@ serde_json.workspace = true
 pulldown-cmark.workspace = true
 unicode-width = "0.2"
 gpui = "0.2"
-gpui-component.workspace = true
-tree-sitter.workspace = true
-tree-sitter-lua.workspace = true
-anyhow = "1"
-lsp-types = "0.97"
 ureq = "3"
 sha2 = "0.10"
 
@@ -31,5 +26,4 @@ gpui = { version = "0.2", features = ["runtime_shaders"] }
 
 [dev-dependencies]
 proptest.workspace = true
-streaming-iterator = "0.1"
 tempfile.workspace = true

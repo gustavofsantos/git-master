@@ -349,3 +349,93 @@ fn opening_another_repository_moves_the_watch() {
     let new = settle(&s.notices, QUIET);
     assert_eq!(refreshes(&new), 1, "notices: {new:?}");
 }
+
+/// A workflow file with the name `name` that sends `text`.
+fn workflow(name: &str, text: &str) -> String {
+    format!(
+        "local M = {{}}\nM.meta = {{ name = \"{name}\", trigger = {{ on = \"manual\" }} }}\nfunction M.execute(ctx, input)\n  ctx.notify(\"{text}\")\nend\nreturn M\n"
+    )
+}
+
+/// The source of the workflow `name` in the next listing, within `WAIT`.
+fn next_listing(events: &Receiver<Event>, name: &str) -> Option<String> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match events.recv_timeout(left) {
+            Ok(Event::WorkflowsListed { workflows, .. }) => {
+                return workflows
+                    .into_iter()
+                    .find(|w| w.name == name)
+                    .map(|w| w.source);
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => panic!("no workflow listing within {WAIT:?}"),
+            Err(RecvTimeoutError::Disconnected) => panic!("the engine stopped"),
+        }
+    }
+}
+
+#[test]
+fn a_workflow_edited_by_another_program_is_listed_again() {
+    let dir = repo();
+    let config = tempfile::tempdir().unwrap();
+    let user = config.path().join("workflows");
+    std::fs::create_dir(&user).unwrap();
+    std::fs::write(user.join("mine.lua"), workflow("mine", "first")).unwrap();
+
+    let user_dir = user.clone();
+    let engine = gm_core::spawn_configured(
+        Box::new(SubprocessGit::default()),
+        Box::new(move |engine| engine.set_workflow_user_dir(Some(user_dir))),
+    );
+    let (watch, async_notices) =
+        watch::spawn_with(engine.clone(), Arc::new(OnceLock::new()), CONFIG);
+    let (notice_tx, notices) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Some(notice) = async_notices.next_blocking() {
+            if notice_tx.send(notice).is_err() {
+                break;
+            }
+        }
+    });
+    let stream = engine.subscribe();
+    let (event_tx, events) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(event) = stream.recv_blocking() {
+            if event_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    let s = Session {
+        engine,
+        watch,
+        notices,
+    };
+    open(&s, dir.path());
+    watching(&s.notices);
+
+    // The first listing is asked for, as the window does; it tells the watcher the folders.
+    s.engine.dispatch(Actor::Human, CommandKind::ListWorkflows);
+    let first = next_listing(&events, "mine").expect("the workflow is listed");
+    assert!(first.contains("first"), "{first}");
+    // The listing wrote the reference and the settings beside the workflow: no new listing.
+    assert!(user.join(".api").join("gitmaster.lua").is_file());
+    assert!(user.join(".luarc.json").is_file());
+
+    // The watcher reads the same listing on its own thread, then watches the folder.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // An editor saves the file: nobody asks, and the listing comes with the new text.
+    std::fs::write(user.join("mine.lua"), workflow("mine", "second")).unwrap();
+    let second = next_listing(&events, "mine").expect("the workflow is listed again");
+    assert!(second.contains("second"), "{second}");
+
+    // A new file is listed too, and a removed one leaves the listing.
+    std::fs::write(user.join("other.lua"), workflow("other", "new")).unwrap();
+    assert!(next_listing(&events, "other").is_some());
+    std::fs::remove_file(user.join("other.lua")).unwrap();
+    assert_eq!(next_listing(&events, "other"), None);
+    drop(s);
+}

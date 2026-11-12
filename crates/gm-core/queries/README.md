@@ -25,6 +25,7 @@ and was then corrected for GitMaster:
 | `html/` | `tree-sitter-html` 0.23.2 | MIT, as declared in the crate manifest |
 | `css/` | `tree-sitter-css` 0.25.0 | MIT, as declared in the crate manifest |
 | `clojure/` | `tree-sitter-clojure-orchard` 0.2.8 (its literals, comments and quote operators; the rest is written for GitMaster) | CC0 1.0, public domain |
+| `lua/` | Written for GitMaster for `tree-sitter-lua` 0.4.1 (D151, D233); not seeded from a grammar crate | GitMaster |
 
 TypeScript's query only adds to JavaScript's, and C++'s to C's, so `syntax.rs` layers them:
 JavaScript then TypeScript (for TSX: JavaScript, JSX, then TypeScript), and C then C++.

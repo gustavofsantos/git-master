@@ -1,12 +1,13 @@
-//! The Workflows page (design/screens.md, D76): the workflow files on the left; on the
-//! right the open script with its Run, Dry Run, Save, Revert and Delete buttons and two
-//! tabs. Script is the editable text with its diagnostics, and Runs lists the runs and shows
-//! one run call by call. The
+//! The Workflows page (design/screens.md, D233): the workflow files on the left; on the
+//! right the open script with its Run, Dry Run, Open in Editor, Copy Path and Delete buttons and
+//! two tabs. Script is the file as it is on disk, read-only, with its diagnostics: the person
+//! edits it in their own editor. Runs lists the runs and shows one run call by call. The
 //! state is in `workflows_page`; this file draws it and sends what the user asks
 //! for to the engine, through the action registry where one exists.
 
+use std::ops::Range;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
 
 use gm_schema::{
     Actor, WorkflowDiagnostic, WorkflowDryCall, WorkflowDryRun, WorkflowInfo, WorkflowRunDetail,
@@ -14,27 +15,27 @@ use gm_schema::{
 };
 use gpui::{
     AnyElement, Context, Div, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Window, div, prelude::*, px,
+    ScrollStrategy, ScrollWheelEvent, SharedString, Stateful, UniformListScrollHandle, Window, div,
+    prelude::*, px, uniform_list,
 };
 
-use gpui_component::input::{Input, Position};
-
-use crate::SaveWorkflow;
+use crate::OpenWorkflowInEditor;
 use crate::action_registry::{Action, Args};
 use crate::icon::{self, Icon};
 use crate::resize::{self};
 use crate::resize_handle::{self, Edge};
 use crate::restack_dialog;
+use crate::script_view::{self, ScriptText};
+use crate::shell_code::colored;
 use crate::shell_history::{now_secs, relative_time};
 use crate::theme;
 use crate::view::{Screen, StatusView};
-use crate::workflow_editor;
 use crate::workflow_keys;
 use crate::workflows_page::{
-    Preview, ReviewLine, RunControls, SaveState, StepRecord, SwitchClick, Tab, context_blocks,
-    context_key, copy_request, diagnostic_text, duration_label, expand_key, input_text,
-    output_text, pretty_json, preview, review_line, review_text, row_title, run_controls,
-    run_duration, status_label, step_duration, step_rows, step_summary, switch_click, switch_text,
+    Preview, ReviewLine, RunControls, StepRecord, SwitchClick, Tab, context_blocks, context_key,
+    copy_request, diagnostic_text, duration_label, expand_key, input_text, output_text,
+    pretty_json, preview, review_line, review_text, row_title, run_controls, run_duration,
+    status_label, step_duration, step_rows, step_summary, switch_click, switch_text,
 };
 
 /// The width of the workflow list on the left.
@@ -42,18 +43,43 @@ use crate::workflows_page::{
 const RUNS_LIST_HEIGHT: f32 = 220.;
 /// The most of the dry run panel shown; it scrolls past this.
 const DRY_RUN_HEIGHT: f32 = 260.;
-/// How long the typing must pause before the buffer is checked.
-const CHECK_DELAY: Duration = Duration::from_millis(300);
+/// The height of a line of the script, and the width of a digit of its line numbers.
+const SCRIPT_LINE_HEIGHT: f32 = 20.;
+const SCRIPT_DIGIT_WIDTH: f32 = 8.;
+/// How many columns a sideways wheel step moves the script.
+const SCRIPT_SCROLL_STEP: usize = 4;
+
+/// What the window keeps of the Script tab: the text on screen, where it is scrolled, and the
+/// line a problem pointed at.
+pub(crate) struct ScriptView {
+    pub(crate) text: ScriptText,
+    pub(crate) scroll: UniformListScrollHandle,
+    /// How many columns the text is scrolled to the right.
+    pub(crate) columns: usize,
+    /// The line a clicked problem names, marked until another text shows.
+    pub(crate) marked: Option<usize>,
+}
+
+impl ScriptView {
+    pub(crate) fn new() -> Self {
+        Self {
+            text: ScriptText::default(),
+            scroll: UniformListScrollHandle::new(),
+            columns: 0,
+            marked: None,
+        }
+    }
+}
 
 impl StatusView {
-    /// Ctrl or ⌘ S: the registry's Save Workflow.
-    pub(crate) fn save_workflow_action(
+    /// Ctrl or ⌘ E: the registry's Open Workflow in Editor.
+    pub(crate) fn open_workflow_in_editor_action(
         &mut self,
-        _: &SaveWorkflow,
+        _: &OpenWorkflowInEditor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.run_action(Action::SaveWorkflow, &Args::None, window, cx);
+        self.run_action(Action::OpenWorkflowInEditor, &Args::None, window, cx);
     }
 
     /// Shows the Workflows page and asks the engine for the workflow files.
@@ -80,7 +106,7 @@ impl StatusView {
         }
     }
 
-    /// Opens the workflow at `path`. With unsaved changes, the page asks first.
+    /// Opens the workflow at `path`.
     pub(crate) fn select_workflow(&mut self, path: &str, cx: &mut Context<Self>) {
         let listed = self.model.workflows.listed.as_deref().unwrap_or(&[]);
         if self.model.workflows_page.select(path, listed) {
@@ -97,28 +123,6 @@ impl StatusView {
             let id = self.engine.dispatch(Actor::Human, kind);
             self.model.workflows_page.track_runs(id);
         }
-        cx.notify();
-    }
-
-    /// Writes the buffer. `overwrite` writes over a file that changed on disk.
-    pub(crate) fn save_workflow(&mut self, overwrite: bool, cx: &mut Context<Self>) {
-        if let Some(kind) = self.model.workflows_page.save_request(overwrite) {
-            let id = self.engine.dispatch(Actor::Human, kind);
-            self.model.workflows_page.track_save(id);
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn revert_workflow(&mut self, cx: &mut Context<Self>) {
-        self.model.workflows_page.revert();
-        self.sync_workflow_source(cx);
-        cx.notify();
-    }
-
-    /// Takes the file as the listing last read it, after a conflict.
-    pub(crate) fn reload_workflow(&mut self, cx: &mut Context<Self>) {
-        self.model.workflows_page.reload();
-        self.sync_workflow_source(cx);
         cx.notify();
     }
 
@@ -142,24 +146,7 @@ impl StatusView {
         cx.notify();
     }
 
-    /// The answer to "Unsaved changes": drops the buffer and opens the file asked for.
-    pub(crate) fn discard_workflow_changes(&mut self, cx: &mut Context<Self>) {
-        let listed = self.model.workflows.listed.as_deref().unwrap_or(&[]);
-        self.model.workflows_page.discard_and_switch(listed);
-        let tab = self.model.workflows_page.tab();
-        if self.model.workflows_page.path().is_some() {
-            self.show_workflow_tab(tab, cx);
-        }
-        self.sync_workflow_source(cx);
-        cx.notify();
-    }
-
-    pub(crate) fn keep_workflow_editing(&mut self, cx: &mut Context<Self>) {
-        self.model.workflows_page.keep_editing();
-        cx.notify();
-    }
-
-    /// Dry Run: the engine walks the buffer and answers into the dry run panel.
+    /// Dry Run: the engine walks the file's text and answers into the dry run panel.
     pub(crate) fn dry_run_workflow(&mut self, cx: &mut Context<Self>) {
         if let Some(kind) = self.model.workflows_page.dry_run_request() {
             let id = self.engine.dispatch(Actor::Human, kind);
@@ -201,28 +188,13 @@ impl StatusView {
         }
     }
 
-    /// Asks the engine to check the buffer, unless it has checked this text already.
+    /// Asks the engine to check the file's text, unless it has checked this text already.
     pub(crate) fn check_workflow(&mut self, cx: &mut Context<Self>) {
         if let Some(kind) = self.model.workflows_page.check_request() {
             let id = self.engine.dispatch(Actor::Human, kind);
             self.model.workflows_page.track_check(id);
         }
         cx.notify();
-    }
-
-    /// Checks the buffer once the typing has paused for `CHECK_DELAY`: the check goes out only
-    /// when no edit came after this one.
-    pub(crate) fn schedule_workflow_check(&mut self, cx: &mut Context<Self>) {
-        let generation = self.model.workflows_page.check_generation();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CHECK_DELAY).await;
-            let _ = this.update(cx, |view, cx| {
-                if view.model.workflows_page.check_is_latest(generation) {
-                    view.check_workflow(cx);
-                }
-            });
-        })
-        .detach();
     }
 
     /// Makes the window's shortcuts for the listed manual workflows, and keeps the plan, whose
@@ -244,47 +216,66 @@ impl StatusView {
         self.model.workflows.keys = plan;
     }
 
-    /// Moves the editor's caret to a diagnostic's line (1-based; 0 means the first line).
-    fn go_to_workflow_line(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let position = Position::new(line.max(1) - 1, 0);
-        self.workflow_source.update(cx, |state, cx| {
-            state.set_cursor_position(position, window, cx);
-        });
+    /// Brings a diagnostic's line into view and marks it (1-based; 0 names no line).
+    fn go_to_workflow_line(&mut self, line: u32, cx: &mut Context<Self>) {
+        let Some(index) = script_view::line_index(line, self.script_view.text.line_count()) else {
+            return;
+        };
+        self.script_view.marked = Some(index);
+        self.script_view
+            .scroll
+            .scroll_to_item(index.saturating_sub(3), ScrollStrategy::Top);
+        cx.notify();
     }
 
-    /// Marks the editor for a rebuild when the page's buffer is another text than the editor
-    /// holds (a file opened, reverted, reloaded or created), and checks the buffer when its text
-    /// changed since the last check.
+    /// Shows the page's text in the Script tab when it is another text than the one on screen
+    /// (a file opened, or edited in the person's editor and listed again), and checks it. The
+    /// text shows plain at once; its colors are computed off the UI thread and join it when
+    /// they are ready, unless another text has taken its place.
     pub(crate) fn sync_workflow_source(&mut self, cx: &mut Context<Self>) {
-        let text = self.model.workflows_page.text();
-        if self.workflow_source.read(cx).value().as_ref() != text {
-            self.workflow_editor_stale = true;
+        let source = self.model.workflows_page.text();
+        if let Some(plain) = self.script_view.text.plain(source) {
+            self.script_view.text = plain;
+            self.script_view.columns = 0;
+            self.script_view.marked = None;
+            let source = source.to_owned();
+            cx.spawn(async move |this, cx| {
+                let text = source.clone();
+                let spans = cx
+                    .background_spawn(async move {
+                        gm_core::syntax::language_for_path("workflow.lua").and_then(|language| {
+                            gm_core::syntax::highlight(language, &text, &AtomicBool::new(false))
+                        })
+                    })
+                    .await;
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(spans) = spans
+                        && view.script_view.text.source() == source
+                        && !view.script_view.text.is_colored()
+                    {
+                        view.script_view.text = ScriptText::colored(&source, spans);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
             cx.notify();
         }
         self.check_workflow(cx);
     }
 
-    /// Rebuilds the editor for the page's buffer, once `sync_workflow_source` flagged it. A new
-    /// editor per document keeps the undo history to the file that is open. Runs in the frame,
-    /// where the window is.
-    pub(crate) fn refresh_workflow_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !std::mem::take(&mut self.workflow_editor_stale) {
+    /// A wheel step with a sideways part moves the script's text.
+    fn scroll_script_across(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let dx = event.delta.pixel_delta(px(SCRIPT_LINE_HEIGHT)).x;
+        if dx == px(0.) {
             return;
         }
-        let text = self.model.workflows_page.text().to_owned();
-        self.workflow_source = workflow_editor::new_editor(&text, window, cx);
-        self.workflow_source_sub = workflow_editor::subscribe(&self.workflow_source, window, cx);
-    }
-
-    /// The editor changed: its text becomes the page's buffer, and the buffer is checked once
-    /// the typing pauses.
-    pub(crate) fn on_workflow_source_changed(&mut self, cx: &mut Context<Self>) {
-        let text = self.workflow_source.read(cx).value().to_string();
-        let before = self.model.workflows_page.check_generation();
-        self.model.workflows_page.edit(&text);
-        if self.model.workflows_page.check_generation() != before {
-            self.schedule_workflow_check(cx);
-        }
+        let view = &mut self.script_view;
+        view.columns = if dx < px(0.) {
+            (view.columns + SCRIPT_SCROLL_STEP).min(view.text.columns())
+        } else {
+            view.columns.saturating_sub(SCRIPT_SCROLL_STEP)
+        };
         cx.notify();
     }
 
@@ -320,11 +311,10 @@ impl StatusView {
         let width_strip = Self::list_width_strip(width, cx);
         let listed = self.model.workflows.listed.as_deref();
         let selected = self.model.workflows_page.path();
-        let dirty = self.model.workflows_page.dirty();
         let all = listed.unwrap_or(&[]);
         // Your workflows first, then the built-in ones under their own heading (`WF4b`).
-        let rows = workflow_rows(all, false, selected, dirty, cx);
-        let built_in = workflow_rows(all, true, selected, dirty, cx);
+        let rows = workflow_rows(all, false, selected, cx);
+        let built_in = workflow_rows(all, true, selected, cx);
         let empty = match listed {
             None => "Reading workflows…",
             Some([]) => "No workflows yet.",
@@ -456,7 +446,6 @@ impl StatusView {
         let run_reason = Action::RunWorkflow
             .enabled(&Args::Workflow(name.to_owned()), &self.action_context(""))
             .err();
-        let dirty_note = page.dirty().then_some("Unsaved changes");
         div()
             .px_4()
             .py_2()
@@ -488,13 +477,7 @@ impl StatusView {
                                     .child(location),
                             ),
                     )
-                    .child(self.header_actions(
-                        name,
-                        builtin,
-                        dirty_note,
-                        run_reason.is_some(),
-                        cx,
-                    )),
+                    .child(self.header_actions(name, builtin, run_reason.is_some(), cx)),
             )
             .children(run_reason.map(|reason| {
                 div()
@@ -504,24 +487,15 @@ impl StatusView {
             }))
     }
 
-    /// The buttons of the header: Run, Dry Run and, for a file the person wrote, Save, Revert and
-    /// Delete; for a built-in one, Copy to Edit (`WF4b`). `run_off` says Run is refused.
-    fn header_actions(
-        &self,
-        name: &str,
-        builtin: bool,
-        dirty_note: Option<&'static str>,
-        run_off: bool,
-        cx: &Context<Self>,
-    ) -> Div {
+    /// The buttons of the header: Run, Dry Run and, for a file the person wrote, Open in Editor,
+    /// Copy Path and Delete; for a built-in one, Copy to Edit (`WF4b`). `run_off` says Run is
+    /// refused.
+    fn header_actions(&self, name: &str, builtin: bool, run_off: bool, cx: &Context<Self>) -> Div {
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
-            .children(
-                dirty_note.map(|note| div().text_xs().text_color(theme::warn_fg()).child(note)),
-            )
             .child(action_button(
                 "workflow-run",
                 "Run",
@@ -533,9 +507,9 @@ impl StatusView {
             .child(self.dry_run_button(cx))
             .children((!builtin).then(|| {
                 action_button(
-                    "workflow-save",
-                    "Save",
-                    Action::SaveWorkflow,
+                    "workflow-open-in-editor",
+                    "Open in Editor",
+                    Action::OpenWorkflowInEditor,
                     Args::None,
                     false,
                     cx,
@@ -543,9 +517,9 @@ impl StatusView {
             }))
             .children((!builtin).then(|| {
                 action_button(
-                    "workflow-revert",
-                    "Revert",
-                    Action::RevertWorkflow,
+                    "workflow-copy-path",
+                    "Copy Path",
+                    Action::CopyWorkflowPath,
                     Args::None,
                     false,
                     cx,
@@ -635,25 +609,10 @@ impl StatusView {
         cx.notify();
     }
 
-    /// The lines between the header and the tabs: a question the page asks, a
-    /// conflict, a failed save, or the save in flight.
+    /// The lines between the header and the tabs: a question the page asks.
     fn workflow_banners(&self, cx: &Context<Self>) -> Vec<Div> {
         let page = &self.model.workflows_page;
         let mut banners = Vec::new();
-        if let Some(other) = page.asked_switch() {
-            let file = file_name(other);
-            banners.push(banner(
-                &format!("Unsaved changes: {file} is not saved. Discard them, or keep editing."),
-                vec![
-                    text_button("workflow-discard", "Discard", cx, |this, cx| {
-                        this.discard_workflow_changes(cx);
-                    }),
-                    text_button("workflow-keep", "Keep editing", cx, |this, cx| {
-                        this.keep_workflow_editing(cx);
-                    }),
-                ],
-            ));
-        }
         if page.asking_delete() {
             let file = page.path().map(file_name).unwrap_or_default();
             banners.push(banner(
@@ -673,59 +632,24 @@ impl StatusView {
                 ],
             ));
         }
-        match page.save_state() {
-            SaveState::Conflict => banners.push(banner(
-                "The file changed on disk.",
-                vec![
-                    text_button("workflow-reload", "Reload", cx, |this, cx| {
-                        this.reload_workflow(cx);
-                    }),
-                    text_button("workflow-overwrite", "Overwrite", cx, |this, cx| {
-                        this.save_workflow(true, cx);
-                    }),
-                ],
-            )),
-            SaveState::Failed(reason) => banners.push(
-                div()
-                    .px_4()
-                    .py_1()
-                    .text_sm()
-                    .text_color(theme::error())
-                    .child(format!("Not saved: {reason}")),
-            ),
-            SaveState::Saving => banners.push(
-                div()
-                    .px_4()
-                    .py_1()
-                    .text_sm()
-                    .text_color(theme::muted())
-                    .child("Saving…"),
-            ),
-            SaveState::Idle => {}
-        }
         banners
     }
 
-    /// The Script tab: the editor, then the problems of the buffer and the shortcut warning.
+    /// The Script tab: the file's text, read-only, then how to edit it, the shortcut warning and
+    /// the problems of the text.
     fn script_body(&self, cx: &Context<Self>) -> AnyElement {
         let page = &self.model.workflows_page;
+        let edit_note = if page.is_builtin() {
+            "Built into GitMaster. Copy to Edit makes a file of it that you can change."
+        } else {
+            "Read only here. Edit the file in your editor: the page follows the file, and each change makes this version unreviewed."
+        };
         div()
             .flex_1()
             .min_h(px(0.))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("workflow-script")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .p_2()
-                    .child(
-                        Input::new(&self.workflow_source)
-                            .h_full()
-                            .disabled(page.is_builtin()),
-                    ),
-            )
+            .child(self.script_text(cx))
             .child(
                 div()
                     .flex_none()
@@ -737,11 +661,7 @@ impl StatusView {
                     .flex_col()
                     .gap_1()
                     .text_xs()
-                    .child(
-                        div()
-                            .text_color(theme::muted())
-                            .child("Saving revokes this workflow's automatic approvals."),
-                    )
+                    .child(div().text_color(theme::muted()).child(edit_note))
                     .children(
                         page.name()
                             .and_then(|name| self.model.workflows.key_warning(name))
@@ -763,6 +683,71 @@ impl StatusView {
                         (!page.check_answered())
                             .then(|| div().text_color(theme::muted()).child("Checking…")),
                     ),
+            )
+            .into_any_element()
+    }
+
+    /// The lines of the script: only the ones on screen are built.
+    fn script_text(&self, cx: &Context<Self>) -> AnyElement {
+        let count = self.script_view.text.line_count();
+        if count == 0 {
+            return div()
+                .id("workflow-script")
+                .flex_1()
+                .min_h(px(0.))
+                .p_4()
+                .text_sm()
+                .text_color(theme::muted())
+                .child("This file is empty.")
+                .into_any_element();
+        }
+        let digits = u16::try_from(count.to_string().len().max(3)).unwrap_or(3);
+        let gutter = SCRIPT_DIGIT_WIDTH * f32::from(digits) + 24.;
+        // The lines of the problems, so each shows in the text too.
+        let problems: Vec<usize> = self
+            .model
+            .workflows_page
+            .diagnostics()
+            .iter()
+            .filter_map(|problem| script_view::line_index(problem.line, count))
+            .collect();
+        div()
+            .id("workflow-script")
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .child(
+                uniform_list(
+                    "workflow-script-lines",
+                    count,
+                    cx.processor(
+                        move |this: &mut StatusView,
+                              range: Range<usize>,
+                              _window: &mut Window,
+                              _cx: &mut Context<StatusView>| {
+                            let view = &this.script_view;
+                            range
+                                .map(|index| {
+                                    script_line(
+                                        index,
+                                        &view.text.line(index, view.columns),
+                                        gutter,
+                                        view.marked == Some(index),
+                                        problems.contains(&index),
+                                    )
+                                })
+                                .collect()
+                        },
+                    ),
+                )
+                .track_scroll(self.script_view.scroll.clone())
+                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                    this.scroll_script_across(event, cx);
+                }))
+                .flex_1()
+                .min_h(px(0.))
+                .font_family(theme::code_font()),
             )
             .into_any_element()
     }
@@ -952,14 +937,13 @@ fn ignored_line(line: &str) -> Div {
 }
 
 /// One workflow in the list: its name, trigger and key, and a red dot with the
-/// first error when it does not load. `dirty` marks the open file with unsaved changes.
+/// first error when it does not load.
 /// The rows of the listed workflows that are built-in (`built`) or the user's; each row keeps its
 /// index in the listing as its id.
 fn workflow_rows(
     all: &[WorkflowInfo],
     built: bool,
     selected: Option<&str>,
-    dirty: bool,
     cx: &Context<StatusView>,
 ) -> Vec<Stateful<Div>> {
     all.iter()
@@ -967,7 +951,7 @@ fn workflow_rows(
         .filter(|(_, info)| info.builtin() == built)
         .map(|(index, info)| {
             let is_selected = selected == Some(info.path.as_str());
-            workflow_row(index, info, is_selected && dirty, is_selected, cx)
+            workflow_row(index, info, is_selected, cx)
         })
         .collect()
 }
@@ -975,7 +959,6 @@ fn workflow_rows(
 fn workflow_row(
     index: usize,
     info: &WorkflowInfo,
-    dirty: bool,
     selected: bool,
     cx: &Context<StatusView>,
 ) -> Stateful<Div> {
@@ -1023,8 +1006,7 @@ fn workflow_row(
                         .size(px(8.))
                         .rounded_full()
                         .bg(theme::error())
-                }))
-                .children(dirty.then(|| icon::filled(Icon::Circle, px(8.), theme::warn_fg()))),
+                })),
         )
         .child(
             div()
@@ -1240,8 +1222,8 @@ impl StatusView {
 }
 
 impl StatusView {
-    /// One problem of the buffer, in the error colour. A click moves the editor's caret to its
-    /// line, when it has one.
+    /// One problem of the text, in the error colour. A click brings its line into view, when it
+    /// has one.
     fn diagnostic_row(
         index: usize,
         problem: &WorkflowDiagnostic,
@@ -1255,13 +1237,54 @@ impl StatusView {
             .when(line > 0, |row| {
                 row.cursor_pointer().on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        this.go_to_workflow_line(line, window, cx);
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.go_to_workflow_line(line, cx);
                     }),
                 )
             })
             .child(diagnostic_text(problem))
     }
+}
+
+/// One line of the script: its number, in the error colour when a problem names the line, then
+/// its text colored by role.
+fn script_line(
+    index: usize,
+    pieces: &[crate::code_page::Piece],
+    gutter: f32,
+    marked: bool,
+    problem: bool,
+) -> AnyElement {
+    div()
+        .h(px(SCRIPT_LINE_HEIGHT))
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .when(marked, |row| row.bg(theme::selected_row()))
+        .child(
+            div()
+                .flex_none()
+                .w(px(gutter))
+                .pr_3()
+                .text_right()
+                .text_xs()
+                .text_color(if problem {
+                    theme::error()
+                } else {
+                    theme::gutter()
+                })
+                .child((index + 1).to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(colored(pieces)),
+        )
+        .into_any_element()
 }
 
 fn run_row(

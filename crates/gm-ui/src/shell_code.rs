@@ -784,7 +784,7 @@ fn heat_dot(index: usize, band: HeatBand, rank: u32, of: usize, is_dir: bool) ->
 }
 
 /// The pieces of a line as one run of text with a color per piece that has a role.
-fn colored(pieces: &[Piece]) -> StyledText {
+pub(crate) fn colored(pieces: &[Piece]) -> StyledText {
     let mut text = String::new();
     let mut highlights = Vec::new();
     for piece in pieces {
