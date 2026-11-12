@@ -64,8 +64,8 @@ STACK_LIST_CROP="1040x520+322+222"           # the stacked diff's list, screen c
 WORK_LAYOUT_SPLIT_X=1320; WORK_LAYOUT_Y=120               # "Split" in the Working Copy diff header
 SPLIT_OLD_CHECK_X=809; SPLIT_NEW_CHECK_X=1120             # gutter checkboxes of the split cells (old, new), split view of the Working Copy
 MOD_ENTRY_Y=217                                           # src/ledger/mod.rs: the -/+ pair row (entry, ledger)
-WF_TAB_RUNS_X=500; WF_TAB_RUNS_Y=180        # the Runs tab of the Workflows page (Script tab is the default)
-WF_FIRST_RUN_X=600; WF_FIRST_RUN_Y=240      # the first row of the Runs list
+WF_TAB_RUNS_X=694; WF_TAB_RUNS_Y=204        # the Runs tab of the Workflows page (Script tab is the default)
+WF_FIRST_RUN_X=800; WF_FIRST_RUN_Y=240      # the first row of the Runs list
 HEALTH_CODE_X=120; HEALTH_CODE_Y=227        # "Code" row in the sidebar (window y 177)
 HEALTH_TAB_X=466; HEALTH_TAB_Y=108          # "Health" tab of the Code page (window 384,58)
 HEALTH_ROW_X=420; HEALTH_ROW_Y=217          # first hotspot row, src/hot.rs (rows 24 px apart, window y 167)

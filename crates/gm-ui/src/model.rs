@@ -1511,6 +1511,7 @@ impl Model {
             Event::WorkflowOpenedInEditor { path, program, .. } => {
                 // The editor is another program: the status bar says it was started.
                 let file = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+                let program = program.rsplit(['/', '\\']).next().unwrap_or(&program);
                 self.set_notice(format!("Opened {file} with {program}."));
                 self.notice_icon = Some(Icon::CheckCircle);
                 None

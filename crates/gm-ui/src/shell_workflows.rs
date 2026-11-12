@@ -288,6 +288,9 @@ impl StatusView {
             .flex()
             .flex_row()
             .bg(theme::ground())
+            // The page holds the focus the palette gives back, so the window's shortcuts
+            // (Open Workflow in Editor, a workflow's own key) reach it.
+            .track_focus(&self.list_focus)
             .child(self.workflow_list(cx))
             .child(self.workflow_detail(cx))
     }
