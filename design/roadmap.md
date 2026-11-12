@@ -908,6 +908,15 @@ Several repositories in one workspace: a superproject whose submodules are linke
   - **SW3a, read tools (D181) (done 2026-11-06; checked through the real MCP server over stdio on a two-member workspace: `workspace_status` fields, and `provenance` on a member line found the member commit and the thread with `blob_match` and `observed_commit`):** review reverted an unasked change that had taken status refreshes out of the command log. Gaps: `new_commits` is capped at 200. `workspace_status`; `provenance` on a member's path (blame in the member, threads from the workspace). Docs: `reference/mcp-tools.md`, "Tools in a workspace".
   - **SW3b, review across members (D182) (done 2026-11-06; checked in a window and over MCP: a comment from the Code page on a member's line, then `review_comment_resolve` measured the before and after text; the refs are in the workspace and none in the member clone; one member file adds about 9 ms to a snapshot):** gaps: `hash-object` applies the workspace's attributes and filters, not the member's own `.gitattributes`; `Ctrl+Shift+M` did not open the composer after a click on a line number in that run (the **Comment on line** button did), not investigated. a comment on a member's file snapshots that one file into the workspace's object store, so the before and after text and the measured change work as for the workspace's own files.
 
+## Slice 7x: one window switches between worktrees and workspaces (planned 2026-11-12; D234)
+
+Requested by the author on 2026-11-12. Behaviour in `docs/guide/worktrees.md` ("Switch to a worktree"), `docs/guide/workspaces.md` and `docs/getting-started/first-steps.md`, marked `Planned`.
+
+1. **SW1, switch in place.** Every open from inside the app (worktree, workspace, submodule, thread's workspace, "Open that worktree", "Go to that worktree", a new worktree or workspace) dispatches `OpenRepo` in the same window. **Open in New Window** in the row menus and the palette keeps the separate process. Palette titles: **Switch to Worktree**, **Switch to Workspace**.
+2. **SW2, kept views.** Per root, in memory: screen, selected Working Copy path, commit message draft; restored on return. Removing the shown workspace switches back to the previous root.
+
+**Done when:** the palette and the sidebar switch the window, switching back restores the three kept items, `make check` passes.
+
 ## Slice 7u: workspace UI (done 2026-11-06, with gaps; D183, D185)
 
 - **SW4a, engine:** move the `gitmaster workspace` logic into `gm-core::workspace`; the engine commands of D183 (1); the CLI keeps its behaviour and tests.

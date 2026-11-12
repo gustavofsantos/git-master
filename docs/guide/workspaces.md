@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: implemented
+status: partial
 order: 55
 ---
 
@@ -34,9 +34,9 @@ The workspace keeps its own [threads](threads.md). A new memory you write or an 
 
 ## The Workspaces section
 
-The **Workspaces** section of the sidebar lists the workspaces under the workspace root, by name, in every window. A **here** badge marks the workspace the window shows. Click a row to open that workspace in its own window.
+The **Workspaces** section of the sidebar lists the workspaces under the workspace root, by name, in every window. A **here** badge marks the workspace the window shows. Click a row to switch the window to that workspace; see [Work in a workspace](#work-in-a-workspace).
 
-The **+** in the section header opens **New Workspace…**. The menu of a row has **Open Workspace**, **Reveal in File Manager** and **Remove Workspace**. A **×** appears when you point at a row: it removes that workspace, as **Remove Workspace** does. The section starts folded, like **Branches** and **Worktrees**: click its header to open it; see [Branches](branches.md#fold-the-sections).
+The **+** in the section header opens **New Workspace…**. The menu of a row has **Switch to Workspace**, **Open in New Window**, **Reveal in File Manager** and **Remove Workspace**. A **×** appears when you point at a row: it removes that workspace, as **Remove Workspace** does. The section starts folded, like **Branches** and **Worktrees**: click its header to open it; see [Branches](branches.md#fold-the-sections).
 
 ## Create a workspace
 
@@ -49,17 +49,19 @@ A branch that does not exist yet is created from the repository's base branch, s
 
 GitMaster suggests the folder `<root>/<name>`. The root is `~/workspaces` unless you set `gitmaster.workspace.root` (see [Configuration](../reference/configuration.md#git-configuration-keys)).
 
-Every member is checked before anything is created. When one cannot be added, for example because its branch is checked out in another worktree, the dialog says which and where, offers **Go to that worktree**, and creates nothing. The new workspace opens in its own window.
+Every member is checked before anything is created. When one cannot be added, for example because its branch is checked out in another worktree, the dialog says which and where, offers **Go to that worktree**, and creates nothing. The window switches to the new workspace.
 
 ## Work in a workspace
 
-A workspace opens in its own window, like any repository. The Working Copy shows the workspace repository, with one row per member that says its branch and whether it has changes or commits the workspace does not point to yet. Open a member to see its own Working Copy, history and branches.
+> **Planned.** Switching in place is not available yet: a workspace and its members open in new windows, and the view of each is not kept.
+
+Opening a workspace switches the window to it, like a worktree; switching back to where you were brings back its page, selected file and commit message (see [Worktrees](worktrees.md#switch-to-a-worktree)). **Open in New Window** opens it in a window of its own instead. The Working Copy shows the workspace repository, with one row per member that says its branch and whether it has changes or commits the workspace does not point to yet. Open a member to switch to its own Working Copy, history and branches; the workspace's row in the **Workspaces** section switches back.
 
 - [Code navigation](code-navigation.md) searches every member: Quick Open lists the files of all members, and text search looks inside them.
 - The diff of a member shows the commits it gained, as a list, and opens each one.
 - Each member keeps its branch checked out. When a Git command leaves a member on a detached HEAD, its row is marked **detached**, and **Check Out Branch** puts it back on its branch.
 
-When the detached HEAD holds commits that no local or remote branch has, **Check Out Branch** refuses and says how many, so they are not left behind: put them on a branch first, from the member's own window.
+When the detached HEAD holds commits that no local or remote branch has, **Check Out Branch** refuses and says how many, so they are not left behind: put them on a branch first, from the member's own view.
 
 ### Record a combination
 
@@ -92,7 +94,7 @@ A workspace stays until you remove it. Remove it from wherever you are:
 
 - the **×** on its row in the **Workspaces** section;
 - **Remove Workspace** in the menu of its row, or in the command palette, picking the workspace with **Tab**;
-- **Remove Workspace** in the workspace's own window: the window closes once the workspace is removed;
+- **Remove Workspace** while the window shows the workspace: once it is removed, the window switches back to the repository it showed before, or closes when there was none;
 - `gitmaster workspace remove` on the command line; see [Command line](../reference/cli.md#remove-a-workspace).
 
 When nothing would be lost, the dialog asks once and **Remove workspace** removes it. Otherwise the dialog lists what would be lost, following the rules of [removing a worktree](worktrees.md) for each member: a member with changes that are not committed, a member on a detached HEAD with commits that no local or remote branch holds, or changes of the workspace repository's own. Tick the confirmation checkbox, which names what will be discarded, to enable **Remove workspace**.

@@ -146,7 +146,7 @@ An agent started in a [workspace](workspaces.md) works in several repositories a
 - **Edits.** An edit of a file inside a member names that member. Its state, **in working tree**, **in HEAD** or **changed since**, is read from the member: from its files and from its own `HEAD`.
 - **Commits.** A commit that appeared on a member's branch between two events of the thread is linked as created during this thread, the same rule as for the workspace's own branch. The **Commits** panel shows the member beside each commit.
 
-Each member's repository keeps a list of the workspaces it belongs to, in its `.git` directory, written when the member is added and removed with it. When you open the member's repository on its own, the **THREADS** section of a commit in History also lists the workspace threads linked to that commit, each marked with the workspace's name. Selecting one opens the workspace in its own window.
+Each member's repository keeps a list of the workspaces it belongs to, in its `.git` directory, written when the member is added and removed with it. When you open the member's repository on its own, the **THREADS** section of a commit in History also lists the workspace threads linked to that commit, each marked with the workspace's name. Selecting one switches the window to the workspace.
 
 ### After a rewrite
 

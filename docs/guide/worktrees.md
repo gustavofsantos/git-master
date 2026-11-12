@@ -1,11 +1,11 @@
 ---
 title: Worktrees
-description: Work on several branches at once with worktrees, each in its own window, and create, open, remove, lock and prune them safely from the sidebar, the menus and the command palette.
+description: Work on several branches at once with worktrees, switch between them in one window, and create, open, remove, lock and prune them safely from the sidebar, the menus and the command palette.
 status: partial
 order: 50
 ---
 
-A worktree is a second folder of the same repository, with its own checked-out branch. You can work on two branches at the same time, each in its own window, without switching branches in one folder. The **Worktrees** section of the sidebar lists them all.
+A worktree is a second folder of the same repository, with its own checked-out branch. You can work on two branches at the same time and switch between them in one window, without switching branches in one folder. The **Worktrees** section of the sidebar lists them all.
 
 ## The Worktrees section
 
@@ -43,7 +43,7 @@ The branch field suggests local branches as you type.
 2. Choose **Existing branch**. The branch field shows the branch you picked.
 3. Leave the folder as suggested: `../myproject-feature-login`, next to the repository.
 4. Click **Create worktree**. The row appears in the **Worktrees** section.
-5. Double-click the new row. It opens in its own window.
+5. Double-click the new row. The window switches to it.
 
 ### The folder
 
@@ -56,16 +56,24 @@ GitMaster follows these rules for the folder:
 
 ### A branch that another worktree uses
 
-Git refuses to check out a branch that a worktree already uses. The dialog shows Git's message and the button **Open that worktree**. Choose it to open that worktree in its own window instead.
+Git refuses to check out a branch that a worktree already uses. The dialog shows Git's message and the button **Open that worktree**. Choose it to switch to that worktree instead.
 
-## Open a worktree in its own window
+## Switch to a worktree
 
-1. Double-click a worktree row. It opens in a new window.
-2. Each worktree has its own window. The window you came from does not wait for it and stays as it is.
+> **Planned.** Switching in place is not available yet: a worktree opens in a new window, and the view of each worktree is not kept.
 
-Double-clicking the **here** row does nothing. A row whose folder is missing shows a message in the status bar instead.
+1. Double-click a worktree row. The window switches to that worktree, and the **here** badge moves to its row.
+2. Double-click the main checkout's row, or any other row, to switch again.
 
-**Open Worktree** does the same from the row menu and from the command palette.
+GitMaster keeps the view of each worktree you leave while the window is open: the page, the selected file of the Working Copy and the commit message you were writing. Switching back brings them back. Nothing of it is written to disk, so it is gone when you close the app.
+
+A switch waits for the current one to end and for a branch checkout to finish. Double-clicking the **here** row does nothing. A row whose folder is missing shows a message in the status bar instead.
+
+**Switch to Worktree** does the same from the row menu and from the command palette.
+
+### Open a worktree in a new window
+
+**Open in New Window**, in the row menu and in the command palette as **Open Worktree in New Window**, opens the worktree in a window of its own, a separate process. The window you came from does not wait for it and stays as it is.
 
 ## Move a file to a worktree
 
@@ -113,7 +121,8 @@ Pruning removes Git's records only. It never touches a folder. A locked worktree
 
 When a branch is checked out in a linked worktree, its branch menu offers worktree actions instead of the usual ones. In order, the menu has:
 
-- **Open Worktree**
+- **Switch to Worktree**
+- **Open in New Window**
 - **Reveal Worktree in File Manager**
 - **Copy Worktree Path**
 - **New Branch…**
@@ -142,7 +151,8 @@ Open the palette with `Ctrl+K` (`⌘K` on macOS). For the actions that need a wo
 |---|---|
 | **New Worktree…** | Opens the create dialog, empty. |
 | **Create Worktree** | Press **Tab** and pick a branch. |
-| **Open Worktree** | Press **Tab** and pick a worktree. |
+| **Switch to Worktree** | Press **Tab** and pick a worktree. |
+| **Open Worktree in New Window** | Press **Tab** and pick a worktree. |
 | **Reveal Worktree in File Manager** | Press **Tab** and pick a worktree. |
 | **Copy Worktree Path** | Press **Tab** and pick a worktree. |
 | **Remove Worktree** | Press **Tab** and pick a worktree. Opens the remove dialog. |

@@ -82,7 +82,7 @@ The branch menu lists, in groups: **Checkout Branch**; **New Branch…** and **N
 
 > **Note.** The stack items, **Set Parent…**, **Remove From Stack**, **Reparent to Grandparent** and **Restack This Stack**, are a preview feature. See [Stacks](stacks.md).
 
-For a branch that is checked out in a linked worktree, the menu shows the worktree actions instead: **Open Worktree**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, the branch actions for stacks, and **Remove Worktree** in red. See [Worktrees](worktrees.md).
+For a branch that is checked out in a linked worktree, the menu shows the worktree actions instead: **Switch to Worktree**, **Open in New Window**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, the branch actions for stacks, and **Remove Worktree** in red. See [Worktrees](worktrees.md).
 
 ### File menu
 
@@ -101,7 +101,7 @@ Moving a file is also possible by dragging the file onto the sidebar. See [Worki
 
 ### Worktree menu
 
-The worktree menu lists **Open Worktree**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, **Lock Worktree** or **Unlock Worktree**, and **Remove Worktree** in red. On the row of a worktree whose folder is missing, it also lists **Prune Worktrees**.
+The worktree menu lists **Switch to Worktree**, **Open in New Window**, **Reveal Worktree in File Manager**, **Copy Worktree Path**, **Lock Worktree** or **Unlock Worktree**, and **Remove Worktree** in red. On the row of a worktree whose folder is missing, it also lists **Prune Worktrees**.
 
 ### Commit menus
 

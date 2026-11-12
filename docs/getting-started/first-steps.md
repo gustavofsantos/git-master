@@ -5,7 +5,7 @@ status: partial
 order: 20
 ---
 
-GitMaster opens one repository in each window. This page shows how to start it and open a repository, tours the window, and walks you through a first commit.
+GitMaster shows one repository at a time in its window, and switches between your worktrees and workspaces in place. This page shows how to start it and open a repository, tours the window, and walks you through a first commit.
 
 ## Start GitMaster
 
@@ -36,7 +36,9 @@ Recent repositories are kept in the app data directory. A recent repository whos
 
 To open a repository from the recent list, click its entry.
 
-GitMaster shows one repository per window. Choosing another repository in a window replaces the one shown there. A worktree opens in a new window of its own. See [Worktrees](../guide/worktrees.md).
+GitMaster shows one repository at a time. Choosing another repository in a window replaces the one shown there. Opening a worktree, a workspace or a submodule switches the same window to it, and switching back brings back the page, the selected file and the commit message you left there. **Open in New Window** still opens one in a window of its own. See [Worktrees](../guide/worktrees.md#switch-to-a-worktree).
+
+> **Planned.** Switching in place and keeping the view of each repository are not available yet: a worktree, a workspace or a submodule opens in a new window.
 
 ## The window
 

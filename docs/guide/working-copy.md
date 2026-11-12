@@ -60,7 +60,7 @@ A submodule takes one row, with the folder icon and its path. The row shows the 
 | **modified** | Files tracked by the submodule have changes. |
 | **untracked** | The submodule has new files that its `.gitignore` does not hide. |
 
-Select the row to see the commits the submodule gained, newest first, each with its subject, author and date, instead of a diff. Staging the row records the submodule's new commit in the repository, like staging a file. Changes made inside the submodule are committed in the submodule itself: choose **Open Submodule** in the row's menu, or double-click the row, to open it in its own window.
+Select the row to see the commits the submodule gained, newest first, each with its subject, author and date, instead of a diff. Staging the row records the submodule's new commit in the repository, like staging a file. Changes made inside the submodule are committed in the submodule itself: choose **Open Submodule** in the row's menu, or double-click the row, to switch the window to it. **Open in New Window** in the row's menu opens it in a window of its own.
 
 In a [workspace](workspaces.md), each member is a submodule, so the Working Copy of a workspace lists the members whose state changed.
 
@@ -165,7 +165,7 @@ The branch you are on and the worktree marked **here** never accept a file.
 
 ### Move to a worktree
 
-Drop the file on a row of the **Worktrees** section. The change is applied to the same path in that worktree, and nothing is committed. The move runs at once, with no confirmation, and the status bar tells you it is done and offers **Open Worktree**.
+Drop the file on a row of the **Worktrees** section. The change is applied to the same path in that worktree, and nothing is committed. The move runs at once, with no confirmation, and the status bar tells you it is done and offers **Switch to Worktree**.
 
 In the target worktree the change arrives unstaged. A new file arrives untracked. The index of the target worktree is not touched.
 
