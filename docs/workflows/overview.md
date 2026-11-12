@@ -52,7 +52,7 @@ The key takes several values. To apply a folder only to repositories in one dire
 These rules apply:
 
 - Nothing is read from the working tree of a repository. The one folder GitMaster reads inside a repository is `.git/gitmaster/workflows/`, which every worktree of the repository shares. A `gitmaster.workflowPath` that points inside the working tree of the open repository is ignored, and GitMaster shows a warning.
-- Files in directories whose names start with a dot are not read as workflows. GitMaster writes generated reference files for editors and agents into a `.api` directory in the workflows folder. Those files are not workflows.
+- Files in directories whose names start with a dot are not read as workflows. GitMaster writes generated reference files for editors and agents into a `.api` directory in the workflows folder, and a `.luarc.json` file beside it for the Lua language server. Those files are not workflows.
 - A `.toml` file in a workflows directory is ignored, and GitMaster shows a warning for it.
 - A workflow file holds only the definition. Whether a workflow is enabled for a repository, and your approvals, are kept by GitMaster, not in the file.
 - Your own workflows run in every repository. To keep one out of a repository, switch off **Enabled in this repository** on the Workflows page. The choice is kept in that repository's `.git/gitmaster/` folder, never in the working tree. The built-in stack workflows work the other way round: they are off until you switch them on for a repository.
@@ -80,24 +80,24 @@ A workflow that runs on a trigger or in a phase never passes through **Run**, so
 
 A dry run executes a script against your real repository without changing it. Reads run for real, except the stack reads, `ctx.stack.tree` and `ctx.stack.stale`, and the review reads, `ctx.scorecards` and `ctx.change`, which return an empty result. Actions that propose, apply or run `exec` are recorded with the values they would receive, but they do not run, and `exec` never runs in a dry run. The dry run lists the calls in order. A value that comes after a simulated value is an estimate, and GitMaster marks it as one.
 
-In the **Script** tab, a dry run uses the text open in the editor. From the command line, `gitmaster workflow dry-run <file>` does the same for a saved file. See [CLI](../reference/cli.md).
+In the **Script** tab, **Dry Run** walks the file as it is on disk. From the command line, `gitmaster workflow dry-run <file>` does the same. See [CLI](../reference/cli.md).
 
 ## The Workflows page
 
-The Workflows page lists your workflows on the left, with the built-in stack workflows under **Built-in**, and shows the selected one on the right. A built-in workflow is read only: **Copy to Edit** makes an editable copy of it. Under the name of each workflow, **Enabled in this repository** switches it on or off in this repository. The right side has two tabs:
+The Workflows page lists your workflows on the left, with the built-in stack workflows under **Built-in**, and shows the selected one on the right. A built-in workflow has no file: **Copy to Edit** makes a file of it that you can change. Under the name of each workflow, **Enabled in this repository** switches it on or off in this repository. The right side has two tabs:
 
 | Tab | What it shows |
 |---|---|
-| **Script** | The workflow file in an editor. Diagnostics point to the line of each error as you type, and **Dry Run** walks the text in the editor. Saving replaces the file in one step and makes the version unreviewed. Saving is refused when the file changed on disk after you opened it, and the page shows **The file changed on disk.** with its choices. |
+| **Script** | The workflow file as it is on disk, read only. You edit the file in your own editor: **Open in Editor** starts it on the file, and **Copy Path** copies the path. The tab shows each change a moment after you save it, with the problems of the file and the line of each one. **Dry Run** walks the file. Each change makes the version unreviewed. See [Edit in your own editor](writing-workflows.md#edit-in-your-own-editor). |
 | **Runs** | One entry per run of this workflow in this repository. See [Runs](#runs). |
 
-**New from Template…** lists the built-in templates, and choosing one creates a workflow from it. Deleting a workflow moves its file to the trash, after you confirm.
+**New from Template…** lists the built-in templates, and choosing one creates a workflow file from it, ready to open in your editor. Deleting a workflow moves its file to the trash, after you confirm.
 
 Press **Run** to start the open workflow.
 
 ### Colors in the Script tab
 
-The script editor colors keywords, strings, comments and the rest of the code with the same twelve colors as the file viewer, in the light and the dark theme. See [Syntax highlighting](../guide/code-navigation.md#syntax-highlighting).
+The Script tab colors keywords, strings, comments and the rest of the code with the same twelve colors as the file viewer, in the light and the dark theme. See [Syntax highlighting](../guide/code-navigation.md#syntax-highlighting).
 
 Cancel and approve work from the command palette:
 

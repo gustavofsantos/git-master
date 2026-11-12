@@ -174,7 +174,7 @@ The MCP keeps `workflow_list` and `workflow_run` (D71, WF5). There is no tool to
 **Generated documentation.** The app writes to `<workflows directory>/.api/` at each start where the version has changed:
 
 - `API.md`: the reference for `ctx`, generated from the catalog (signatures, levels, outcomes), plus the format of `M.meta`, the phases and the examples of this document.
-- The type file to complete in the editor (for example `ctx.d.luau`; the format depends on the engine).
+- The type files to complete in the person's editor (D233): `gitmaster.lua`, a definition file of the Lua language server, and `ctx.d.luau`, the same signatures as Luau types. A `.luarc.json` beside `.api/` makes the folder a workspace of the Lua language server; it is written only when missing.
 - Optionally, a short `SKILL.md` for agents that use skills.
 
 Generating from the catalog keeps the documentation from drifting away from the code. The directory is in the user's config, not in a repository.
@@ -193,9 +193,9 @@ Real effects only run from the UI, with the human as the actor. The CLI never do
 
 The Workflows page is a list on the left and the detail on the right, with the **Script** and **Runs** tabs. The Flow tab (graph, inspector, structural editing) was removed in WS2 (D108).
 
-- **Script:** the text of the file in the app's editor, with line diagnostics from `check` as you type, and a notice that saving makes the hash "unreviewed". Saving stays atomic, and it refuses when the file changed on disk. Deleting moves the file to the trash. Syntax highlighting uses the tree-sitter grammar of D92 (for Lua), if N4 already provides it.
+- **Script:** the text of the file, read only (D233), with the problems of `check` under it and a notice that each change makes the hash "unreviewed". The person edits the file in their own editor (**Open in Editor**, **Copy Path**), and the watcher lists the workflows again when a file of a workflows folder changes. Deleting moves the file to the trash. Syntax highlighting is the viewer's (`gm-core::syntax`, Lua).
 - **Runs:** the view of D84, now with one entry per `ctx` call (function, resolved arguments, result, outcome, duration), built from the journal.
-- **Dry run:** the same mechanism as the subcommand, on the text open in the editor.
+- **Dry run:** the same mechanism as the subcommand, on the file as it is on disk.
 - **Review:** the "Run this version?" dialog of D101.
 
 ## What the code has after WS2

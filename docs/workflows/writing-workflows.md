@@ -1,7 +1,7 @@
 ---
 title: Writing workflows
-description: A tutorial on the shape of a workflow script, its metadata, the values it receives, the calls it makes through ctx, and how to check and test it before a run.
-status: partial
+description: A tutorial on the shape of a workflow script, its metadata, the values it receives, the calls it makes through ctx, how to edit it in your own editor with completion, and how to check and test it before a run.
+status: implemented
 order: 20
 ---
 
@@ -14,6 +14,7 @@ Every workflow file is a Lua module with the same parts:
 ```lua
 local M = {}
 
+---@type gitmaster.Meta
 M.meta = {
   name = "branch-from-ticket",
   description = "Create a branch from a ticket key",
@@ -22,6 +23,8 @@ M.meta = {
   inputs = { ticket = { type = "string", prompt = "Ticket key" } },
 }
 
+---@param ctx gitmaster.Ctx
+---@param input gitmaster.Input
 function M.execute(ctx, input)
   -- the work of the workflow goes here
 end
@@ -33,6 +36,7 @@ return M
 - `M.meta` describes the workflow. GitMaster reads it when it loads the file, without running `execute`, so keep logic out of it.
 - `function M.execute(ctx, input)` is the code that runs. GitMaster calls it with the `ctx` object and the `input` values.
 - `return M` returns the module to GitMaster.
+- The lines that start with `---@` are comments to GitMaster. Your editor reads them to complete `M.meta`, `ctx` and `input`. See [Edit in your own editor](#edit-in-your-own-editor). The examples on this page leave them out to stay short.
 
 ## The metadata
 
@@ -254,7 +258,7 @@ The script plans a restack of the branch whose parent moved, and of the branches
 
 ## Check, dry-run and test while you write
 
-Three command-line commands help you test a file without the app's UI. They run only when you start them, so they are not a server.
+Three command-line commands help you test a file without the app's UI. They run only when you start them, so they are not a server. `gitmaster workflow check` prints one problem per line as `file:line: message`, which most editors can read as a list of errors.
 
 | Command | What it does |
 |---|---|
@@ -264,25 +268,63 @@ Three command-line commands help you test a file without the app's UI. They run 
 
 The command line never applies a change. Real effects run only from the app, with you as the actor.
 
-The app also writes generated reference files into a `.api` folder inside your workflows folder. They list every `ctx` function, with its arguments and outcomes. Point your editor at them to get completion for `ctx`. See [Workflow API](../reference/workflow-api.md).
+## Edit in your own editor
 
-## The script editor
+GitMaster has no editor for workflows. A workflow is a `.lua` file in your workflows folder, and you write it in the editor you already use. The Workflows page shows the file, checks it and runs it.
 
-The Script tab of the Workflows page edits the workflow file. Type in the text, then **Save** writes the file. **Dry Run** walks the text in the editor, so you can test a change before you save it.
+1. On the Workflows page, choose **New from Template…** to create a file, or select a workflow.
+2. Click **Open in Editor**, or press `Ctrl+E` (`⌘E` on macOS). **Copy Path** copies the path of the file instead, for an editor that runs in a terminal.
+3. Edit and save in your editor. The **Script** tab shows the new text a moment after you save, with the problems of the check under it.
+4. Click **Dry Run** to walk the saved file, then **Run**.
 
-### Highlighting
+Each save makes a new version of the script, and a new version is unreviewed. See [Approvals and security](approvals-and-security.md).
 
-Keywords, strings, numbers and comments have their own colors, and `ctx` is shown as the context object. `continue` and `export` are coloured as keywords, as in Luau. `type` is not, because it is also a function of Lua.
+### Choose the editor
 
-### Completion
+**Open in Editor** starts the command in the Git config key `gitmaster.editor`, with the path of the file as its last argument:
 
-After `ctx.`, the editor offers every function of `ctx`, with its signature and what the reference says about it. After `ctx.branch.`, it offers the calls of that group. Inside the argument table of a call, after `{` or `,`, it offers the keys of that table with their types, and it marks the required ones. Nothing is offered inside a string or a comment. The list comes from the same catalog as the sandbox, so it matches the reference in the `.api` folder.
+```sh
+git config --global gitmaster.editor "kitty nvim"
+```
 
-### Problems
+- The command is split into words at spaces. Use quotes around a word that contains a space. GitMaster never passes the command to a shell.
+- The command must open a window. An editor that runs in a terminal needs a terminal program in front of it, as `kitty nvim` shows.
+- The editor starts in the folder of the file. GitMaster does not wait for it.
+- When the key is not set, the system opens the file with its default application for `.lua` files.
 
-The problems of the check appear under the editor, each with its line. Click a problem to move the caret to its line.
+### Completion and type checks
 
-> **Planned.** The problems are not underlined in the text yet.
+GitMaster writes two things into your workflows folder for the Lua language server (LuaLS), which is the server most editors use for `.lua` files:
+
+| File | Content |
+|---|---|
+| `.api/gitmaster.lua` | A definition file with every `ctx` function, its arguments, its result and the text of the reference, and with the shape of `M.meta` and `input`. |
+| `.luarc.json` | The settings of the language server for the folder: the Luau operators a workflow may use, the libraries the sandbox removes, and `.api` as a library. |
+
+Open the workflows folder, or a file in it, in an editor that runs the Lua language server. The server finds `.luarc.json` and needs no other setup. Then the three `---@` lines of the module give you:
+
+- completion after `ctx.` and `ctx.branch.`, with the signature and the documentation of each call;
+- the keys of the argument table of a call, with their types;
+- the fields of `M.meta`, the trigger names and the fields of `input`;
+- a warning for a name that is not in `ctx`, for a missing required argument and for a value of the wrong type.
+
+These rules apply:
+
+- GitMaster writes `.api/gitmaster.lua` again when its version changes, so do not edit it.
+- GitMaster writes `.luarc.json` only when the folder has none, and never changes it after that. Edit it as you like. Delete it to get a new one.
+- A repository's own folder, `.git/gitmaster/workflows/`, gets a `.luarc.json` that points to the same definitions.
+- The language server is your editor's. GitMaster does not install it and does not need it.
+- A workflow runs as Luau. The language server reads standard Lua, so it reports Luau type annotations in a workflow as errors. Leave them out.
+
+The `.api` folder also holds `ctx.d.luau`, the same signatures as Luau types for an editor with a Luau language server, and `API.md`, the reference as text. See [Workflow API](../reference/workflow-api.md).
+
+## The Script tab
+
+The **Script** tab of the Workflows page shows the workflow file as it is on disk. It is read only.
+
+- Keywords, strings, numbers and comments have their own colors, and `ctx` is shown as the context object. `continue` and `export` are colored as keywords, as in Luau.
+- The problems of the check appear under the text, each with its line. The number of a line with a problem is red. Click a problem to bring its line into view.
+- **Dry Run** walks the file as it is on disk.
 
 ## Related pages
 

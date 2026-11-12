@@ -102,4 +102,4 @@ A manual workflow can declare its own shortcut with `key` in the `trigger` table
 
 | Action | Linux and Windows | macOS | Status |
 |---|---|---|---|
-| Save Workflow | `Ctrl+S` | `⌘S` | Implemented |
+| Open Workflow in Editor | `Ctrl+E` | `⌘E` | Implemented |

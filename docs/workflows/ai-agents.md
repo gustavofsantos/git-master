@@ -21,6 +21,7 @@ Each time the app starts with a new version, it writes a `.api/` folder inside t
 | File | Content |
 |---|---|
 | `API.md` | The reference of `ctx`, generated from the action catalog: each call, its arguments, effect level and outcomes. It also has the shape of `M.meta`, the phases and examples. The same reference is in [Workflow API](../reference/workflow-api.md). |
+| `gitmaster.lua` | The same `ctx` signatures as a definition file of the Lua language server, with the shape of `M.meta` and `input`. Your editor completes a workflow from it. See [Edit in your own editor](writing-workflows.md#edit-in-your-own-editor). |
 | `ctx.d.luau` | The same `ctx` signatures as Luau types, for an editor with a Luau language server. |
 | `SKILL.md` | A short skill file for agents that read skills. |
 

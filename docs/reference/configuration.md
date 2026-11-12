@@ -15,7 +15,7 @@ GitMaster keeps its files in three places: your user config directory, your user
 
 | Path | What it holds | Status |
 |---|---|---|
-| `~/.config/gitmaster/workflows/` | Your workflow files. A workflow file holds only its definition, never run state. | |
+| `~/.config/gitmaster/workflows/` | Your workflow files. A workflow file holds only its definition, never run state. GitMaster also writes the `.api/` folder and a `.luarc.json` file here, for editors and agents. | |
 
 ### User data directory
 
@@ -97,7 +97,7 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 
 | Key | Scope | Default | Used for | Status |
 |---|---|---|---|---|
-| `core.editor` | Any | Not set | The program that **Open in editor** starts. | Planned |
+| `gitmaster.editor` | Any | Not set | The command that **Open in Editor** starts on a workflow file, such as `kitty nvim`. The path of the file is its last argument. The command is split into words and is never passed to a shell, and it must open a window. When the key is not set, the system opens the file with its default application. See [Edit in your own editor](../workflows/writing-workflows.md#edit-in-your-own-editor). | |
 | `merge.conflictStyle` | Any | `zdiff3` | The style of the conflict markers the conflict resolver shows. | Planned |
 | `gitmaster.workflowPath` | Any, can be set more than once | Not set | Extra folders to read workflow files from, after your workflows directory. A folder inside the repository's working tree is ignored, with a warning. | |
 | `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. `gitmaster worktree add` reads it; see [Command line](cli.md#create-a-worktree). The worktree dialog does not read it yet. | Planned |
@@ -202,7 +202,7 @@ Changes apply as you make them, and there is no **Save** button. A value is save
 | **Scope Selector** | Chooses **Global** or **This Repository** for the fields below. |
 | **Author Details** | Sets `user.name` and `user.email`. |
 | **Default Branch** | Sets `init.defaultBranch`, the name for new branches and new repositories. |
-| **Editor** | Sets `core.editor`, the program that **Open in editor** starts. |
+| **Editor** | Sets `gitmaster.editor`, the command that **Open in Editor** starts. |
 | **Signing** | Shows whether commits are signed (`commit.gpgSign`) and which GPG or SSH key signs them. |
 
 ### Worktrees
