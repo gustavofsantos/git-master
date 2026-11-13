@@ -55,6 +55,11 @@ pub struct DiffView {
     /// The colors of the lines, by hunk and line index; empty until they are computed.
     pub colors: HashMap<(usize, usize), LineColors>,
     pub generation: u64,
+    /// The other end of the line selection; the cursor is this end. `None`: no selection.
+    pub anchor: Option<usize>,
+    /// The screen row of the first diff row, as the last draw placed it; a drag reads rows
+    /// against it.
+    pub body_top: u16,
 }
 
 impl DiffView {
@@ -70,6 +75,8 @@ impl DiffView {
             follow_cursor: true,
             colors: HashMap::new(),
             generation,
+            anchor: None,
+            body_top: 0,
         }
     }
 
@@ -83,6 +90,9 @@ impl DiffView {
         };
         self.rows = diff_rows::build_rows(Diffs { unstaged, staged }, side);
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+        self.anchor = self
+            .anchor
+            .map(|anchor| anchor.min(self.rows.len().saturating_sub(1)));
         if self.diff.is_none() {
             self.cursor = self.first_line().unwrap_or(0);
         }
@@ -155,6 +165,96 @@ impl DiffView {
             self.cursor = index;
             self.follow_cursor = true;
         }
+    }
+
+    /// Starts a selection at the cursor, or ends the one there is.
+    pub fn toggle_selection(&mut self) {
+        self.anchor = match self.anchor {
+            Some(_) => None,
+            None => Some(self.cursor),
+        };
+    }
+
+    /// Puts the cursor at the other end of the selection.
+    pub fn swap_ends(&mut self) {
+        if let Some(anchor) = self.anchor.as_mut() {
+            std::mem::swap(anchor, &mut self.cursor);
+            self.follow_cursor = true;
+        }
+    }
+
+    /// The rows the selection covers, first and last; `None` without a selection.
+    pub fn selected_rows(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        Some((anchor.min(self.cursor), anchor.max(self.cursor)))
+    }
+
+    pub fn is_selected(&self, row: usize) -> bool {
+        self.selected_rows()
+            .is_some_and(|(first, last)| (first..=last).contains(&row))
+    }
+
+    /// The selected lines that stage: for each hunk the selection touches, the indices of its
+    /// added and removed lines in the selection. A hunk with only context selected is left
+    /// out.
+    pub fn selected_changes(&self) -> Vec<(usize, Vec<u32>)> {
+        let Some((first, last)) = self.selected_rows() else {
+            return Vec::new();
+        };
+        let mut changes: Vec<(usize, Vec<u32>)> = Vec::new();
+        for row in &self.rows[first..=last] {
+            let Row::Line {
+                hunk_index,
+                line_index,
+                ..
+            } = *row
+            else {
+                continue;
+            };
+            let is_change = self
+                .line(hunk_index, line_index)
+                .is_some_and(|line| line.kind != LineKind::Context);
+            let Ok(index) = u32::try_from(line_index) else {
+                continue;
+            };
+            if !is_change {
+                continue;
+            }
+            match changes.last_mut() {
+                Some((hunk, lines)) if *hunk == hunk_index => lines.push(index),
+                _ => changes.push((hunk_index, vec![index])),
+            }
+        }
+        changes
+    }
+
+    /// The selection as the header names it: the first and last line numbers in the file
+    /// and how many lines it holds, such as `44–48 · 5 lines`.
+    pub fn selection_label(&self) -> Option<String> {
+        let (first, last) = self.selected_rows()?;
+        let numbers: Vec<u32> = self.rows[first..=last]
+            .iter()
+            .filter_map(|row| match *row {
+                Row::Line {
+                    hunk_index,
+                    line_index,
+                    ..
+                } => self
+                    .line(hunk_index, line_index)
+                    .and_then(|line| line.new_no.or(line.old_no)),
+                _ => None,
+            })
+            .collect();
+        let count = self.rows[first..=last]
+            .iter()
+            .filter(|row| matches!(row, Row::Line { .. }))
+            .count();
+        let noun = if count == 1 { "line" } else { "lines" };
+        Some(match (numbers.first(), numbers.last()) {
+            (Some(start), Some(end)) if start != end => format!("{start}–{end} · {count} {noun}"),
+            (Some(start), _) => format!("{start} · {count} {noun}"),
+            _ => format!("{count} {noun}"),
+        })
     }
 
     /// Moves `scroll` so the cursor is on screen in `height` rows.
@@ -359,6 +459,31 @@ mod tests {
             [(4, 7, SyntaxRole::Function), (6, 10, SyntaxRole::Comment)]
         );
         assert_eq!(colors[&(1, 0)], [(0, 2, SyntaxRole::Comment)]);
+    }
+
+    #[test]
+    fn a_selection_over_two_hunks_stages_the_changed_lines_of_each() {
+        let mut view = view();
+        assert_eq!(view.cursor, 1); // the context line of the first hunk
+        view.toggle_selection();
+        view.move_cursor(4); // the added line of the second hunk
+        assert_eq!(view.selected_rows(), Some((1, 5)));
+        assert_eq!(view.selected_changes(), [(0, vec![1, 2]), (1, vec![0])]);
+        assert_eq!(view.selection_label().as_deref(), Some("1–9 · 4 lines"));
+        view.swap_ends();
+        assert_eq!(view.cursor, 1);
+        assert_eq!(view.anchor, Some(5));
+        view.toggle_selection();
+        assert_eq!(view.selected_rows(), None);
+        assert!(view.selected_changes().is_empty());
+    }
+
+    #[test]
+    fn a_selection_of_context_only_stages_nothing() {
+        let mut view = view();
+        view.toggle_selection();
+        assert_eq!(view.selected_changes(), []);
+        assert_eq!(view.selection_label().as_deref(), Some("1 · 1 line"));
     }
 
     #[test]

@@ -26,12 +26,22 @@ pub fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(text).style(DIM), area);
         return;
     };
-    frame.render_widget(Paragraph::new(header(view)), Rect { height: 1, ..area });
+    let header_area = Rect { height: 1, ..area };
+    if view.anchor.is_some() {
+        let mut strip = Strip::new(header_area);
+        selection_header(view, &mut strip);
+        let (spans, buttons) = strip.into_parts();
+        frame.render_widget(Paragraph::new(Line::from(spans)), header_area);
+        app.hits.extend(buttons);
+    } else {
+        frame.render_widget(Paragraph::new(header(view)), header_area);
+    }
     let body = Rect {
         y: area.y + 1,
         height: area.height.saturating_sub(1),
         ..area
     };
+    view.body_top = body.y;
     if let Some(message) = message(view) {
         let text = Paragraph::new(Line::styled(format!(" {message}"), DIM));
         frame.render_widget(
@@ -68,7 +78,12 @@ pub fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
                 line_index,
                 ..
             } => match view.line(hunk_index, line_index) {
-                Some(line) => code_line(line, view.colors.get(&(hunk_index, line_index)), width),
+                Some(line) => code_line(
+                    line,
+                    view.colors.get(&(hunk_index, line_index)),
+                    width,
+                    view.is_selected(index),
+                ),
                 None => Line::default(),
             },
             _ => Line::default(),
@@ -103,6 +118,22 @@ fn header(view: &DiffView) -> Line<'static> {
         DIM,
     ));
     Line::from(spans)
+}
+
+/// The header while lines are selected: the range and the buttons that act on it.
+fn selection_header(view: &DiffView, strip: &mut Strip<'static>) {
+    strip.text(view.path.clone(), BOLD);
+    if let Some(label) = view.selection_label() {
+        strip.text(format!(" · {label}  "), Style::new().fg(Color::Blue));
+    }
+    let (label, color) = match view.context {
+        Context::Unstaged => ("[stage lines]", Color::Green),
+        Context::Staged => ("[unstage lines]", Color::Yellow),
+    };
+    strip
+        .button(label, Style::new().fg(color), Action::StageSelection)
+        .text(" ", Style::new())
+        .button("[clear]", DIM, Action::ClearSelection);
 }
 
 /// What shows in place of the lines, if anything.
@@ -144,7 +175,12 @@ fn hunk_bar(view: &DiffView, hunk_index: usize, area: Rect, hits: &mut Vec<Hit>)
     Line::from(spans)
 }
 
-fn code_line(line: &DiffLine, colors: Option<&LineColors>, width: usize) -> Line<'static> {
+fn code_line(
+    line: &DiffLine,
+    colors: Option<&LineColors>,
+    width: usize,
+    selected: bool,
+) -> Line<'static> {
     let (number, sign, sign_style, text_style) = match line.kind {
         LineKind::Added => (line.new_no, "+", Style::new().fg(Color::Green), None),
         LineKind::Removed => (
@@ -159,10 +195,17 @@ fn code_line(line: &DiffLine, colors: Option<&LineColors>, width: usize) -> Line
         || " ".repeat(NUMBER_WIDTH),
         |no| format!("{no:>NUMBER_WIDTH$}"),
     );
-    let mut spans = vec![
-        Span::styled(number, sign_style),
-        Span::styled(format!(" {sign} "), sign_style),
-    ];
+    let mut spans = if selected {
+        // The selection's mark takes the first column of the number.
+        let rest: String = number.chars().skip(1).collect();
+        vec![
+            Span::styled("▌", Style::new().fg(Color::Blue)),
+            Span::styled(rest, sign_style.add_modifier(Modifier::BOLD)),
+        ]
+    } else {
+        vec![Span::styled(number, sign_style)]
+    };
+    spans.push(Span::styled(format!(" {sign} "), sign_style));
     let room = width.saturating_sub(NUMBER_WIDTH + 3);
     spans.extend(code_spans(&line.text, colors, text_style, room));
     if line.no_newline {

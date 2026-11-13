@@ -142,6 +142,11 @@ pub enum Action {
     StageCursorHunk,
     /// Moves the diff's cursor to the next (`true`) or the previous hunk.
     JumpHunk(bool),
+    /// Stages the selected file under **Unstaged**, unstages it under **Staged**.
+    StageFile,
+    /// Stages the selected lines under **Unstaged**, unstages them under **Staged**.
+    StageSelection,
+    ClearSelection,
 }
 
 /// A button the last draw put on screen.
@@ -345,6 +350,8 @@ pub struct App {
     diff_request: Option<OperationId>,
     /// Writes in flight, with what to call them if they fail.
     writes: HashMap<OperationId, &'static str>,
+    /// The diff row a press of the left button started on; a drag selects from it.
+    drag_from: Option<usize>,
     commands: Vec<CommandKind>,
 }
 
@@ -376,6 +383,7 @@ impl App {
             color_jobs: Vec::new(),
             diff_request: None,
             writes: HashMap::new(),
+            drag_from: None,
             commands: Vec::new(),
         };
         app.rebuild();
@@ -582,19 +590,68 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => view.move_cursor(isize::MAX),
             KeyCode::Char('J') => view.jump_hunk(true),
             KeyCode::Char('K') => view.jump_hunk(false),
+            KeyCode::Char('V') => view.toggle_selection(),
+            KeyCode::Char('o') => view.swap_ends(),
+            KeyCode::Esc => view.anchor = None,
             KeyCode::Char(letter @ ('s' | 'u')) => {
                 let wanted = if letter == 's' {
                     Context::Unstaged
                 } else {
                     Context::Staged
                 };
-                if let Some(hunk) = view.cursor_hunk().filter(|_| view.context == wanted) {
+                if view.context != wanted {
+                    return;
+                }
+                if view.anchor.is_some() {
+                    self.stage_selection();
+                } else if let Some(hunk) = view.cursor_hunk() {
                     self.stage_hunk(hunk);
                 }
             }
             _ => return,
         }
         self.dirty = true;
+    }
+
+    /// Stages the selected lines, or unstages them under **Staged**: one command for each
+    /// hunk the selection touches, each naming its hunk by id. Hunk ids hash content, not line
+    /// numbers, so staging one hunk leaves the next one's id as it was.
+    fn stage_selection(&mut self) {
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        let changes = view.selected_changes();
+        if changes.is_empty() {
+            self.notice = Some("The selection has no added or removed line.".to_owned());
+            return;
+        }
+        view.anchor = None;
+        for (hunk_index, lines) in changes {
+            let Some(hunk) = view.hunk(hunk_index) else {
+                continue;
+            };
+            let target = StageTarget::Lines {
+                path: view.path.clone(),
+                hunk: hunk.id.clone(),
+                lines,
+            };
+            self.commands.push(match view.context {
+                Context::Unstaged => CommandKind::Stage { target },
+                Context::Staged => CommandKind::Unstage { target },
+            });
+        }
+    }
+
+    /// Stages the selected file, or unstages it under **Staged**.
+    fn stage_file(&mut self) {
+        let Some(path) = self.selected().map(|file| file.path.clone()) else {
+            return;
+        };
+        let target = StageTarget::File { path };
+        self.commands.push(match self.context {
+            Context::Unstaged => CommandKind::Stage { target },
+            Context::Staged => CommandKind::Unstage { target },
+        });
     }
 
     /// Stages hunk `index` of the diff on screen, or unstages it under **Staged**. The hunk is
@@ -647,6 +704,8 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.move_cursor(isize::MIN),
             KeyCode::Char('G') | KeyCode::End => self.move_cursor(isize::MAX),
             KeyCode::Enter | KeyCode::Char(' ' | 'l' | 'h') => self.open_at_cursor(key.code),
+            KeyCode::Char('s') if self.context == Context::Unstaged => self.stage_file(),
+            KeyCode::Char('u') if self.context == Context::Staged => self.stage_file(),
             _ => return,
         }
         self.dirty = true;
@@ -678,6 +737,15 @@ impl App {
                 if let Some(view) = self.diff.as_mut() {
                     view.cursor = index.min(view.rows.len().saturating_sub(1));
                     view.follow_cursor = true;
+                    view.anchor = None;
+                    self.drag_from = Some(view.cursor);
+                }
+            }
+            Action::StageFile => self.stage_file(),
+            Action::StageSelection => self.stage_selection(),
+            Action::ClearSelection => {
+                if let Some(view) = self.diff.as_mut() {
+                    view.anchor = None;
                 }
             }
             Action::StageHunk(index) => self.stage_hunk(index),
@@ -707,6 +775,8 @@ impl App {
                     self.dirty = true;
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) => self.drag_to(at),
+            MouseEventKind::Up(MouseButton::Left) => self.drag_from = None,
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 if let Some(main) = self.areas.main.filter(|area| area.contains(at)) {
                     let by = if mouse.kind == MouseEventKind::ScrollDown {
@@ -733,6 +803,25 @@ impl App {
                 self.dirty = true;
             }
             _ => {}
+        }
+    }
+
+    /// The left button is held over `at` after a press on a diff row: the rows between are
+    /// selected, the cursor at `at`'s end.
+    fn drag_to(&mut self, at: Position) {
+        let Some(from) = self.drag_from else {
+            return;
+        };
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        let offset = usize::from(at.y.saturating_sub(view.body_top));
+        let row = (view.scroll + offset).min(view.rows.len().saturating_sub(1));
+        if row != from || view.anchor.is_some() {
+            view.anchor = Some(from);
+            view.cursor = row;
+            view.follow_cursor = true;
+            self.dirty = true;
         }
     }
 

@@ -193,7 +193,28 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
             area: Rect::new(list.x, y, list.width, 1),
             action: Action::Row(index),
         });
-        let mut line = sidebar_line(row, width);
+        let button = match (row, app.context) {
+            (Row::File(file), context) if Some(&file.path) == selected.as_ref() => {
+                Some(match context {
+                    Context::Unstaged => "[stage]",
+                    Context::Staged => "[unstage]",
+                })
+            }
+            _ => None,
+        };
+        if let Some(label) = button {
+            let label_width = u16::try_from(label.len()).unwrap_or(u16::MAX);
+            app.hits.push(Hit {
+                area: Rect::new(
+                    (list.x + list.width).saturating_sub(label_width + 1),
+                    y,
+                    label_width,
+                    1,
+                ),
+                action: Action::StageFile,
+            });
+        }
+        let mut line = sidebar_line(row, width, button);
         if index == app.cursor && focused {
             line = line.style(ON);
         } else if matches!(row, Row::File(file) if Some(&file.path) == selected.as_ref()) {
@@ -204,7 +225,7 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), list);
 }
 
-fn sidebar_line(row: &Row, width: usize) -> Line<'static> {
+fn sidebar_line(row: &Row, width: usize, button: Option<&'static str>) -> Line<'static> {
     match row {
         Row::Dir { dir, files, folded } => {
             let name = if dir.is_empty() { "./" } else { dir.as_str() };
@@ -232,6 +253,15 @@ fn sidebar_line(row: &Row, width: usize) -> Line<'static> {
                     format!(" ◫{}", file.threads),
                     Style::new().fg(Color::Yellow),
                 ));
+            }
+            if let Some(label) = button {
+                let color = if label == "[stage]" {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                };
+                tail.push(Span::raw(" "));
+                tail.push(Span::styled(label, Style::new().fg(color)));
             }
             tail.push(Span::raw(" "));
             let tail_width: usize = tail.iter().map(Span::width).sum();
@@ -301,7 +331,18 @@ fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
         ),
         ("Tab", focus.to_owned(), Action::ToggleFocus),
     ];
-    if app.focus == Focus::Main && app.tab == Tab::Diff && app.diff.is_some() {
+    let selecting = app.diff.as_ref().is_some_and(|view| view.anchor.is_some());
+    if app.focus == Focus::Main && app.tab == Tab::Diff && selecting {
+        match app.context {
+            Context::Unstaged => {
+                buttons.push(("s", "stage lines".to_owned(), Action::StageSelection));
+            }
+            Context::Staged => {
+                buttons.push(("u", "unstage lines".to_owned(), Action::StageSelection));
+            }
+        }
+        buttons.push(("Esc", "clear".to_owned(), Action::ClearSelection));
+    } else if app.focus == Focus::Main && app.tab == Tab::Diff && app.diff.is_some() {
         match app.context {
             Context::Unstaged => {
                 buttons.push(("s", "stage hunk".to_owned(), Action::StageCursorHunk));
@@ -356,7 +397,13 @@ const KEYS: &[(&str, &str)] = &[
     ("Space", "fold or unfold a folder"),
     ("l h", "unfold or fold a folder"),
     ("J K", "next or previous hunk, in the diff"),
-    ("s u", "stage or unstage the hunk at the cursor"),
+    ("V", "start or end a line selection, in the diff"),
+    ("o", "go to the other end of the selection"),
+    ("Esc", "clear the selection"),
+    (
+        "s u",
+        "stage or unstage the file, the selection or the hunk",
+    ),
     ("?", "these keys"),
     ("q", "quit"),
 ];
@@ -498,14 +545,8 @@ mod tests {
         assert!(app.quit);
     }
 
-    #[test]
-    fn the_diff_shows_hunk_bars_and_lines_and_its_stage_button_stages_the_hunk() {
-        use gm_schema::{
-            CommandKind, DiffLine, DiffSide, Event, FileDiff, Hunk, HunkId, LineKind, OperationId,
-            StageTarget,
-        };
-        let mut app = app();
-        app.take_commands();
+    fn diff_event() -> gm_schema::Event {
+        use gm_schema::{DiffLine, DiffSide, Event, FileDiff, Hunk, HunkId, LineKind, OperationId};
         let line = |kind, text: &str, new_no| DiffLine {
             kind,
             old_no: None,
@@ -513,7 +554,7 @@ mod tests {
             text: text.to_owned(),
             no_newline: false,
         };
-        app.apply(&Event::DiffLoaded {
+        Event::DiffLoaded {
             id: OperationId(5),
             side: DiffSide::Unstaged,
             diff: FileDiff {
@@ -534,7 +575,81 @@ mod tests {
                     ],
                 }],
             },
+        }
+    }
+
+    fn drag(app: &mut App, column: u16, row: u16) {
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
         });
+    }
+
+    #[test]
+    fn a_drag_selects_lines_and_stage_lines_stages_their_changes() {
+        use gm_schema::{CommandKind, HunkId, StageTarget};
+        let mut app = app();
+        app.apply(&diff_event());
+        app.take_commands();
+        screen(&mut app, 120, 30);
+        click(&mut app, 60, 3); // the context line
+        drag(&mut app, 60, 4);
+        drag(&mut app, 60, 5); // the added line
+        let lines = screen(&mut app, 120, 30);
+        assert!(
+            lines[1].ends_with("│ src/lib.rs · 3–4 · 3 lines  [stage lines] [clear]"),
+            "{lines:?}"
+        );
+        assert!(lines[3].contains("│ ▌   3"), "{lines:?}");
+        assert!(lines[5].contains("│ ▌   4 +"), "{lines:?}");
+        let column = u16::try_from(
+            lines[1]
+                .find("[stage lines]")
+                .map_or(0, |at| lines[1][..at].chars().count()),
+        )
+        .unwrap();
+        click(&mut app, column + 2, 1);
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::Stage {
+                target: StageTarget::Lines {
+                    path: "src/lib.rs".to_owned(),
+                    hunk: HunkId("h1".to_owned()),
+                    lines: vec![1, 2],
+                },
+            }]
+        );
+        assert!(app.diff.as_ref().unwrap().anchor.is_none());
+    }
+
+    #[test]
+    fn the_selected_files_stage_button_stages_the_file() {
+        use gm_schema::{CommandKind, StageTarget};
+        let mut app = app();
+        app.take_commands();
+        let lines = screen(&mut app, 120, 30);
+        assert!(lines[3].starts_with("   M lib.rs"), "{lines:?}");
+        assert!(lines[3].contains("[stage] │"), "{lines:?}");
+        let column = u16::try_from(lines[3].find("[stage]").unwrap()).unwrap();
+        click(&mut app, column + 1, 3);
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::Stage {
+                target: StageTarget::File {
+                    path: "src/lib.rs".to_owned(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn the_diff_shows_hunk_bars_and_lines_and_its_stage_button_stages_the_hunk() {
+        use gm_schema::{CommandKind, HunkId, StageTarget};
+        let mut app = app();
+        app.take_commands();
+        app.apply(&diff_event());
         let lines = screen(&mut app, 120, 30);
         assert!(
             lines[1].ends_with("│ src/lib.rs  +1 −1 · hunk 1/1 · unstaged"),
