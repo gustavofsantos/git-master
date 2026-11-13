@@ -61,7 +61,7 @@ These keys work everywhere:
 
 ## Read the changes
 
-> **Planned.** `}`, `{`, `f` and `e` are not available yet.
+> **Planned.** `f` and `e` are not available yet.
 
 The **Diff** tab shows the diff of the selected file in the chosen context: its unstaged changes under **Unstaged**, its staged changes under **Staged**. Its header shows the path, `+a −r` and which hunk the cursor is in, such as `hunk 1/5`.
 
@@ -95,39 +95,36 @@ Press on a line and drag to the last line, or press `V` and move the cursor. The
 
 While lines are selected, the diff's header shows the range, such as `44–48 · 5 lines`, and the buttons that act on it: **[comment]**, **[stage lines]** (or **[unstage lines]** under **Staged**) and **[clear]**. The same selection is used for a thread and for staging. A selection with no added or removed line stages nothing, and the companion says so.
 
-> **Planned.** **[comment]** is not shown yet.
-
 ## Start a thread
 
-> **Planned.** Starting a thread is not available yet.
-
-1. Select the lines.
-2. Click **[comment]** or press `c`. A box opens under the selection. It names the lines it is anchored to.
+1. Select the lines, or put the cursor on one line.
+2. Click **[comment]** or press `c`. A box opens under the selection. Its title names the lines, such as `Comment on lines 2–3`.
 3. Choose the type with the chips **change**, **question** or **nit**: click one, or press `Tab` to move between them.
-4. Write the comment. Press `Enter` or click **[create]** to start the thread; `Alt+Enter` starts a new line. `Esc` cancels; when the box holds text, it asks first.
+4. Write the comment, or paste it. Press `Enter` or click **[comment]** in the box to start the thread; `Alt+Enter` starts a new line. `Esc` or **[cancel]** closes the box; when it holds text, the first `Esc` asks and the second discards it. If the engine refuses the comment, the box stays open and says why.
 
 The thread appears under its lines with the status **Open**. Your agent reads it the next time it lists the review comments over MCP. The rules are those of [Local review](../agents/local-review.md):
 
 - Under **Unstaged**, the lines are the file's own, so the thread is anchored at once.
 - Under **Staged**, the companion looks for the selected text in the file as it is now. If it appears exactly once, the thread is anchored there; otherwise the companion says so and writes nothing.
+- Under **Staged**, the selection must be one run of lines: a selection over two hunks is refused.
 - Removed lines are not in the working tree. A selection of only removed lines cannot start a thread.
 
-The type is the comment's label: **change** is `issue`, **question** is `question`, **nit** is `nitpick`.
+The type is the comment's label: **change** is `issue`, **question** is `question`, **nit** is `nitpick`. The agent reads it with the comment, and the thread shows it.
 
 ## Threads in the code
 
-> **Planned.** Threads are not drawn in the code yet.
+> **Planned.** The change the agent made is not shown in the box yet.
 
-Each thread is drawn under the last line it is anchored to, in a box with a colored edge. Its first line shows the thread's number, its lines, its status and how many messages it has. Below come the messages, oldest first, each with its author and time. A message from the agent is marked **Agent-written**. When the agent has handled the thread, the box also shows what the agent changed, as GitMaster measured it from its own snapshots: the lines added and removed in the thread's lines, and elsewhere.
+Each thread is drawn under the last line it is anchored to, in a box with a colored edge, the same threads the app's diff shows. Its first line shows its status (**Open**, **Handled**, **Resolved** or **Outdated**), its lines, when it was written, its label and the buttons. Below come the comment and the replies, oldest first, each with its author and time. A reply or a thread from the agent is marked **Agent-written**. The lines an open thread covers are marked `┃` in the gutter. When the agent has handled the thread, the box also shows what the agent changed, as GitMaster measured it from its own snapshots: the lines added and removed in the thread's lines, and elsewhere.
 
-An open thread is drawn whole. A handled or resolved thread folds to its first line; click it or press `Enter` on it to unfold it. The box has the buttons for what you can do next:
+A resolved thread folds to one line; click it, or press `Enter` on its line, to unfold it, and **[fold]** folds it again. A thread with more than two replies shows the latest one and a toggle, **[N earlier replies]**, that shows the others. An **Outdated** thread, whose text is no longer found exactly once, is not drawn under a line: it is listed under **▸ N outdated threads** above the diff, which a click unfolds. Threads on lines the diff does not show are listed above the diff too. `}` and `{` go to the next and the previous thread. The box has the buttons for what you can do next:
 
 | Button | Key | Action |
 |---|---|---|
 | **[reply]** | `r` | Write a reply. Your reply on a handled thread reopens it. |
-| **[resolve]** | `R` | Resolve the thread. |
+| **[resolve]** | `R` | Resolve the thread. On a note the agent left, the button reads **[dismiss]**. |
 | **[reopen]** | `o` | Send a resolved thread back to the agent. |
-| **[delete]** | `D` | Delete the thread, after you confirm with `y`. |
+| **[delete]** | `D` | Delete the thread: the first press asks, and a second within three seconds deletes it. |
 
 ## The Reviews tab
 

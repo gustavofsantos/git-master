@@ -100,7 +100,7 @@ review_comments_list(status="open")
 
 ## Labels and decorations
 
-A comment has a conventional-comment **label** and optional **decorations**. The agent sets them with `review_comment_create`.
+A comment has a conventional-comment **label** and optional **decorations**. The agent sets them with `review_comment_create`. You give your own comment a label in the [terminal companion](../guide/terminal-companion.md), with its type chips.
 
 | Label | Use |
 |---|---|
