@@ -61,11 +61,11 @@ These keys work everywhere:
 
 ## Read the changes
 
-> **Planned.** The **Diff** tab is not shown yet.
+> **Planned.** `}`, `{`, `f` and `e` are not available yet.
 
 The **Diff** tab shows the diff of the selected file in the chosen context: its unstaged changes under **Unstaged**, its staged changes under **Staged**. Its header shows the path, `+a −r` and which hunk the cursor is in, such as `hunk 1/5`.
 
-Each hunk starts with a header bar that shows the function or section it is in, as Git finds it, and a button: **[stage]** under **Unstaged**, **[unstage]** under **Staged**. Each line shows its number in the file and a `+` or `−` in the gutter, in your terminal's green and red. Code is colored by its language.
+Each hunk starts with a header bar that shows the function or section it is in, as Git finds it, and a button: **[stage]** under **Unstaged**, **[unstage]** under **Staged**. Each line shows its number in the file and a `+` or `−` in the gutter, in your terminal's green and red. Code is colored by its language; a removed line is drawn in red, and a very large diff is shown without colors. Click a line to put the cursor on it; the wheel scrolls the diff.
 
 | Key | Action |
 |---|---|
@@ -81,7 +81,7 @@ Each hunk starts with a header bar that shows the function or section it is in, 
 
 ## Stage and unstage
 
-> **Planned.** Staging and unstaging are not available yet.
+> **Planned.** Staging a whole file and staging selected lines are not available yet; a hunk stages and unstages with its button, `s` and `u`.
 
 Stage what you accept, at the size you choose:
 
