@@ -26,13 +26,13 @@ The terminal must be at least 80 columns wide and 24 rows high. A smaller termin
 
 The terminal must use a Nerd Font: the companion draws its icons, such as the branch, the folders, the file types and the status of a thread, with Nerd Font glyphs, and has no other set. With another font they show as empty boxes.
 
-The companion uses your terminal's colors, so it matches your terminal theme and your tmux theme. It keeps itself up to date: when a file changes, when the agent stages something or when the agent answers a thread, the screen refreshes by itself.
+The companion uses your terminal's colors, so it matches your terminal theme and your tmux theme. Set `NO_COLOR` to anything to turn colors off. It keeps itself up to date: when a file changes, when the agent stages something or when the agent answers a thread, the screen refreshes by itself.
 
 ## Screens
 
 > **Planned.** The companion shows tabs and a sidebar; the screens below are not available yet.
 
-The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread 12`; click a step to go back to it.
+The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread 12`; click a step to go back to it.
 
 | Screen | Shows |
 |---|---|
@@ -45,7 +45,7 @@ The companion is a stack of screens. It opens on **Status**. Opening something, 
 | **Origin** | How some lines got where they are, change by change. |
 | **Agent thread** | An agent's session, by its request, decisions, changes and runs. |
 
-Every screen is made of sections you can fold. `Tab` folds or unfolds the section at the cursor; a click on a section's title does the same. `Enter` opens what is at the cursor: a thread, a commit, a file at that line in your editor.
+Every screen is made of sections you can fold. `Tab` folds or unfolds the section at the cursor; a click on a section's title does the same. `/` searches the screen, as in less: type the text and press `Enter`, then `n` and `N` go to the next and the previous match. `Enter` opens what is at the cursor: a thread, a commit, a file at that line in your editor.
 
 ## The Status screen
 
@@ -94,11 +94,17 @@ Press `?` to see every key of the screen you are on.
 | `PgDn` `PgUp`, `Ctrl+D` `Ctrl+U` | Move half a screen. |
 | `Home` `End`, `g g` `G` | Go to the top or the bottom. |
 | `Shift+↓` `Shift+↑`, `V`, a drag | Select lines (VISUAL). |
-| `Tab` | Fold or unfold the section at the cursor. |
+| `] c` `[ c` | Go to the next or the previous hunk. |
+| `Tab`, `z a` | Fold or unfold the section at the cursor. |
+| `z o` `z c` | Unfold or fold the section at the cursor. |
+| `z R` `z M` | Unfold or fold every section. |
+| `/`, `n` `N` | Search the screen; the next or the previous match. |
 | `Enter` | Open what is at the cursor. |
-| `Esc` | Close the menu, clear the selection, or go back one screen. |
+| `q`, `Esc` | Close the menu, clear the selection, or go back one screen; on **Status**, `q` quits. |
 | `Space` | Open the menu. |
 | `?` | Every key of this screen. |
+| `Ctrl+Z` | Suspend to the shell; `fg` brings the companion back. |
+| `Ctrl+L` | Redraw the screen. |
 | `Ctrl+C` | Quit. |
 
 ## Stage and unstage
@@ -116,6 +122,12 @@ Select lines, or put the cursor on one, open the menu and choose **comment**. A 
 The thread appears under its lines with the status **Open**. The agent reads it the next time it lists the review comments over MCP. The rules are those of [Local review](../agents/local-review.md): under **Unstaged** the lines are the file's own; elsewhere the companion finds the selected text in the file as it is now, exactly once, or says why not; removed lines cannot carry a thread.
 
 On a thread, the menu offers **reply**, **resolve** (or **reopen**) and **delete**, which asks first. Your reply on a handled thread reopens it.
+
+## Questions wait a second
+
+> **Planned.** The wait is not available yet.
+
+Every question the companion asks you, and the text box, waits one second before it takes an answer that ends it. In that second, `Esc` and the other ways to cancel are ignored; for a question whose yes changes something you cannot take back, such as deleting a thread, the yes is ignored too. Keys pressed in that second are dropped, so a key you meant for the screen behind cannot answer the question by accident. The keys show dimmed until they are taken. `Ctrl+C` still quits at once, and the menu answers your first key without waiting.
 
 **copy reference** puts `@path:lines` of the selection on the clipboard, to paste into your agent's prompt.
 

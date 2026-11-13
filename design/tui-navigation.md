@@ -1,6 +1,6 @@
 # Terminal companion: navigation, modes and key maps
 
-Last updated: 2026-11-13. Decision D241 (and D236 to D240 before it). The behavior a person sees is in `docs/guide/terminal-companion.md`; this file is how it is built.
+Last updated: 2026-11-13. Decisions D241 and D242 (and D236 to D240 before them). The behavior a person sees is in `docs/guide/terminal-companion.md`; this file is how it is built.
 
 The companion is modeled the way the author works in it: next to an agent, in a tmux pane, from the keyboard first and the mouse second. Three ideas carry it:
 
@@ -9,6 +9,8 @@ The companion is modeled the way the author works in it: next to an agent, in a 
 3. **Keys never call code.** Every action has a name in one registry; a key map, per mode, binds key sequences to names. The default map is built in; a person's own map replaces any part of it (from a configuration file, later).
 
 Everything below is plain Rust in `gm-tui`, with no terminal or drawing in it, so it is tested without a terminal.
+
+**Where choices come from (D242).** When a key or a behavior has to be chosen, the companion borrows from the tools people already have in their fingers: neovim, less, man, and the classic Unix tools still in heavy use (and the terminal Git tools built on them, such as tig and Magit). A new convention is invented only where none of them has one, and the departure is recorded.
 
 ## Screens
 
@@ -35,8 +37,20 @@ An overlay is drawn over the top screen and takes the input until it closes. It 
 |---|---|
 | Menu | The actions behind a prefix key, as a panel at the bottom (which-key). |
 | Text box | A comment, a reply or a commit message: a split at the bottom, the screen still visible above. |
-| Confirm | A one-line question before a destructive action. |
+| Confirm | A one-line question before an action with a side effect that cannot be undone, such as delete or discard. |
+| Search | A one-line prompt for `/`, as in less and vim. |
 | Keys | Every key of the current screen and mode (`?`). |
+
+### Prompts wait before they accept (D242)
+
+A **prompt** is an overlay that waits for the person: Confirm, the text box, the search line. When a prompt opens:
+
+- for its first **second** it does not accept a cancel key (`Esc`, `n`, `q`, a click on cancel);
+- a prompt whose confirmation runs a side effect also does not accept its confirm key (`y`, `Enter`, a click on confirm) for that second;
+- keys pressed during the wait are dropped, not queued: a key meant for the screen behind cannot answer the prompt;
+- the prompt shows its cancel and confirm keys dimmed until they are accepted, so the wait is visible.
+
+`Ctrl+C` still quits at once. The menu is not a prompt: it acts on the first key. The wait is one value in the code (`PROMPT_GUARD`), read through the same path as the key map, so it can be configured with it (Q50).
 
 ## Sections
 
@@ -78,7 +92,11 @@ The **leader** is an ordinary prefix bound in the Normal and Visual maps (`Space
 
 Keys are written in one notation in the code and in configuration: `j`, `G`, `<space>`, `<tab>`, `<cr>`, `<esc>`, `<c-s>`, `<s-down>`, `<pagedown>`, sequences separated by spaces (`<space> s`, `g g`).
 
-The **default map** binds the universal keys (arrows, page keys, `Tab`, `Enter`, `Esc`, `Shift`+arrows to select), the vim keys for muscle memory (`j`, `k`, `g g`, `G`, `<c-d>`, `<c-u>`, `V`), the leader (`Space`) and `?`. A person's map, read from a configuration file later, replaces bindings by action name and may rebind the leader to `,` or `g`. Two rules keep it safe: `Ctrl+C` always quits and `Esc` always leaves Pending mode, whatever the map says, so no map can lock a person in; and a map that names an unknown action or binds a key twice is reported, with the default kept for that binding.
+The **default map** binds the universal keys (arrows, page keys, `Tab`, `Enter`, `Esc`, `Shift`+arrows to select), the vim keys for muscle memory (`j`, `k`, `g g`, `G`, `<c-d>`, `<c-u>`, `V`), the leader (`Space`, as neovim's), and, borrowed from neovim, less and the Unix terminal (D242): `q` back as in less and man (with `Esc`); `/` search, `n` and `N` for the next and previous match; `] c` and `[ c` for the next and previous hunk, as in vim's diff mode; `z a`, `z o`, `z c`, `z R`, `z M` to fold, as in vim (with `Tab`); `<c-z>` to suspend to the shell and `<c-l>` to redraw; `?` for the keys screen, as in tig, lazygit and Magit (vim and less search backward with it; `N` does that here). A person's map, read from a configuration file later, replaces bindings by action name and may rebind the leader to `,` or `g`. Two rules keep it safe: `Ctrl+C` always quits and `Esc` always leaves Pending mode, whatever the map says, so no map can lock a person in; and a map that names an unknown action or binds a key twice is reported, with the default kept for that binding.
+
+## Terminal conventions (D242)
+
+`$VISUAL`, then `$EDITOR`, opens a file at a line; `NO_COLOR` set to anything turns colors off, as the convention asks; `Ctrl+Z` hands the terminal back to the shell (the companion restores it on `fg`); exit status 0 on quit, 1 on failure, 2 for a wrong command line.
 
 ## Input routing
 
