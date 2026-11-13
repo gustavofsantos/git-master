@@ -37,7 +37,6 @@ mod inbox;
 mod kept_views;
 mod label_curate;
 mod labels_page;
-mod local_review;
 mod markdown;
 mod memories;
 mod memory_dialogs;
@@ -66,7 +65,6 @@ mod restack_dialog;
 mod review_composer;
 mod review_files;
 mod review_run;
-mod review_scorecards;
 mod script_view;
 mod shell_code;
 mod shell_commit;
@@ -132,7 +130,7 @@ mod worktree_remove;
 // and `crate::review` paths of the front end.
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
-use gm_view::{diff_rows, review};
+use gm_view::{diff_rows, local_review, review, review_scorecards};
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, actions, px, size,

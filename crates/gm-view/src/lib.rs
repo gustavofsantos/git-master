@@ -5,5 +5,7 @@
 
 pub mod compose;
 pub mod diff_rows;
+pub mod local_review;
 pub mod review;
+pub mod review_scorecards;
 pub mod time;

@@ -10,13 +10,13 @@ use gm_schema::{
     ScorecardStatus, TREND_LEN, is_blocking,
 };
 
-pub(crate) const NO_RUN_TITLE: &str = "No review has run on this branch.";
-pub(crate) const NO_RUN_HINT: &str = "Choose Run review… to start one.";
-pub(crate) const READING: &str = "Reading scorecards…";
-pub(crate) const STALE: &str = "Stale";
-pub(crate) const BLOCKING: &str = "Blocking";
-pub(crate) const SCORECARD: &str = "Scorecard";
-pub(crate) const LABEL: &str = "Label";
+pub const NO_RUN_TITLE: &str = "No review has run on this branch.";
+pub const NO_RUN_HINT: &str = "Choose Run review… to start one.";
+pub const READING: &str = "Reading scorecards…";
+pub const STALE: &str = "Stale";
+pub const BLOCKING: &str = "Blocking";
+pub const SCORECARD: &str = "Scorecard";
+pub const LABEL: &str = "Label";
 /// The length of a short commit id in the expanded row.
 const SHORT_HEAD: usize = 7;
 
