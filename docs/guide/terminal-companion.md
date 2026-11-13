@@ -30,7 +30,7 @@ The companion uses your terminal's colors, so it matches your terminal theme and
 
 ## Screens
 
-> **Planned.** Only **Status** is available, so the stack holds one screen. `Enter` on a thread goes to its lines on Status; it does not open a screen or your editor yet.
+> **Planned.** Only **Status** and **Keys** are available. `Enter` on a thread goes to its lines on Status; it does not open a screen or your editor yet.
 
 The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread 12`; click a step to go back to it.
 
@@ -44,6 +44,7 @@ The companion is a stack of screens. It opens on **Status**. Opening something, 
 | **Blame** | Who last changed each line of a file, a person or an agent's thread. |
 | **Origin** | How some lines got where they are, change by change. |
 | **Agent thread** | An agent's session, by its request, decisions, changes and runs. |
+| **Keys** | Every key, grouped, with what it does (`?`). |
 
 Every screen is made of sections you can fold. `Tab` folds or unfolds the section at the cursor; a click on a section's title does the same. `/` searches the screen, as in less: type the text and press `Enter`, then `n` and `N` go to the next and the previous match. `Enter` opens what is at the cursor: a thread, a commit, a file at that line in your editor.
 
@@ -78,7 +79,7 @@ Most menus close after one action. A menu for something you repeat, such as stag
 
 You do not have to wait for the menu: `Space s` stages at once.
 
-Press `?` to see every key of the screen you are on.
+Press `?` to see every key on the **Keys** screen. It opens on top of the screen you were on: move, scroll and search it like any screen, and `q` or `Esc` takes you back.
 
 ## Keys
 
@@ -98,7 +99,7 @@ Press `?` to see every key of the screen you are on.
 | `Enter` | Open what is at the cursor. |
 | `q`, `Esc` | Close the menu, clear the selection, or go back one screen; on **Status**, `q` quits. |
 | `Space` | Open the menu. |
-| `?` | Every key of this screen. |
+| `?` | Open the **Keys** screen. |
 | `Ctrl+Z` | Suspend to the shell; `fg` brings the companion back. |
 | `Ctrl+L` | Redraw the screen. |
 | `Ctrl+C` | Quit. |

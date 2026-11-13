@@ -39,7 +39,8 @@ An overlay is drawn over the top screen and takes the input until it closes. It 
 | Text box | A comment, a reply or a commit message: a split at the bottom, the screen still visible above. |
 | Confirm | A one-line question before an action with a side effect that cannot be undone, such as delete or discard. |
 | Search | A one-line prompt for `/`, as in less and vim. |
-| Keys | Every key of the current screen and mode (`?`). |
+
+The keys list (`?`) is a **screen**, not an overlay (D244): it is stacked on the screen it was opened from, so it scrolls, searches and folds like any screen, and `q` or `Esc` goes back to that screen as it was left.
 
 ### Prompts wait before they accept (D242)
 
