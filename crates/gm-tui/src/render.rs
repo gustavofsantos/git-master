@@ -11,10 +11,11 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::app::{
     Action, App, Context, Focus, Hit, MIN_HEIGHT, MIN_WIDTH, Overlay, Row, Tab, areas,
 };
+use crate::render_diff::draw_diff;
 
-const DIM: Style = Style::new().fg(Color::DarkGray);
-const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
-const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
+pub const DIM: Style = Style::new().fg(Color::DarkGray);
+pub const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
+pub const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let size = frame.area();
@@ -47,7 +48,7 @@ fn too_small(frame: &mut Frame, size: Rect) {
 }
 
 /// Lays out one line of text and buttons from the left, recording each button's area.
-struct Strip<'a> {
+pub struct Strip<'a> {
     area: Rect,
     x: u16,
     spans: Vec<Span<'a>>,
@@ -55,7 +56,7 @@ struct Strip<'a> {
 }
 
 impl<'a> Strip<'a> {
-    fn new(area: Rect) -> Self {
+    pub fn new(area: Rect) -> Self {
         Self {
             area,
             x: area.x,
@@ -64,7 +65,7 @@ impl<'a> Strip<'a> {
         }
     }
 
-    fn text(&mut self, text: impl Into<std::borrow::Cow<'a, str>>, style: Style) -> &mut Self {
+    pub fn text(&mut self, text: impl Into<std::borrow::Cow<'a, str>>, style: Style) -> &mut Self {
         let span = Span::styled(text, style);
         self.x = self
             .x
@@ -73,7 +74,7 @@ impl<'a> Strip<'a> {
         self
     }
 
-    fn button(
+    pub fn button(
         &mut self,
         text: impl Into<std::borrow::Cow<'a, str>>,
         style: Style,
@@ -96,6 +97,11 @@ impl<'a> Strip<'a> {
         let used = usize::from(self.x - self.area.x);
         let gap = usize::from(self.area.width).saturating_sub(used + tail);
         self.text(" ".repeat(gap), Style::new())
+    }
+
+    /// The spans and the buttons, for a line drawn with others.
+    pub fn into_parts(self) -> (Vec<Span<'a>>, Vec<Hit>) {
+        (self.spans, self.hits)
     }
 
     fn render(self, frame: &mut Frame, hits: &mut Vec<Hit>) {
@@ -267,47 +273,18 @@ fn fit_end(text: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
-fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = Rect {
         x: area.x + 1,
         width: area.width.saturating_sub(1),
         ..area
     };
-    let lines = match app.tab {
-        Tab::Diff => diff_placeholder(app),
-        Tab::File => vec![Line::styled("The File tab is not available yet.", DIM)],
-        Tab::Reviews => vec![Line::styled("The Reviews tab is not available yet.", DIM)],
+    let placeholder = match app.tab {
+        Tab::Diff => return draw_diff(frame, app, inner),
+        Tab::File => "The File tab is not available yet.",
+        Tab::Reviews => "The Reviews tab is not available yet.",
     };
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-fn diff_placeholder(app: &App) -> Vec<Line<'static>> {
-    let Some(file) = app.selected() else {
-        return vec![Line::styled(
-            format!("No {} changes.", app.context.title().to_lowercase()),
-            DIM,
-        )];
-    };
-    let mut header = vec![Span::styled(file.path.clone(), BOLD)];
-    if let Some((added, deleted)) = file.counts {
-        header.push(Span::styled(
-            format!("  +{added}"),
-            Style::new().fg(Color::Green),
-        ));
-        header.push(Span::styled(
-            format!(" −{deleted}"),
-            Style::new().fg(Color::Red),
-        ));
-    }
-    header.push(Span::styled(
-        format!("  · {}", app.context.title().to_lowercase()),
-        DIM,
-    ));
-    vec![
-        Line::from(header),
-        Line::default(),
-        Line::styled("The diff is not shown yet.", DIM),
-    ]
+    frame.render_widget(Paragraph::new(Line::styled(placeholder, DIM)), inner);
 }
 
 /// The buttons of the bottom bar, each with its key, for where the person is.
@@ -324,6 +301,18 @@ fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
         ),
         ("Tab", focus.to_owned(), Action::ToggleFocus),
     ];
+    if app.focus == Focus::Main && app.tab == Tab::Diff && app.diff.is_some() {
+        match app.context {
+            Context::Unstaged => {
+                buttons.push(("s", "stage hunk".to_owned(), Action::StageCursorHunk));
+            }
+            Context::Staged => {
+                buttons.push(("u", "unstage hunk".to_owned(), Action::StageCursorHunk));
+            }
+        }
+        buttons.push(("J", "next hunk".to_owned(), Action::JumpHunk(true)));
+        buttons.push(("K", "previous hunk".to_owned(), Action::JumpHunk(false)));
+    }
     for tab in Tab::ALL {
         if tab != app.tab {
             let key = match tab {
@@ -360,11 +349,14 @@ const KEYS: &[(&str, &str)] = &[
     ("1 2 3", "Diff, File or Reviews tab"),
     ("Tab", "sidebar or main pane"),
     ("t", "Unstaged or Staged"),
-    ("j k ↓ ↑", "move in the sidebar"),
+    ("j k ↓ ↑", "move in the sidebar or the diff"),
     ("Ctrl+D Ctrl+U", "half a screen down or up"),
     ("g G", "first or last row"),
-    ("Enter Space", "fold or unfold a folder"),
+    ("Enter", "fold a folder, or show a file's diff"),
+    ("Space", "fold or unfold a folder"),
     ("l h", "unfold or fold a folder"),
+    ("J K", "next or previous hunk, in the diff"),
+    ("s u", "stage or unstage the hunk at the cursor"),
     ("?", "these keys"),
     ("q", "quit"),
 ];
@@ -472,7 +464,8 @@ mod tests {
         assert!(lines[1].starts_with("  Unstaged 1   Staged 1"), "{lines:?}");
         assert!(lines[2].starts_with(" ▾ src"), "{lines:?}");
         assert!(lines[3].starts_with("   M lib.rs"), "{lines:?}");
-        assert!(lines[1].contains("│ src/lib.rs  · unstaged"), "{lines:?}");
+        assert!(lines[1].contains("│ src/lib.rs · unstaged"), "{lines:?}");
+        assert!(lines[3].contains("│  Reading the diff…"), "{lines:?}");
         assert!(
             lines[29].starts_with(" t Staged  Tab main pane  2 File  3 Reviews  ? keys  q quit"),
             "{lines:?}"
@@ -506,6 +499,65 @@ mod tests {
     }
 
     #[test]
+    fn the_diff_shows_hunk_bars_and_lines_and_its_stage_button_stages_the_hunk() {
+        use gm_schema::{
+            CommandKind, DiffLine, DiffSide, Event, FileDiff, Hunk, HunkId, LineKind, OperationId,
+            StageTarget,
+        };
+        let mut app = app();
+        app.take_commands();
+        let line = |kind, text: &str, new_no| DiffLine {
+            kind,
+            old_no: None,
+            new_no,
+            text: text.to_owned(),
+            no_newline: false,
+        };
+        app.apply(&Event::DiffLoaded {
+            id: OperationId(5),
+            side: DiffSide::Unstaged,
+            diff: FileDiff {
+                path: "src/lib.rs".to_owned(),
+                old_path: None,
+                binary: false,
+                hunks: vec![Hunk {
+                    id: HunkId("h1".to_owned()),
+                    old_start: 3,
+                    old_lines: 2,
+                    new_start: 3,
+                    new_lines: 2,
+                    header: "fn main() {".to_owned(),
+                    lines: vec![
+                        line(LineKind::Context, "    let a = 1;", Some(3)),
+                        line(LineKind::Removed, "    old();", None),
+                        line(LineKind::Added, "\tnew();", Some(4)),
+                    ],
+                }],
+            },
+        });
+        let lines = screen(&mut app, 120, 30);
+        assert!(
+            lines[1].ends_with("│ src/lib.rs  +1 −1 · hunk 1/1 · unstaged"),
+            "{lines:?}"
+        );
+        assert!(lines[2].ends_with("│ @@ fn main() {  [stage]"), "{lines:?}");
+        assert!(lines[3].ends_with("│     3       let a = 1;"), "{lines:?}");
+        assert!(lines[4].ends_with("│       −     old();"), "{lines:?}");
+        assert!(lines[5].ends_with("│     4 +     new();"), "{lines:?}");
+        let column = u16::try_from(lines[2].chars().count() - 3).unwrap();
+        click(&mut app, column, 2);
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::Stage {
+                target: StageTarget::Hunk {
+                    path: "src/lib.rs".to_owned(),
+                    hunk: HunkId("h1".to_owned()),
+                },
+            }]
+        );
+    }
+
+    #[test]
     fn a_narrow_terminal_shows_one_pane() {
         let mut app = app();
         let lines = screen(&mut app, 90, 30);
@@ -513,7 +565,7 @@ mod tests {
         assert!(!lines[1].contains("unstaged"), "{lines:?}");
         app.focus = Focus::Main;
         let lines = screen(&mut app, 90, 30);
-        assert!(lines[1].starts_with(" src/lib.rs  · unstaged"), "{lines:?}");
+        assert!(lines[1].starts_with(" src/lib.rs · unstaged"), "{lines:?}");
     }
 
     #[test]

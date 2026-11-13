@@ -6,16 +6,18 @@
 //! every button it drew with its action (`hits`), so a click runs the same action as the key
 //! (D236 (2)).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use gm_schema::{
-    Change, ChangeStats, CommandKind, Event, LineCounts, RepoStatus, ReviewAuthorFilter,
-    ReviewComment, ReviewStatus, StatusEntry,
+    Change, ChangeStats, CommandKind, Event, LineCounts, OperationId, OperationState, RepoStatus,
+    ReviewAuthorFilter, ReviewComment, ReviewStatus, StageTarget, StatusEntry,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
+
+use crate::diff::{ColorJob, DiffView, side_of};
 
 /// Narrower than this, the sidebar and the main pane show one at a time (D235 (9)).
 pub const SPLIT_MIN_WIDTH: u16 = 100;
@@ -132,6 +134,14 @@ pub enum Action {
     Quit,
     /// Puts the cursor on this sidebar row; on a folder, also folds or unfolds it.
     Row(usize),
+    /// Puts the diff's cursor on this row of the diff.
+    DiffRow(usize),
+    /// Stages this hunk of the diff under **Unstaged**, unstages it under **Staged**.
+    StageHunk(usize),
+    /// Stages or unstages the hunk at the diff's cursor.
+    StageCursorHunk,
+    /// Moves the diff's cursor to the next (`true`) or the previous hunk.
+    JumpHunk(bool),
 }
 
 /// A button the last draw put on screen.
@@ -326,6 +336,15 @@ pub struct App {
     /// The file shown in the main pane, per context.
     selected: [Option<String>; 2],
     folded: BTreeSet<String>,
+    /// The **Diff** tab's diff of the selected file.
+    pub diff: Option<DiffView>,
+    /// Counts the diff views made, so an answer for an older one is known.
+    generation: u64,
+    color_jobs: Vec<ColorJob>,
+    /// The read of the diff on screen, to show why it failed.
+    diff_request: Option<OperationId>,
+    /// Writes in flight, with what to call them if they fail.
+    writes: HashMap<OperationId, &'static str>,
     commands: Vec<CommandKind>,
 }
 
@@ -352,6 +371,11 @@ impl App {
             follow_cursor: true,
             selected: [None, None],
             folded: BTreeSet::new(),
+            diff: None,
+            generation: 0,
+            color_jobs: Vec::new(),
+            diff_request: None,
+            writes: HashMap::new(),
             commands: Vec::new(),
         };
         app.rebuild();
@@ -386,20 +410,138 @@ impl App {
         std::mem::take(&mut self.commands)
     }
 
-    /// Takes in what the engine reports. A new status asks again for the counts and the
-    /// threads, which may have changed with it.
+    /// The code to color since the last call; the loop colors it off this thread.
+    pub fn take_color_jobs(&mut self) -> Vec<ColorJob> {
+        std::mem::take(&mut self.color_jobs)
+    }
+
+    /// The engine took `kind` as operation `id`: the model keeps the ids whose failure it
+    /// must show.
+    pub fn sent(&mut self, id: OperationId, kind: &CommandKind) {
+        match kind {
+            CommandKind::LoadDiff { .. } => self.diff_request = Some(id),
+            CommandKind::Stage { .. } => {
+                self.writes.insert(id, "Staging");
+            }
+            CommandKind::Unstage { .. } => {
+                self.writes.insert(id, "Unstaging");
+            }
+            _ => {}
+        }
+    }
+
+    /// Takes in the colors of a job's code.
+    pub fn colored(&mut self, job: &ColorJob, spans: &[gm_schema::HighlightSpan]) {
+        if let Some(view) = self.diff.as_mut().filter(|view| view.path == job.path) {
+            view.take_colors(job, spans);
+            self.dirty = true;
+        }
+    }
+
+    /// Takes in what the engine reports. A new status asks again for the counts, the threads
+    /// and the diff on screen, which may have changed with it.
     pub fn apply(&mut self, event: &Event) {
         match event {
             Event::StatusLoaded { status, .. } => {
                 self.status.clone_from(status);
                 self.ask_for_reads();
+                let before = self.diff_key();
+                self.rebuild();
+                if self.diff_key() == before {
+                    self.reload_diff();
+                }
             }
-            Event::ChangeStatsLoaded { stats, .. } => self.stats.clone_from(stats),
-            Event::ReviewCommentsListed { comments, .. } => self.comments.clone_from(comments),
+            Event::ChangeStatsLoaded { stats, .. } => {
+                self.stats.clone_from(stats);
+                self.rebuild();
+            }
+            Event::ReviewCommentsListed { comments, .. } => {
+                self.comments.clone_from(comments);
+                self.rebuild();
+            }
+            Event::DiffLoaded { side, diff, .. } => self.diff_loaded(*side, diff),
+            Event::OperationChanged {
+                id, state, detail, ..
+            } => self.operation_changed(*id, *state, detail.as_deref()),
             _ => return,
         }
-        self.rebuild();
         self.dirty = true;
+    }
+
+    fn diff_loaded(&mut self, side: gm_schema::DiffSide, diff: &gm_schema::FileDiff) {
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        if view.path != diff.path || side_of(view.context).diff_side() != side {
+            return;
+        }
+        view.load(diff.clone());
+        if let Some(job) = view.color_job() {
+            self.color_jobs.push(job);
+        }
+    }
+
+    fn operation_changed(&mut self, id: OperationId, state: OperationState, detail: Option<&str>) {
+        let failed = matches!(
+            state,
+            OperationState::Failed | OperationState::Vetoed | OperationState::Cancelled
+        );
+        if !matches!(state, OperationState::Done) && !failed {
+            return;
+        }
+        let reason = detail.unwrap_or("no reason given").to_owned();
+        if self.diff_request == Some(id) {
+            self.diff_request = None;
+            if let Some(view) = self.diff.as_mut().filter(|_| failed) {
+                view.error = Some(reason.clone());
+            }
+        }
+        if let Some(what) = self.writes.remove(&id).filter(|_| failed) {
+            self.notice = Some(format!("{what} failed: {reason}"));
+        }
+    }
+
+    /// Which file and context the **Diff** tab should show.
+    fn diff_key(&self) -> Option<(String, Context)> {
+        self.selected()
+            .map(|file| (file.path.clone(), self.context))
+    }
+
+    /// Makes the diff view follow the selected file: a new view, and its read, when the file
+    /// or the context changed.
+    fn sync_diff(&mut self) {
+        let Some((path, context)) = self.diff_key() else {
+            self.diff = None;
+            return;
+        };
+        if self
+            .diff
+            .as_ref()
+            .is_some_and(|view| view.path == path && view.context == context)
+        {
+            return;
+        }
+        self.generation += 1;
+        self.diff = Some(DiffView::new(path, context, self.generation));
+        self.reload_diff();
+    }
+
+    /// Reads the diff on screen again.
+    fn reload_diff(&mut self) {
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        if view.path.ends_with('/') {
+            view.error = Some(
+                "An untracked folder: its files are listed one by one once they are staged."
+                    .to_owned(),
+            );
+            return;
+        }
+        self.commands.push(CommandKind::LoadDiff {
+            path: view.path.clone(),
+            side: side_of(view.context).diff_side(),
+        });
     }
 
     /// The terminal changed size or came back into view.
@@ -420,7 +562,58 @@ impl App {
             self.act(&action);
         } else if self.focus == Focus::Sidebar {
             self.sidebar_key(key);
+        } else if self.tab == Tab::Diff {
+            self.diff_key_press(key);
         }
+    }
+
+    fn diff_key_press(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half = self.half_page();
+        let Some(view) = self.diff.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => view.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => view.move_cursor(-1),
+            KeyCode::Char('d') if ctrl => view.move_cursor(half),
+            KeyCode::Char('u') if ctrl => view.move_cursor(-half),
+            KeyCode::Char('g') | KeyCode::Home => view.move_cursor(isize::MIN),
+            KeyCode::Char('G') | KeyCode::End => view.move_cursor(isize::MAX),
+            KeyCode::Char('J') => view.jump_hunk(true),
+            KeyCode::Char('K') => view.jump_hunk(false),
+            KeyCode::Char(letter @ ('s' | 'u')) => {
+                let wanted = if letter == 's' {
+                    Context::Unstaged
+                } else {
+                    Context::Staged
+                };
+                if let Some(hunk) = view.cursor_hunk().filter(|_| view.context == wanted) {
+                    self.stage_hunk(hunk);
+                }
+            }
+            _ => return,
+        }
+        self.dirty = true;
+    }
+
+    /// Stages hunk `index` of the diff on screen, or unstages it under **Staged**. The hunk is
+    /// named by its id, so a hunk that changed meanwhile is refused, never guessed.
+    fn stage_hunk(&mut self, index: usize) {
+        let Some(view) = self.diff.as_ref() else {
+            return;
+        };
+        let Some(hunk) = view.hunk(index) else {
+            return;
+        };
+        let target = StageTarget::Hunk {
+            path: view.path.clone(),
+            hunk: hunk.id.clone(),
+        };
+        self.commands.push(match view.context {
+            Context::Unstaged => CommandKind::Stage { target },
+            Context::Staged => CommandKind::Unstage { target },
+        });
     }
 
     /// The action of a key that works everywhere.
@@ -478,7 +671,25 @@ impl App {
                 self.focus = Focus::Sidebar;
                 self.cursor = index.min(self.rows.len().saturating_sub(1));
                 self.follow_cursor = true;
-                self.open_at_cursor(KeyCode::Enter);
+                self.open_at_cursor(KeyCode::Char(' '));
+            }
+            Action::DiffRow(index) => {
+                self.focus = Focus::Main;
+                if let Some(view) = self.diff.as_mut() {
+                    view.cursor = index.min(view.rows.len().saturating_sub(1));
+                    view.follow_cursor = true;
+                }
+            }
+            Action::StageHunk(index) => self.stage_hunk(index),
+            Action::StageCursorHunk => {
+                if let Some(hunk) = self.diff.as_ref().and_then(DiffView::cursor_hunk) {
+                    self.stage_hunk(hunk);
+                }
+            }
+            Action::JumpHunk(forward) => {
+                if let Some(view) = self.diff.as_mut() {
+                    view.jump_hunk(forward);
+                }
             }
         }
         self.dirty = true;
@@ -497,6 +708,18 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                if let Some(main) = self.areas.main.filter(|area| area.contains(at)) {
+                    let by = if mouse.kind == MouseEventKind::ScrollDown {
+                        isize::try_from(WHEEL_ROWS).unwrap_or(1)
+                    } else {
+                        -isize::try_from(WHEEL_ROWS).unwrap_or(1)
+                    };
+                    if let Some(view) = self.diff.as_mut().filter(|_| self.tab == Tab::Diff) {
+                        view.scroll_by(by, usize::from(main.height.saturating_sub(1)));
+                        self.dirty = true;
+                    }
+                    return;
+                }
                 let Some(list) = self.areas.list().filter(|area| area.contains(at)) else {
                     return;
                 };
@@ -587,6 +810,7 @@ impl App {
         if let Some(Row::File(file)) = self.rows.get(self.cursor) {
             self.selected[self.context.index()] = Some(file.path.clone());
         }
+        self.sync_diff();
     }
 
     fn half_page(&self) -> isize {
@@ -623,7 +847,7 @@ impl App {
             }
             Some(Row::File(_)) => {
                 self.remember_selection();
-                if code == KeyCode::Enter && self.areas.main.is_none() {
+                if code == KeyCode::Enter {
                     self.focus = Focus::Main;
                 }
             }

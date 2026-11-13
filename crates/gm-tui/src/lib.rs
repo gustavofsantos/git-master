@@ -3,7 +3,10 @@
 //! app, as the person, and reads the same store. It opens no window and starts no GPUI code.
 
 mod app;
+mod color;
+mod diff;
 mod render;
+mod render_diff;
 mod terminal;
 
 use std::io::{self, IsTerminal};
@@ -19,6 +22,7 @@ use gm_schema::{Actor, CommandKind, Event, OperationState, RepoStatus};
 use ratatui::crossterm::event::{self, Event as Input};
 
 use crate::app::App;
+use crate::color::Colorer;
 use crate::terminal::Screen;
 
 /// How long the loop waits for a key or a click before it looks at the engine again.
@@ -132,6 +136,7 @@ fn run(opened: Opened) -> io::Result<()> {
         watch,
         notices,
     } = opened;
+    let mut colorer = Colorer::start()?;
     let mut screen = Screen::take()?;
     let mut app = App::new(status);
     loop {
@@ -171,8 +176,15 @@ fn run(opened: Opened) -> io::Result<()> {
                 Notice::Refreshing(_) => {}
             }
         }
+        while let Ok((job, spans)) = colorer.done.try_recv() {
+            app.colored(&job, &spans);
+        }
         for kind in app.take_commands() {
-            engine.dispatch(Actor::Human, kind);
+            let id = engine.dispatch(Actor::Human, kind.clone());
+            app.sent(id, &kind);
+        }
+        for job in app.take_color_jobs() {
+            colorer.color(job);
         }
         if app.quit {
             return Ok(());

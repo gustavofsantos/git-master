@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 gm-schema.workspace = true
 gm-core.workspace = true
+gm-view.workspace = true
 async-channel.workspace = true
 # The crossterm backend only (D235); crossterm itself is used through `ratatui::crossterm`,
 # so its version always matches the one ratatui draws with.
