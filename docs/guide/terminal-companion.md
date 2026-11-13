@@ -28,14 +28,14 @@ The terminal must be at least 80 columns wide and 24 rows high. A smaller termin
 
 ## The screen
 
-> **Planned.** The top bar, the tabs, the file tree with its counts, the context chips and the button bar are not shown yet; the companion shows a flat list of unstaged and staged files and a status line.
-
 Every screen has the same frame:
 
-- The **top bar** shows `gitmaster`, the tabs **Diff**, **File** and **Reviews**, and on the right the branch and its upstream. The **Reviews** tab shows how many threads are open.
-- The **sidebar** on the left lists the changed files as a tree of folders. Two chips at its top choose what it lists: **Unstaged N**, the changes not staged yet, and **Staged N**, the changes ready to commit. Each file shows its status letter, `+a −r` and the number of threads on it. Click a folder to fold or unfold it.
+- The **top bar** shows `gitmaster`, the tabs **Diff**, **File** and **Reviews**, and on the right the branch and its upstream. The **Reviews** tab shows how many threads are not resolved.
+- The **sidebar** on the left lists the changed files under their folders: each folder that holds changed files is one row, `./` for the root, listed last. Two chips at its top choose what it lists: **Unstaged N**, the changes not staged yet, and **Staged N**, the changes ready to commit. Each file shows its status letter, `+a −r` and, as `◫N`, the threads on it that are not resolved. A binary or untracked file shows no counts. Click a folder to fold or unfold it.
 - The **main pane** on the right shows the selected tab for the selected file.
 - The **button bar** at the bottom lists the actions that work where you are, each with its key. Every entry is a button: click it or press its key.
+
+In the sidebar, `j` and `k` (or the arrows) move, `Ctrl+D` and `Ctrl+U` move half a screen, `g` and `G` go to the first and the last row, `Enter` or `Space` folds or unfolds a folder, and `l` and `h` unfold and fold it.
 
 When the terminal is narrower than 100 columns, the sidebar and the main pane show one at a time. `Tab` switches between them.
 
@@ -58,8 +58,6 @@ These keys work everywhere:
 | `t` | Switch the sidebar between **Unstaged** and **Staged**. |
 | `?` | Show every key. |
 | `q` | Quit. |
-
-> **Planned.** Only `Tab` and `q` work yet, with `j`, `k`, the arrows, `Ctrl+D`, `Ctrl+U`, `g` and `G` in the file list.
 
 ## Read the changes
 
