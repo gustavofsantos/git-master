@@ -5,10 +5,12 @@
 use std::collections::HashMap;
 
 use gm_schema::{
-    ChangeStats, CommitDetail, DiffSide, FileBody, FileDiff, FileView, HighlightSpan, History,
-    LineKind, RepoStatus, ReviewComment, RevisionRange, StackSnapshot, StashEntry, SyntaxRole,
+    BlameEntry, ChangeStats, CommitDetail, DiffSide, FileBody, FileDiff, FileView, HighlightSpan,
+    History, LineKind, RepoStatus, ReviewComment, RevisionRange, StackSnapshot, StashEntry,
+    SyntaxRole,
 };
 use gm_view::diff_rows::{self, Diffs, Row, Side};
+use gm_view::provenance_view::ProvenancePanel;
 
 /// A diff larger than this many lines is not colored.
 pub const COLOR_LINE_LIMIT: usize = 20_000;
@@ -132,6 +134,10 @@ pub struct Repo {
     pub commit: Option<CommitDetail>,
     /// The file the File screen shows.
     pub file: Option<FileText>,
+    /// The file the Blame screen shows, and who last changed each of its lines.
+    pub blame: Option<(String, Vec<BlameEntry>)>,
+    /// The question the Origin screen asks and its answer, as the app's panel keeps them.
+    pub origin: ProvenancePanel,
 }
 
 /// A file of the working tree, cut into lines, with the colors of its code.

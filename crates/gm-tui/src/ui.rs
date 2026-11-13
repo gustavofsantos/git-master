@@ -17,6 +17,7 @@ use gm_view::review::{self, Opened};
 use ratatui::crossterm::event::{KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
+use crate::blame_screens;
 use crate::data::{ColorJob, FileText, Group, Repo, color_job};
 use crate::diff_screen::{self, DiffKind};
 use crate::nav::Mode;
@@ -30,6 +31,7 @@ use crate::nav::stack::{Addressed, Stack};
 use crate::review_screens::{self, ThreadPage};
 use crate::status::{self, Item, line_of};
 use crate::threads::Composer;
+use gm_view::provenance_view::Row as ProvenanceRow;
 
 /// Smaller than this, only a message shows (D235 (9)).
 pub const MIN_WIDTH: u16 = 80;
@@ -67,6 +69,16 @@ pub enum Screen {
         path: String,
         keep: Option<u32>,
     },
+    /// Who last changed each line of a file (M5); `keep` is a line to put the cursor on.
+    Blame {
+        view: View,
+        path: String,
+        keep: Option<u32>,
+    },
+    /// How some lines got where they are (M5): `Repo::origin`.
+    Origin {
+        view: View,
+    },
     /// One review thread (M3).
     Thread {
         view: View,
@@ -82,6 +94,8 @@ impl Screen {
             | Screen::Threads { view, .. }
             | Screen::Diff { view, .. }
             | Screen::File { view, .. }
+            | Screen::Blame { view, .. }
+            | Screen::Origin { view }
             | Screen::Thread { view, .. } => view,
         }
     }
@@ -93,6 +107,8 @@ impl Screen {
             | Screen::Threads { view, .. }
             | Screen::Diff { view, .. }
             | Screen::File { view, .. }
+            | Screen::Blame { view, .. }
+            | Screen::Origin { view }
             | Screen::Thread { view, .. } => view,
         }
     }
@@ -106,6 +122,8 @@ impl Addressed for Screen {
             Screen::Threads { .. } => "threads".to_owned(),
             Screen::Diff { kind, .. } => kind.address(),
             Screen::File { path, .. } => format!("file/{path}"),
+            Screen::Blame { path, .. } => format!("blame/{path}"),
+            Screen::Origin { .. } => "origin".to_owned(),
             Screen::Thread { page, .. } => format!("thread/{}", page.id),
         }
     }
@@ -193,6 +211,8 @@ enum Pending {
     CommitStack,
     /// The file the File screen shows.
     File,
+    /// The blame the Blame screen shows.
+    Blame,
     Write(&'static str),
     Text,
 }
@@ -358,6 +378,15 @@ impl App {
             CommandKind::LoadRevisionStack { .. } => Pending::Stack,
             CommandKind::LoadHistory { .. } => Pending::Commits,
             CommandKind::LoadCommitDetail { .. } => Pending::CommitDetail,
+            CommandKind::LoadBlame { .. } => Pending::Blame,
+            CommandKind::ReadProvenance {
+                path,
+                from_line,
+                to_line,
+            } => {
+                self.repo.origin.request(path, *from_line, *to_line, id);
+                return;
+            }
             CommandKind::LoadCommitStack { .. } => Pending::CommitStack,
             CommandKind::ReadFile { .. } => {
                 self.file_read = Some(id);
@@ -398,6 +427,15 @@ impl App {
             Event::StatusLoaded { status, .. } => {
                 self.repo.status.clone_from(status);
                 self.ask_for_reads();
+                // The Blame screen's file may have changed too: its uncommitted lines move.
+                let blamed = self
+                    .stack
+                    .trail()
+                    .iter()
+                    .find_map(|a| a.strip_prefix("blame/").map(str::to_owned));
+                if let Some(path) = blamed {
+                    self.commands.push(CommandKind::LoadBlame { path });
+                }
                 // The File screen's file may have changed too.
                 let file = self
                     .stack
@@ -512,6 +550,15 @@ impl App {
                 }
                 self.repo.file = Some(read);
             }
+            Event::BlameLoaded { id, path, lines }
+                if self.in_flight.get(id) == Some(&Pending::Blame) =>
+            {
+                self.in_flight.remove(id);
+                self.repo.blame = Some((path.clone(), lines.clone()));
+            }
+            Event::ThreadProvenance { id, provenance } => {
+                return self.repo.origin.answered(*id, provenance.clone());
+            }
             Event::FileHighlighted { id, spans } if self.file_read == Some(*id) => {
                 if let Some(file) = self.repo.file.as_mut() {
                     file.colored(spans);
@@ -541,6 +588,8 @@ impl App {
         if !failed && state != OperationState::Done {
             return;
         }
+        // The Origin panel takes only the end of its read: it reads any other state as one.
+        self.repo.origin.ended(id, state, detail);
         // A read on a job of its own reports Done before its answer: keep it until then.
         if !failed
             && matches!(
@@ -553,6 +602,7 @@ impl App {
                         | Pending::CommitDetail
                         | Pending::CommitStack
                         | Pending::File
+                        | Pending::Blame
                 )
             )
         {
@@ -569,7 +619,9 @@ impl App {
                 self.repo.commits = None;
             }
             Some(Pending::Commits) => self.repo.commits = None,
-            Some(Pending::CommitDetail | Pending::File) => self.notice = Some(reason),
+            Some(Pending::CommitDetail | Pending::File | Pending::Blame) => {
+                self.notice = Some(reason);
+            }
             Some(Pending::CommitStack) => {
                 for ((group, _), file) in &mut self.repo.files {
                     if *group == Group::Commit && file.diff.is_none() {
@@ -738,6 +790,16 @@ impl App {
                         *keep = None;
                     }
                 }
+                Screen::Blame { view, path, keep } => {
+                    view.tree.set(blame_screens::blame(repo, path));
+                    if let Some((_, lines)) = repo.blame.as_ref().filter(|(of, _)| of == path)
+                        && let Some(line) = keep.take()
+                    {
+                        let at = line.min(u32::try_from(lines.len()).unwrap_or(u32::MAX));
+                        view.tree.move_to_id(&format!("line/{at}"));
+                    }
+                }
+                Screen::Origin { view } => view.tree.set(blame_screens::origin(repo)),
                 Screen::Status(_) | Screen::Keys(_) => {}
             }
         }
@@ -985,7 +1047,20 @@ impl App {
             Screen::Threads { .. } => moves || threads || name.starts_with("filter."),
             Screen::Thread { .. } => moves || threads || name == "file.open",
             Screen::Diff { .. } | Screen::Status(_) => !name.starts_with("filter."),
-            Screen::File { .. } => moves || matches!(name, "open" | "go.threads" | "go.branch"),
+            Screen::File { .. } | Screen::Blame { .. } => {
+                moves
+                    || name.starts_with("select.")
+                    || matches!(
+                        name,
+                        "open"
+                            | "go.threads"
+                            | "go.branch"
+                            | "file.open"
+                            | "blame.open"
+                            | "origin.open"
+                    )
+            }
+            Screen::Origin { .. } => moves || matches!(name, "open" | "go.threads"),
         };
         if !allowed {
             return false;
@@ -1017,7 +1092,8 @@ impl App {
             "thread.delete" | "thread.show" => thread.is_some(),
             "copy.reference" => current.and_then(Item::file).is_some(),
             "go.branch" => self.repo.range.is_some(),
-            "file.open" => self.current_file().is_some(),
+            "file.open" | "blame.open" => self.current_file().is_some(),
+            "origin.open" => self.selected_lines().is_some(),
             _ => true,
         }
     }
@@ -1270,7 +1346,25 @@ impl App {
                     self.open_diff(DiffKind::Commit(oid));
                 }
             }
+            "open"
+                if matches!(
+                    self.tree().current().map(|s| &s.item),
+                    Some(Item::Origin(ProvenanceRow::Thread { .. }))
+                ) =>
+            {
+                self.notice = Some("The Agent thread screen is not available yet.".to_owned());
+            }
             "go.branch" => self.open_diff(DiffKind::Branch),
+            "blame.open" => {
+                if let Some((path, line)) = self.current_file() {
+                    self.open_blame(path, line);
+                }
+            }
+            "origin.open" => {
+                if let Some((path, from, to)) = self.selected_lines() {
+                    self.open_origin(path, from, to);
+                }
+            }
             "file.open" => {
                 if let Some((path, line)) = self.current_file() {
                     self.open_file(path, line);
@@ -1306,25 +1400,74 @@ impl App {
     /// The file and line `Enter` opens in the editor: a line of a diff or of the File screen.
     fn edit_target(&self) -> Option<(String, u32)> {
         match &self.tree().current()?.item {
+            // A removed line opens at its old number, near where it was.
             Item::Line { group, path, row } => {
                 let line = line_of(&self.repo, *group, path, *row)?;
                 Some((path.clone(), line.new_no.or(line.old_no)?))
             }
+            item => self.numbered(item),
+        }
+    }
+
+    /// The file and the line number in the working tree of a line row: a diff line's new
+    /// number, a File line, a Blame line.
+    fn numbered(&self, item: &Item) -> Option<(String, u32)> {
+        match item {
+            Item::Line { group, path, row } => line_of(&self.repo, *group, path, *row)
+                .and_then(|line| line.new_no)
+                .map(|n| (path.clone(), n)),
             Item::FileLine { index, .. } => {
                 let file = self.repo.file.as_ref()?;
                 Some((file.path.clone(), u32::try_from(index + 1).ok()?))
+            }
+            Item::BlameLine { index } => {
+                let (path, lines) = self.repo.blame.as_ref()?;
+                Some((path.clone(), lines.get(*index)?.line))
             }
             _ => None,
         }
     }
 
-    /// The full id of the commit at the cursor.
+    /// The file and the lines a selection covers, or the line at the cursor: of a diff, the
+    /// File screen or the Blame screen. `None` over several files or on no line.
+    fn selected_lines(&self) -> Option<(String, u32, u32)> {
+        let rows = self.tree().rows();
+        let (first, last) = self
+            .tree()
+            .selection()
+            .or_else(|| self.tree().cursor_index().map(|at| (at, at)))?;
+        let mut path: Option<String> = None;
+        let mut span: Option<(u32, u32)> = None;
+        for row in &rows[first..=last.min(rows.len().saturating_sub(1))] {
+            let found = self.numbered(&row.section.item);
+            let Some((at_path, number)) = found else {
+                continue;
+            };
+            if path.as_ref().is_some_and(|p| p != &at_path) {
+                return None;
+            }
+            path = Some(at_path);
+            span = Some(span.map_or((number, number), |(a, b)| (a.min(number), b.max(number))));
+        }
+        let (from, to) = span?;
+        Some((path?, from, to))
+    }
+
+    /// The full id of the commit at the cursor: of the branch's commits, a Blame run or an
+    /// Origin commit.
     fn current_commit(&self) -> Option<String> {
-        let Item::Commit { index } = self.tree().current()?.item else {
-            return None;
-        };
-        let history = self.repo.commits.as_ref()?;
-        Some(history.commits.get(index)?.oid.clone())
+        match &self.tree().current()?.item {
+            Item::Commit { index } => {
+                let history = self.repo.commits.as_ref()?;
+                Some(history.commits.get(*index)?.oid.clone())
+            }
+            Item::BlameRun { first, .. } => {
+                let (_, lines) = self.repo.blame.as_ref()?;
+                lines.get(*first)?.commit.clone()
+            }
+            Item::Origin(ProvenanceRow::Commit { oid, .. }) => Some(oid.clone()),
+            _ => None,
+        }
     }
 
     /// The file `g f` opens, and the line to show: of the line, the file or the thread at the
@@ -1334,6 +1477,18 @@ impl App {
             return Some((comment.path.clone(), Some(review::shown_range(comment).0)));
         }
         let item = &self.tree().current()?.item;
+        if matches!(item, Item::FileLine { .. } | Item::BlameLine { .. }) {
+            let (path, line) = self.edit_target()?;
+            return Some((path, Some(line)));
+        }
+        if let Some((path, ..)) = self
+            .repo
+            .blame
+            .as_ref()
+            .filter(|_| matches!(item, Item::BlameRun { .. }))
+        {
+            return Some((path.clone(), None));
+        }
         let (_, path) = item.file()?;
         let line = match item {
             Item::Line { group, path, row } => {
@@ -1384,6 +1539,38 @@ impl App {
             view: View::default(),
             path,
             keep: line,
+        });
+        self.rebuild();
+    }
+
+    /// Opens the Blame screen of `path`, at `line`; it replaces the one on the stack.
+    fn open_blame(&mut self, path: String, line: Option<u32>) {
+        self.close_screens("blame/");
+        if self.repo.blame.as_ref().is_none_or(|(of, _)| of != &path) {
+            self.repo.blame = None;
+        }
+        self.commands
+            .push(CommandKind::LoadBlame { path: path.clone() });
+        self.stack.open(Screen::Blame {
+            view: View::default(),
+            path,
+            keep: line,
+        });
+        self.rebuild();
+    }
+
+    /// Opens the Origin screen for lines `from` to `to` of `path`; it replaces the one on the
+    /// stack, as the engine supersedes the read.
+    fn open_origin(&mut self, path: String, from: u32, to: u32) {
+        self.close_screens("origin");
+        self.commands.push(CommandKind::ReadProvenance {
+            path,
+            from_line: from,
+            to_line: to,
+        });
+        self.tree_mut().clear_selection();
+        self.stack.open(Screen::Origin {
+            view: View::default(),
         });
         self.rebuild();
     }
@@ -2355,5 +2542,162 @@ mod tests {
                 line: 4
             }]
         );
+    }
+
+    fn blame_entry(line: u32, commit: Option<&str>, text: &str) -> gm_schema::BlameEntry {
+        gm_schema::BlameEntry {
+            line,
+            commit: commit.map(str::to_owned),
+            author: if commit.is_some() {
+                "Ada".to_owned()
+            } else {
+                String::new()
+            },
+            author_at: 0,
+            subject: if commit.is_some() {
+                "Start".to_owned()
+            } else {
+                String::new()
+            },
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn g_b_blames_the_file_at_the_line_and_its_runs_open_their_commit() {
+        let now = Instant::now();
+        let mut app = app();
+        unfolded(&mut app, now);
+        key(&mut app, "<down> <down> <down> <down>", now); // the added line 4
+        key(&mut app, "g b", now);
+        assert_eq!(app.stack.trail(), ["status", "blame/src/lib.rs"]);
+        let asked = app.take_commands();
+        assert_eq!(
+            asked,
+            [CommandKind::LoadBlame {
+                path: "src/lib.rs".to_owned()
+            }]
+        );
+        app.sent(OperationId(5), &asked[0]);
+        app.apply(&Event::BlameLoaded {
+            id: OperationId(5),
+            path: "src/lib.rs".to_owned(),
+            lines: vec![
+                blame_entry(1, Some("c0ffee1234"), "fn main() {"),
+                blame_entry(2, Some("c0ffee1234"), "    let a = 1;"),
+                blame_entry(3, Some("c0ffee1234"), "    let b = 2;"),
+                blame_entry(4, None, "    new();"),
+                blame_entry(5, Some("c0ffee1234"), "}"),
+            ],
+        });
+        let runs: Vec<(usize, usize)> = app
+            .tree()
+            .rows()
+            .iter()
+            .filter_map(|r| match r.section.item {
+                Item::BlameRun { first, last } => Some((first, last)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs, [(0, 2), (3, 3), (4, 4)]);
+        assert!(matches!(
+            app.tree().current().map(|s| &s.item),
+            Some(Item::BlameLine { index: 3 })
+        ));
+        key(&mut app, "<cr>", now);
+        assert_eq!(
+            app.take_requests(),
+            [Request::Edit {
+                path: "/repo/src/lib.rs".to_owned(),
+                line: 4
+            }]
+        );
+        // `Space w` on that line asks why it is there.
+        key(&mut app, "<space> w", now);
+        assert_eq!(app.stack.trail(), ["status", "blame/src/lib.rs", "origin"]);
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::ReadProvenance {
+                path: "src/lib.rs".to_owned(),
+                from_line: 4,
+                to_line: 4
+            }]
+        );
+        key(&mut app, "q", now);
+        assert!(app.tree_mut().move_to_id("run/1"));
+        key(&mut app, "<cr>", now);
+        assert_eq!(
+            app.stack.trail(),
+            ["status", "blame/src/lib.rs", "diff/c0ffee1"]
+        );
+    }
+
+    #[test]
+    fn origin_nests_the_threads_under_their_commit_as_the_app_words_them() {
+        use gm_schema::threads::{Evidence, ProvenanceCommit, ProvenanceResult, ProvenanceThread};
+        let now = Instant::now();
+        let mut app = app();
+        unfolded(&mut app, now);
+        key(&mut app, "<down> <down> V j j <space> w", now);
+        let asked = app.take_commands();
+        assert_eq!(
+            asked,
+            [CommandKind::ReadProvenance {
+                path: "src/lib.rs".to_owned(),
+                from_line: 3,
+                to_line: 4
+            }]
+        );
+        app.sent(OperationId(6), &asked[0]);
+        // The read goes through its states before its answer; none of them ends it.
+        for state in [OperationState::Executing, OperationState::Done] {
+            app.apply(&Event::OperationChanged {
+                id: OperationId(6),
+                actor: gm_schema::Actor::Human,
+                state,
+                detail: None,
+            });
+        }
+        app.apply(&Event::ThreadProvenance {
+            id: OperationId(6),
+            provenance: ProvenanceResult {
+                path: "src/lib.rs".to_owned(),
+                from_line: 3,
+                to_line: 4,
+                commits: vec![ProvenanceCommit {
+                    id: "c0ffee1234".to_owned(),
+                    subject: "Start".to_owned(),
+                    author: "Ada".to_owned(),
+                    author_at: 0,
+                    path: "src/lib.rs".to_owned(),
+                    lines: vec![gm_schema::LineRun { from: 3, to: 4 }],
+                    threads: vec![ProvenanceThread {
+                        uid: "t1".to_owned(),
+                        title: "Add the parser".to_owned(),
+                        harness: "claude-code".to_owned(),
+                        branch: None,
+                        evidence: vec![Evidence::LineMatch],
+                        ambiguous: false,
+                        edits: Vec::new(),
+                        labels: Vec::new(),
+                        links: Vec::new(),
+                    }],
+                }],
+                cuts: Vec::new(),
+            },
+        });
+        let rows = shown(&app);
+        assert!(rows[0].contains("Origin:"), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.starts_with("Origin(Commit")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.starts_with("  Origin(Thread")),
+            "{rows:?}"
+        );
+        assert!(app.tree_mut().move_to_id("row/0"));
+        key(&mut app, "<cr>", now);
+        assert_eq!(app.stack.trail(), ["status", "origin", "diff/c0ffee1"]);
     }
 }

@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use gm_schema::{Change, ReviewStatus, StackState, StatusEntry};
 use gm_view::diff_rows::{self, Row as DiffRow};
 use gm_view::local_review::{Filter, Version};
+use gm_view::provenance_view::Row;
 use gm_view::review::{self, Entry, Heading, Opened, Part};
 
 use crate::data::{FileData, Group, Repo};
@@ -117,6 +118,18 @@ pub enum Item {
     Unchanged {
         count: usize,
     },
+    /// A run of lines of the Blame screen that one commit last changed (or none, when they
+    /// are not committed): indexes into `Repo::blame`, both ends inclusive.
+    BlameRun {
+        first: usize,
+        last: usize,
+    },
+    /// A line of the Blame screen, by its index in `Repo::blame`.
+    BlameLine {
+        index: usize,
+    },
+    /// A row of the Origin screen, as the app's provenance panel words it.
+    Origin(Row),
     /// A group of the Keys screen.
     KeyGroup {
         title: &'static str,
@@ -152,6 +165,17 @@ impl Item {
                 .and_then(|history| history.commits.get(*index))
                 .map_or_default(|commit| format!("{} {}", commit.short, commit.subject)),
             Item::KeyGroup { title, .. } => (*title).to_owned(),
+            Item::BlameRun { first, .. } => repo
+                .blame
+                .as_ref()
+                .and_then(|(_, lines)| lines.get(*first))
+                .map_or_default(|l| format!("{} {}", l.author, l.subject)),
+            Item::BlameLine { index } => repo
+                .blame
+                .as_ref()
+                .and_then(|(_, lines)| lines.get(*index))
+                .map_or_default(|l| l.text.clone()),
+            Item::Origin(row) => origin_text(row),
             Item::FileLine { index, .. } => repo
                 .file
                 .as_ref()
@@ -183,6 +207,20 @@ impl Item {
             | Item::Line { group, path, .. } => Some((*group, path.as_str())),
             _ => None,
         }
+    }
+}
+
+/// The words of an Origin row, for `/`.
+fn origin_text(row: &Row) -> String {
+    match row {
+        Row::Note(text) | Row::Failure(text) | Row::Cut(text) | Row::Commit { text, .. } => {
+            text.clone()
+        }
+        Row::Thread { title, harness, .. } => format!("{title} {harness}"),
+        Row::Label { name, .. } => name.clone(),
+        Row::Link { title, .. } => title.clone(),
+        Row::Edit { path, .. } => path.clone(),
+        Row::Entry { text, .. } => text.clone(),
     }
 }
 

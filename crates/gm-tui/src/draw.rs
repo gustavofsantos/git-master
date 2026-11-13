@@ -16,6 +16,7 @@ use gm_schema::{DiffLine, LineKind, SyntaxRole};
 use gm_view::compose;
 use gm_view::diff_rows::Row as DiffRow;
 use gm_view::local_review::Version;
+use gm_view::provenance_view::Row as ProvenanceRow;
 use gm_view::review::{self, Badge, Heading, Part, made_label, range_label, reply_head};
 use gm_view::time::relative_time;
 
@@ -366,6 +367,134 @@ fn file_line_row(app: &App, index: usize, mark: Mark, width: usize) -> Line<'sta
     Line::from(spans)
 }
 
+/// A row of the Blame and Origin screens.
+fn blame_row(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
+    let lines = app.repo.blame.as_ref();
+    match &row.section.item {
+        Item::BlameRun { first, last } => {
+            let Some(line) = lines.and_then(|(_, l)| l.get(*first)) else {
+                return Line::default();
+            };
+            let count = last - first + 1;
+            let mut spans = vec![Span::raw(format!("{} ", fold_icon(row)))];
+            match &line.commit {
+                Some(commit) => {
+                    spans.push(Span::styled(
+                        format!("{} ", &commit[..commit.len().min(7)]),
+                        color(Color::Yellow),
+                    ));
+                    spans.push(Span::styled(line.subject.clone(), BOLD));
+                    spans.push(Span::styled(
+                        format!(
+                            "  {} · {}",
+                            line.author,
+                            relative_time(now_secs(), line.author_at / 1000)
+                        ),
+                        DIM,
+                    ));
+                }
+                None => spans.push(Span::styled("Not committed", color(Color::Green))),
+            }
+            spans.push(Span::styled(
+                format!(" ({count} {})", if count == 1 { "line" } else { "lines" }),
+                DIM,
+            ));
+            Line::from(spans)
+        }
+        Item::BlameLine { index } => {
+            let Some((path, line)) = lines.and_then(|(p, l)| Some((p, l.get(*index)?))) else {
+                return Line::default();
+            };
+            // The File screen's colors, when it read the same file.
+            let colors = app
+                .repo
+                .file
+                .as_ref()
+                .filter(|file| &file.path == path && file.lines.get(*index) == Some(&line.text))
+                .and_then(|file| file.colors.get(index));
+            let mut spans = vec![Span::styled(format!("    {:>6}  ", line.line), DIM)];
+            spans.extend(code_spans(
+                &line.text,
+                colors,
+                None,
+                width.saturating_sub(12),
+            ));
+            Line::from(spans)
+        }
+        Item::Origin(origin) => origin_line(origin),
+        _ => Line::default(),
+    }
+}
+
+/// A row of the Origin screen, as the app's panel words it.
+fn origin_line(row: &ProvenanceRow) -> Line<'static> {
+    match row {
+        ProvenanceRow::Note(text) => Line::styled(format!("  {text}"), DIM),
+        ProvenanceRow::Failure(text) => Line::styled(format!("  {text}"), color(Color::Red)),
+        ProvenanceRow::Cut(text) => {
+            Line::styled(format!("  {text}"), DIM.add_modifier(Modifier::ITALIC))
+        }
+        ProvenanceRow::Commit { oid, text } => {
+            let short = &oid[..oid.len().min(7)];
+            Line::from(vec![
+                Span::styled(format!("  {short}"), color(Color::Yellow)),
+                Span::raw(text.strip_prefix(short).unwrap_or(text).to_owned()),
+            ])
+        }
+        ProvenanceRow::Thread {
+            title,
+            harness,
+            evidence,
+            ambiguous,
+            ..
+        } => {
+            let mut spans = vec![
+                Span::styled(format!("    {} ", icons::AGENT), color(Color::Magenta)),
+                Span::styled(
+                    title.clone(),
+                    color(Color::Magenta).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" · {harness}"), DIM),
+            ];
+            if !evidence.is_empty() {
+                spans.push(Span::styled(
+                    format!(" · {}", evidence.join(", ")),
+                    color(Color::Cyan),
+                ));
+            }
+            if *ambiguous {
+                spans.push(Span::styled(" · ambiguous", color(Color::Yellow)));
+            }
+            Line::from(spans)
+        }
+        ProvenanceRow::Label { name, origin } => {
+            Line::styled(format!("      label {name} · {origin}"), DIM)
+        }
+        ProvenanceRow::Link {
+            relation, title, ..
+        } => Line::styled(format!("      {relation} {title}"), DIM),
+        ProvenanceRow::Edit {
+            path,
+            at,
+            evidence,
+            unverifiable,
+            ..
+        } => {
+            let mut parts = vec![format!("      edit {path}"), at.clone()];
+            if !evidence.is_empty() {
+                parts.push(evidence.join(", "));
+            }
+            parts.extend(unverifiable.map(str::to_owned));
+            let text = parts.join(" · ");
+            Line::styled(text, color(Color::Cyan))
+        }
+        ProvenanceRow::Entry { speaker, text } => Line::from(vec![
+            Span::styled(format!("        {speaker}: "), BOLD),
+            Span::styled(text.clone(), DIM),
+        ]),
+    }
+}
+
 fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
     let repo = &app.repo;
     match &row.section.item {
@@ -447,6 +576,9 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             history_line(app, row)
         }
         Item::FileLine { index, mark } => file_line_row(app, *index, *mark, width),
+        Item::BlameRun { .. } | Item::BlameLine { .. } | Item::Origin(_) => {
+            blame_row(app, row, width)
+        }
         Item::Unchanged { count } => {
             Line::styled(format!("  {} {count} unchanged lines", fold_icon(row)), DIM)
         }
