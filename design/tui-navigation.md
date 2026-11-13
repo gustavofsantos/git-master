@@ -81,6 +81,8 @@ An **action** is a named thing the companion can do: `cursor.down`, `fold.toggle
 
 The same registry feeds the menu, the clickable entries, the keys screen and the docs' key table, so they cannot disagree.
 
+**An action does not depend on how it was invoked.** A key, a click and a menu entry only name the action; the action finds its target in the context (the screen, the section under the cursor, the selection) and decides whether it applies there. So an action can be run with no key at all, which is what a future **action palette** needs, as the app's command palette does with its own registry: a search over every action's title and description, listing those that apply here, each with its key in the person's map. Every action therefore carries a one-line description as well as its title, and nothing about an action lives in a key handler.
+
 ## Key maps
 
 A **key map** binds key sequences to action names, one map per mode. It is a trie:
