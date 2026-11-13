@@ -123,7 +123,7 @@ The type is the comment's label: **change** is `issue`, **question** is `questio
 
 ## Threads in the code
 
-> **Planned.** The change the agent made is not shown in the box yet.
+> **Planned.** The change the agent made is not shown in the box yet; the **Reviews** tab shows it.
 
 Each thread is drawn under the last line it is anchored to, in a box with a colored edge, the same threads the app's diff shows. Its first line shows its status (**Open**, **Handled**, **Resolved** or **Outdated**), its lines, when it was written, its label and the buttons. Below come the comment and the replies, oldest first, each with its author and time. A reply or a thread from the agent is marked **Agent-written**. The lines an open thread covers are marked `┃` in the gutter. When the agent has handled the thread, the box also shows what the agent changed, as GitMaster measured it from its own snapshots: the lines added and removed in the thread's lines, and elsewhere.
 
@@ -138,26 +138,35 @@ A resolved thread folds to one line; click it, or press `Enter` on its line, to 
 
 ## The Reviews tab
 
-> **Planned.** The **Reviews** tab is not available yet.
+The **Reviews** tab lists the threads of the repository in the sidebar, and shows the selected one in the main pane. It is the app's **Review** page in the terminal: the same filters, the same texts and the same measured change.
 
-The **Reviews** tab lists the threads of the repository. The chips at the top filter them: **open**, **handled**, **resolved** and **all**, each with its count. The list is grouped by who acts next:
+The chips at the top of the list filter it, each with its count: **All**, **Open** (not resolved, the default), **Resolved**, **Outdated**, **Needs answer** (questions the agent asked that you have not answered) and **Agent** (threads the agent started). Click a chip, or press `F` for the next one. Under the filter, the list is grouped by who acts next, the latest activity first in each group:
 
-- **Waiting for the agent**: open threads, the last word yours.
-- **Waiting for you**: handled threads, and questions the agent asked.
+- **Waiting for you**: threads the agent handled, and threads whose last word is the agent's, such as its own notes and its questions.
+- **Waiting for the agent**: threads whose last word is yours, such as a new comment or your reply.
 - **Resolved**.
 
-Each entry shows the thread's status, number, file and lines, the last author and time, and the start of the last message. Select one to see it on the right: the code around its anchor as a diff, its messages, the change the agent made, and a reply box. `Enter` sends your reply and reopens the thread; **[resolve]** or `R` resolves it without a reply. **[go to diff]** or `g` shows the thread in the **Diff** tab.
+Each entry shows the thread's status, its file and lines, and the start of its last message. Select one with the mouse, or with `j` and `k`, to see it on the right:
+
+- Its status, number, file, lines and label.
+- **Before** and **After**: the commented lines as they were when you commented, and as they were when the agent marked the thread handled (or as they are now, before it does). The lines that changed between the two are marked. Click either, or press `b`.
+- For a handled thread, what the agent changed in those lines, as GitMaster measured it from its own snapshots, such as `+3 -2`, whatever the agent's own account says.
+- The comment and its replies, oldest first, each with its author and time.
+- **[reply]**, **[resolve]** (or **[reopen]**), **[delete]** and **[go to diff]**.
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Select the next or the previous thread. |
+| `j` / `k` | Select the next or the previous thread, in the list. |
 | `F` | Show the next filter. |
-| `Enter` | Reply to the selected thread. |
-| `R` | Resolve the selected thread. |
-| `o` | Reopen the selected thread. |
-| `g` | Show the thread in the **Diff** tab. |
+| `Enter` | In the list, go to the selected thread; on the thread, reply to it. |
+| `b` | Show **Before** or **After**. |
+| `r` | Reply. Your reply on a handled thread reopens it. |
+| `R` | Resolve the thread. |
+| `o` | Reopen a resolved thread. |
+| `D` | Delete the thread: the first press asks, a second within three seconds deletes it. |
+| `g` | Show the thread in the **Diff** tab, with the cursor on its first line. |
 
-An **Outdated** thread, whose text is no longer found exactly once, is listed here and is not drawn in the code.
+An **Outdated** thread, whose text is no longer found exactly once, is listed here like any other. **[go to diff]** opens its file in the first of **Unstaged**, **Staged** and **Branch** that lists it.
 
 ## The File tab
 
