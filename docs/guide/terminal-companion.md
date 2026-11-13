@@ -30,7 +30,7 @@ The companion uses your terminal's colors, so it matches your terminal theme and
 
 ## Screens
 
-> **Planned.** Only **Status**, **Threads**, **Thread** and **Keys** are available. `Enter` does not open your editor yet.
+> **Planned.** **Blame**, **Origin** and **Agent thread** are not available yet.
 
 The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread/12`; click a step to go back to it.
 
@@ -49,8 +49,6 @@ The companion is a stack of screens. It opens on **Status**. Opening something, 
 Every screen is made of sections you can fold. `Tab` folds or unfolds the section at the cursor; a click on a section's title does the same. `/` searches the screen, as in less: type the text and press `Enter`, then `n` and `N` go to the next and the previous match. `Enter` opens what is at the cursor: a thread, a commit, a file at that line in your editor.
 
 ## The Status screen
-
-> **Planned.** The [Diff screen](#diff-file-blame-and-origin) is not available yet, so Status also shows the branch's changes against its base as a **Branch changes** section, folded, after **Commits**.
 
 Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream, with how far ahead and behind it is; **Stack**, when the branch is in a [stack](stacks.md): the branches from the root to yours, how far ahead and behind its parent it is, whether a restack is due and how many branches sit on it; **Base**, the default branch it is compared with. Then come its sections, each with a count:
 
@@ -96,7 +94,9 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 | `z o` `z c` | Unfold or fold the section at the cursor. |
 | `z R` `z M` | Unfold or fold every section. |
 | `/`, `n` `N` | Search the screen; the next or the previous match. |
-| `Enter` | Open what is at the cursor. |
+| `Enter` | Open what is at the cursor: a line in your editor, a thread, a commit's diff; on a section, fold or unfold it. |
+| `g f` | Open the whole file of the line, file or thread at the cursor on the **File** screen. |
+| `Space d b` | Open the branch's changes on the **Diff** screen. |
 | `q`, `Esc` | Close the menu, clear the selection, or go back one screen; on **Status**, `q` quits. |
 | `Space` | Open the menu. |
 | `?` | Open the **Keys** screen. |
@@ -130,11 +130,13 @@ Open **Threads** from the menu anywhere (`Space t`). It lists the review threads
 
 ## Diff, File, Blame and Origin
 
-> **Planned.** These screens are not available yet.
+**Diff** shows the changes of the branch against its base (from the point it split from the default branch to its tip; `Space d b`) or of one commit (`Enter` on a commit). Each file is unfolded into its hunks, with the review threads under their lines. It is read-only, and you can start a thread on its lines. One Diff screen is open at a time: opening another replaces it.
 
-**Diff** shows the changes of the branch against its base (from the point it split from the default branch to its tip) or of one commit. It is read-only, and you can start a thread on its lines.
+**File** (`g f` on a line, a file or a thread) shows a whole file as it is in the working tree, colored, at the line you came from. Lines not yet committed are marked `+`: green when the change is not staged, cyan when it is. Long runs of unchanged lines are folded; `Tab` unfolds one. It follows the file as you or the agent edit it. One File screen is open at a time.
 
-**File** shows a whole file as it is in the working tree, colored, with changed lines marked and long unchanged runs folded.
+`Enter` on a line, on Status, Diff or File, opens the file at that line in `$VISUAL`, else `$EDITOR`, else `vi`. The companion hands the terminal to the editor and takes it back when the editor quits.
+
+> **Planned.** The screens below are not available yet.
 
 **Blame** shows, for each line, the change that last touched it and who made it: a person, or an agent and the thread it ran in, or **not committed** for your working tree. The section of a line tells its origin: the commit, the agent thread and its request.
 
