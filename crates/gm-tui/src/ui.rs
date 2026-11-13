@@ -17,6 +17,7 @@ use gm_view::review::{self, Opened};
 use ratatui::crossterm::event::{KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
+use crate::agent_screen::AgentPage;
 use crate::blame_screens;
 use crate::data::{ColorJob, FileText, Group, Repo, color_job};
 use crate::diff_screen::{self, DiffKind};
@@ -79,6 +80,11 @@ pub enum Screen {
     Origin {
         view: View,
     },
+    /// A captured agent session (M6).
+    Agent {
+        view: View,
+        page: Box<AgentPage>,
+    },
     /// One review thread (M3).
     Thread {
         view: View,
@@ -96,6 +102,7 @@ impl Screen {
             | Screen::File { view, .. }
             | Screen::Blame { view, .. }
             | Screen::Origin { view }
+            | Screen::Agent { view, .. }
             | Screen::Thread { view, .. } => view,
         }
     }
@@ -109,6 +116,7 @@ impl Screen {
             | Screen::File { view, .. }
             | Screen::Blame { view, .. }
             | Screen::Origin { view }
+            | Screen::Agent { view, .. }
             | Screen::Thread { view, .. } => view,
         }
     }
@@ -124,6 +132,7 @@ impl Addressed for Screen {
             Screen::File { path, .. } => format!("file/{path}"),
             Screen::Blame { path, .. } => format!("blame/{path}"),
             Screen::Origin { .. } => "origin".to_owned(),
+            Screen::Agent { page, .. } => format!("agent/{}", page.uid),
             Screen::Thread { page, .. } => format!("thread/{}", page.id),
         }
     }
@@ -213,6 +222,8 @@ enum Pending {
     File,
     /// The blame the Blame screen shows.
     Blame,
+    /// A page of the agent thread `uid`.
+    Agent(String),
     Write(&'static str),
     Text,
 }
@@ -379,6 +390,7 @@ impl App {
             CommandKind::LoadHistory { .. } => Pending::Commits,
             CommandKind::LoadCommitDetail { .. } => Pending::CommitDetail,
             CommandKind::LoadBlame { .. } => Pending::Blame,
+            CommandKind::ReadThread { uid, .. } => Pending::Agent(uid.clone()),
             CommandKind::ReadProvenance {
                 path,
                 from_line,
@@ -556,6 +568,20 @@ impl App {
                 self.in_flight.remove(id);
                 self.repo.blame = Some((path.clone(), lines.clone()));
             }
+            Event::ThreadRead { id, detail } => {
+                let Some(Pending::Agent(uid)) = self.in_flight.remove(id) else {
+                    return false;
+                };
+                let mut next = None;
+                for screen in self.stack.iter_mut() {
+                    if let Screen::Agent { page, .. } = screen
+                        && page.uid == uid
+                    {
+                        next = page.received(detail);
+                    }
+                }
+                self.commands.extend(next);
+            }
             Event::ThreadProvenance { id, provenance } => {
                 return self.repo.origin.answered(*id, provenance.clone());
             }
@@ -603,6 +629,7 @@ impl App {
                         | Pending::CommitStack
                         | Pending::File
                         | Pending::Blame
+                        | Pending::Agent(_)
                 )
             )
         {
@@ -621,6 +648,16 @@ impl App {
             Some(Pending::Commits) => self.repo.commits = None,
             Some(Pending::CommitDetail | Pending::File | Pending::Blame) => {
                 self.notice = Some(reason);
+            }
+            Some(Pending::Agent(uid)) => {
+                for screen in self.stack.iter_mut() {
+                    if let Screen::Agent { page, .. } = screen
+                        && page.uid == uid
+                        && page.detail.is_none()
+                    {
+                        page.failure = Some(reason.clone());
+                    }
+                }
             }
             Some(Pending::CommitStack) => {
                 for ((group, _), file) in &mut self.repo.files {
@@ -800,6 +837,7 @@ impl App {
                     }
                 }
                 Screen::Origin { view } => view.tree.set(blame_screens::origin(repo)),
+                Screen::Agent { view, page } => view.tree.set(page.sections()),
                 Screen::Status(_) | Screen::Keys(_) => {}
             }
         }
@@ -1061,6 +1099,9 @@ impl App {
                     )
             }
             Screen::Origin { .. } => moves || matches!(name, "open" | "go.threads"),
+            Screen::Agent { .. } => {
+                moves || matches!(name, "open" | "go.threads" | "file.open" | "blame.open")
+            }
         };
         if !allowed {
             return false;
@@ -1346,13 +1387,10 @@ impl App {
                     self.open_diff(DiffKind::Commit(oid));
                 }
             }
-            "open"
-                if matches!(
-                    self.tree().current().map(|s| &s.item),
-                    Some(Item::Origin(ProvenanceRow::Thread { .. }))
-                ) =>
-            {
-                self.notice = Some("The Agent thread screen is not available yet.".to_owned());
+            "open" if self.current_agent_thread().is_some() => {
+                if let Some(uid) = self.current_agent_thread() {
+                    self.open_agent(uid);
+                }
             }
             "go.branch" => self.open_diff(DiffKind::Branch),
             "blame.open" => {
@@ -1477,6 +1515,9 @@ impl App {
             return Some((comment.path.clone(), Some(review::shown_range(comment).0)));
         }
         let item = &self.tree().current()?.item;
+        if let Item::Agent(row) = item {
+            return row.path().map(|path| (path.to_owned(), None));
+        }
         if matches!(item, Item::FileLine { .. } | Item::BlameLine { .. }) {
             let (path, line) = self.edit_target()?;
             return Some((path, Some(line)));
@@ -1555,6 +1596,29 @@ impl App {
             view: View::default(),
             path,
             keep: line,
+        });
+        self.rebuild();
+    }
+
+    /// The agent thread an Origin row names: a thread, a link, or an edit's thread.
+    fn current_agent_thread(&self) -> Option<String> {
+        match &self.tree().current()?.item {
+            Item::Origin(
+                ProvenanceRow::Thread { uid, .. }
+                | ProvenanceRow::Link { uid, .. }
+                | ProvenanceRow::Edit { uid, .. },
+            ) => Some(uid.clone()),
+            _ => None,
+        }
+    }
+
+    /// Opens the Agent thread screen of `uid` and reads its first page.
+    fn open_agent(&mut self, uid: String) {
+        let page = Box::new(AgentPage::new(uid));
+        self.commands.push(page.first_read());
+        self.stack.open(Screen::Agent {
+            view: View::default(),
+            page,
         });
         self.rebuild();
     }
@@ -2699,5 +2763,25 @@ mod tests {
         assert!(app.tree_mut().move_to_id("row/0"));
         key(&mut app, "<cr>", now);
         assert_eq!(app.stack.trail(), ["status", "origin", "diff/c0ffee1"]);
+        // `Enter` on the thread opens its session, read from its first page.
+        key(&mut app, "q", now);
+        assert!(app.tree_mut().move_to_id("row/1"));
+        key(&mut app, "<cr>", now);
+        assert_eq!(app.stack.trail(), ["status", "origin", "agent/t1"]);
+        let asked = app.take_commands();
+        assert!(
+            matches!(asked.as_slice(), [CommandKind::LoadCommitDetail { .. }, CommandKind::ReadThread { uid, from_seq: 0, .. }] if uid == "t1"),
+            "{asked:?}"
+        );
+        app.sent(OperationId(7), &asked[1]);
+        app.apply(&Event::ThreadRead {
+            id: OperationId(7),
+            detail: Box::new(crate::agent_screen::tests::detail()),
+        });
+        assert!(
+            texts(&app).iter().any(|t| t == "Request"),
+            "{:?}",
+            texts(&app)
+        );
     }
 }

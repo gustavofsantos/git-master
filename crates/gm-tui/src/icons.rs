@@ -24,6 +24,12 @@ pub const RESOLVED: &str = "\u{f058}";
 pub const OUTDATED: &str = "\u{f071}";
 /// `nf-md-robot`: what an agent wrote.
 pub const AGENT: &str = "\u{f06a9}";
+/// `nf-fa-check`: a tool call that ended well.
+pub const CALL_DONE: &str = "\u{f00c}";
+/// `nf-fa-times`: a tool call that failed.
+pub const CALL_FAILED: &str = "\u{f00d}";
+/// `nf-fa-clock_o`: a tool call with no result recorded.
+pub const CALL_PENDING: &str = "\u{f017}";
 /// `nf-fa-chevron_right`: something folded that a click unfolds.
 pub const FOLDED: &str = "\u{f054}";
 /// `nf-fa-chevron_down`: something unfolded.
@@ -70,8 +76,22 @@ mod tests {
             })
         };
         for icon in [
-            BRANCH, AHEAD, BEHIND, FOLDER, THREADS, SELECTED, OPEN, HANDLED, RESOLVED, OUTDATED,
-            AGENT, FOLDED, UNFOLDED,
+            BRANCH,
+            AHEAD,
+            BEHIND,
+            FOLDER,
+            THREADS,
+            SELECTED,
+            OPEN,
+            HANDLED,
+            RESOLVED,
+            OUTDATED,
+            AGENT,
+            CALL_DONE,
+            CALL_FAILED,
+            CALL_PENDING,
+            FOLDED,
+            UNFOLDED,
         ] {
             assert!(private(icon), "{icon:?}");
         }

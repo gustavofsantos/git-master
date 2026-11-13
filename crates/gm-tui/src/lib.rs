@@ -2,6 +2,7 @@
 //! to a coding agent. A third front end of the engine: it dispatches the same commands as the
 //! app, as the person, and reads the same store. It opens no window and starts no GPUI code.
 
+mod agent_screen;
 mod blame_screens;
 mod color;
 mod data;

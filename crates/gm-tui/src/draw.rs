@@ -18,8 +18,10 @@ use gm_view::diff_rows::Row as DiffRow;
 use gm_view::local_review::Version;
 use gm_view::provenance_view::Row as ProvenanceRow;
 use gm_view::review::{self, Badge, Heading, Part, made_label, range_label, reply_head};
+use gm_view::thread_turns::{CallStatus, PatchKind};
 use gm_view::time::relative_time;
 
+use crate::agent_screen::AgentRow;
 use crate::data::{Group, LineColors};
 use crate::icons;
 use crate::nav::keys::show_sequence;
@@ -495,6 +497,73 @@ fn origin_line(row: &ProvenanceRow) -> Line<'static> {
     }
 }
 
+/// A row of the Agent thread screen.
+fn agent_line(row: &Row<'_, Item>, agent: &AgentRow) -> Line<'static> {
+    let indent = "  ".repeat(row.depth + 1);
+    match agent {
+        AgentRow::Heading { title, count } => Line::from(vec![
+            Span::styled(
+                format!("{} {title}", fold_icon(row)),
+                color(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" ({count})"), DIM),
+        ]),
+        AgentRow::Text { text, quiet } => Line::styled(
+            format!("{indent}{text}"),
+            if *quiet { DIM } else { Style::new() },
+        ),
+        AgentRow::Call {
+            tool,
+            summary,
+            status,
+            duration,
+        } => {
+            let (mark, style) = match status {
+                CallStatus::Done => (icons::CALL_DONE, color(Color::Green)),
+                CallStatus::Failed => (icons::CALL_FAILED, color(Color::Red)),
+                CallStatus::Pending => (icons::CALL_PENDING, DIM),
+            };
+            let mut spans = vec![
+                Span::raw(format!("{indent}{} ", fold_icon(row))),
+                Span::styled(format!("{mark} "), style),
+                Span::styled(format!("{tool} "), BOLD),
+                Span::raw(summary.clone()),
+            ];
+            if let Some(duration) = duration {
+                spans.push(Span::styled(format!("  {duration}"), DIM));
+            }
+            Line::from(spans)
+        }
+        AgentRow::File {
+            path,
+            added,
+            removed,
+        } => Line::from(vec![
+            Span::raw(format!(
+                "{indent}{} {} {path}",
+                fold_icon(row),
+                icons::file(path)
+            )),
+            Span::styled(format!("  +{added}"), color(Color::Green)),
+            Span::styled(format!(" -{removed}"), color(Color::Red)),
+        ]),
+        AgentRow::Patch { kind, text } => {
+            let style = match kind {
+                PatchKind::Added => color(Color::Green),
+                PatchKind::Removed => color(Color::Red),
+                PatchKind::Hunk => color(Color::Blue),
+                PatchKind::Context => Style::new(),
+            };
+            Line::styled(format!("{indent}{}", text.replace('\t', "    ")), style)
+        }
+        AgentRow::Turn { number, prompt } => Line::from(vec![
+            Span::raw(format!("{indent}{} ", fold_icon(row))),
+            Span::styled(format!("Turn {number} "), BOLD),
+            Span::styled(prompt.clone(), DIM),
+        ]),
+    }
+}
+
 fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
     let repo = &app.repo;
     match &row.section.item {
@@ -579,6 +648,7 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
         Item::BlameRun { .. } | Item::BlameLine { .. } | Item::Origin(_) => {
             blame_row(app, row, width)
         }
+        Item::Agent(agent) => agent_line(row, agent),
         Item::Unchanged { count } => {
             Line::styled(format!("  {} {count} unchanged lines", fold_icon(row)), DIM)
         }

@@ -12,6 +12,7 @@ use gm_view::local_review::{Filter, Version};
 use gm_view::provenance_view::Row;
 use gm_view::review::{self, Entry, Heading, Opened, Part};
 
+use crate::agent_screen::AgentRow;
 use crate::data::{FileData, Group, Repo};
 use crate::icons;
 use crate::nav::sections::Section;
@@ -128,6 +129,8 @@ pub enum Item {
     BlameLine {
         index: usize,
     },
+    /// A row of the Agent thread screen.
+    Agent(AgentRow),
     /// A row of the Origin screen, as the app's provenance panel words it.
     Origin(Row),
     /// A group of the Keys screen.
@@ -176,6 +179,7 @@ impl Item {
                 .and_then(|(_, lines)| lines.get(*index))
                 .map_or_default(|l| l.text.clone()),
             Item::Origin(row) => origin_text(row),
+            Item::Agent(row) => row.text(),
             Item::FileLine { index, .. } => repo
                 .file
                 .as_ref()
