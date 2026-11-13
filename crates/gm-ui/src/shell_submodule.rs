@@ -115,8 +115,7 @@ fn commit_rows(path: String, count: usize, cx: &mut Context<StatusView>) -> Div 
                         .model
                         .submodules
                         .detail(&path)
-                        .map(|detail| submodule::pane(detail, now_secs()).commits)
-                        .unwrap_or_default();
+                        .map_or_default(|detail| submodule::pane(detail, now_secs()).commits);
                     commits
                         .get(range.clone())
                         .unwrap_or_default()

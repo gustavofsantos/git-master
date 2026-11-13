@@ -93,8 +93,7 @@ impl CommandLog {
     pub fn entries(&self) -> Vec<CommandRecord> {
         self.entries
             .lock()
-            .map(|entries| entries.iter().cloned().collect())
-            .unwrap_or_default()
+            .map_or_default(|entries| entries.iter().cloned().collect())
     }
 
     /// Yields once whenever records were added since the last wait.

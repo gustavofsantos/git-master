@@ -111,9 +111,7 @@ impl Store {
     /// The saved list, or an empty one when the file is missing or unreadable.
     #[must_use]
     pub fn load(&self) -> Recents {
-        fs::read_to_string(&self.path)
-            .map(|text| Recents::parse(&text))
-            .unwrap_or_default()
+        fs::read_to_string(&self.path).map_or_default(|text| Recents::parse(&text))
     }
 
     /// Writes `recents` as generation `generation` (a larger number is newer).

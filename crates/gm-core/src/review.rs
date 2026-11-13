@@ -191,9 +191,7 @@ pub fn locate(file_text: &str, anchor: &ReviewAnchor) -> Option<ReviewLocation> 
 /// exactly once, as `locate` requires. Empty when neither holds.
 pub fn snapshot_region(file_text: &str, anchor: &ReviewAnchor) -> Vec<String> {
     let lines = lines_of(file_text);
-    snapshot_range(file_text, anchor)
-        .map(|range| owned(&lines[range]))
-        .unwrap_or_default()
+    snapshot_range(file_text, anchor).map_or_default(|range| owned(&lines[range]))
 }
 
 /// Where `snapshot_region` finds the anchor, as 0-based indexes of the lines

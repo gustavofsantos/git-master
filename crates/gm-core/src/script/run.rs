@@ -371,8 +371,7 @@ impl Runtime {
             .inner
             .controls
             .lock()
-            .map(|c| c.keys().copied().collect())
-            .unwrap_or_default();
+            .map_or_default(|c| c.keys().copied().collect());
         ids.sort_unstable();
         ids
     }
@@ -383,8 +382,7 @@ impl Runtime {
             .inner
             .handles
             .lock()
-            .map(|mut h| std::mem::take(&mut *h))
-            .unwrap_or_default();
+            .map_or_default(|mut h| std::mem::take(&mut *h));
         for handle in handles {
             let _ = handle.join();
         }

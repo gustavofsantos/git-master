@@ -338,10 +338,7 @@ impl StatusView {
         list_focus.focus(window);
         let code_focus = cx.focus_handle();
         let recent_store = recent::default_file().map(|file| Arc::new(recent::Store::new(file)));
-        let recents = recent_store
-            .as_ref()
-            .map(|store| store.load())
-            .unwrap_or_default();
+        let recents = recent_store.as_ref().map_or_default(|store| store.load());
         let project_menu = ProjectMenu::new(cx.focus_handle());
         let branch_filter = cx.new(|cx| TextArea::new("Filter branches", cx).with_lines(1, 1));
         let branch_menu = BranchMenu::new(branch_filter.clone());
@@ -387,8 +384,7 @@ impl StatusView {
             app_settings::default_file().map(|file| Arc::new(app_settings::Store::new(file)));
         let settings = settings_store
             .as_ref()
-            .map(|store| store.load(&start_dir))
-            .unwrap_or_default();
+            .map_or_default(|store| store.load(&start_dir));
         let avatars = Avatars::new(
             settings_store
                 .as_ref()
@@ -1157,8 +1153,7 @@ impl StatusView {
                 let typed = self
                     .new_branch_dialog
                     .as_ref()
-                    .map(|dialog| dialog.name.read(cx).text().to_owned())
-                    .unwrap_or_default();
+                    .map_or_default(|dialog| dialog.name.read(cx).text().to_owned());
                 let fill = self.model.transforms.finish(id, &typed, value, changed);
                 if let (Some(dialog), Some((_, fill))) = (self.new_branch_dialog.as_mut(), fill) {
                     match fill {

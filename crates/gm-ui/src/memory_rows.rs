@@ -347,8 +347,7 @@ pub fn mark_line(mark: &MemoryMarkSummary, now_secs: i64) -> String {
         .reason
         .as_deref()
         .filter(|reason| !reason.is_empty())
-        .map(|reason| format!(", {reason}"))
-        .unwrap_or_default();
+        .map_or_default(|reason| format!(", {reason}"));
     format!(
         "{}: {}, {when}{reason}",
         memories::actor_label(&mark.actor),

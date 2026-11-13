@@ -356,8 +356,7 @@ impl StatusView {
         let root = self
             .model
             .status()
-            .map(|status| status.root.clone())
-            .unwrap_or_default();
+            .map_or_default(|status| status.root.clone());
         let head = self
             .model
             .status()

@@ -207,8 +207,7 @@ impl StatusView {
                 .model
                 .contexts
                 .find(id)
-                .map(|context| context.name.clone())
-                .unwrap_or_default(),
+                .map_or_default(|context| context.name.clone()),
         };
         self.set_contexts_mode(ContextsMode::Name(target));
         if let Some(dialog) = self.contexts_dialog.as_ref() {

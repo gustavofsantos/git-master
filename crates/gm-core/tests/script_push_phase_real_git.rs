@@ -103,9 +103,7 @@ fn head(repo: &Path) -> String {
 
 /// A workflow `name` for `on`, optionally with a `match` rule, whose body runs in `execute`.
 fn gate_source(name: &str, on: &str, filter: Option<&str>, body: &str) -> String {
-    let rule = filter
-        .map(|f| format!(", match = \"{f}\""))
-        .unwrap_or_default();
+    let rule = filter.map_or_default(|f| format!(", match = \"{f}\""));
     format!(
         "local M = {{}}\nM.meta = {{ name = \"{name}\", trigger = {{ on = \"{on}\"{rule} }} }}\n\
          function M.execute(ctx, input)\n{body}\nend\nreturn M\n"

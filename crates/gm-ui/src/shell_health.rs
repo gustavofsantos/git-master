@@ -880,8 +880,7 @@ fn dormant_row(slot: usize, file: &FileHealth, cx: &Context<StatusView>) -> Stat
     let sentence = file
         .dormancy_break
         .as_ref()
-        .map(health_page::dormancy_text)
-        .unwrap_or_default();
+        .map_or_default(health_page::dormancy_text);
     div()
         .id(("health-dormant", slot))
         .flex()

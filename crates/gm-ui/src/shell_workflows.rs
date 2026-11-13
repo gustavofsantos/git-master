@@ -617,7 +617,7 @@ impl StatusView {
         let page = &self.model.workflows_page;
         let mut banners = Vec::new();
         if page.asking_delete() {
-            let file = page.path().map(file_name).unwrap_or_default();
+            let file = page.path().map_or_default(file_name);
             banners.push(banner(
                 &format!("Move {file} to the trash?"),
                 vec![

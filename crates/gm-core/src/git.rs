@@ -436,10 +436,7 @@ impl SubprocessGit {
             log.record(CommandRecord {
                 source: Source::Git,
                 program: "git".to_owned(),
-                dir: command
-                    .get_current_dir()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_default(),
+                dir: command.get_current_dir().map_or_default(Path::to_path_buf),
                 args: command
                     .get_args()
                     .map(|arg| arg.to_string_lossy().into_owned())

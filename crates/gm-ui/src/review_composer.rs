@@ -229,8 +229,7 @@ impl StatusView {
                 .model
                 .review
                 .comment(*id)
-                .map(|comment| comment.body.clone())
-                .unwrap_or_default(),
+                .map_or_default(|comment| comment.body.clone()),
             ReviewTarget::New { .. }
             | ReviewTarget::NewByText { .. }
             | ReviewTarget::Reply { .. } => String::new(),

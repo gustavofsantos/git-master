@@ -393,19 +393,17 @@ pub fn shape_line(raw: &[u8], column: usize, highlight: Option<&Regex>, number: 
     } else {
         indent
     };
-    let marks: Vec<(usize, usize)> = highlight
-        .map(|re| {
-            re.find_iter(text.as_bytes())
-                .map(|m| {
-                    (
-                        floor_boundary(text, m.start()),
-                        ceil_boundary(text, m.end()),
-                    )
-                })
-                .filter(|(a, b)| a < b)
-                .collect()
-        })
-        .unwrap_or_default();
+    let marks: Vec<(usize, usize)> = highlight.map_or_default(|re| {
+        re.find_iter(text.as_bytes())
+            .map(|m| {
+                (
+                    floor_boundary(text, m.start()),
+                    ceil_boundary(text, m.end()),
+                )
+            })
+            .filter(|(a, b)| a < b)
+            .collect()
+    });
     cut(text, start, number, &marks)
 }
 

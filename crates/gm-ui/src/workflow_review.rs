@@ -739,8 +739,7 @@ fn wanted_hash(this: &StatusView, name: &str) -> String {
         .workflows
         .wanted
         .get(name)
-        .map(|wanted| wanted.hash.clone())
-        .unwrap_or_default()
+        .map_or_default(|wanted| wanted.hash.clone())
 }
 
 #[cfg(test)]

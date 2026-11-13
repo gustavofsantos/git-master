@@ -185,7 +185,7 @@ impl Reach {
             clashed: false,
             note: None,
             workspace: folders.is_some(),
-            folders: folders.map(<[Folder]>::to_vec).unwrap_or_default(),
+            folders: folders.map_or_default(<[Folder]>::to_vec),
             locals: Vec::new(),
         }
     }

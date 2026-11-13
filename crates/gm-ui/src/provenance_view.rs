@@ -440,8 +440,7 @@ pub fn cut_text(cut: &ProvenanceCut) -> String {
     let commit = cut
         .commit
         .as_deref()
-        .map(|id| format!(" for commit {}", short(id)))
-        .unwrap_or_default();
+        .map_or_default(|id| format!(" for commit {}", short(id)));
     match cut.bound {
         CutBound::Commits => {
             format!("Partial result: more commits own these lines than the {limit} shown.")

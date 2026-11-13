@@ -37,8 +37,7 @@ impl StatusView {
             .model
             .stashes
             .count()
-            .map(stashes::count_label)
-            .unwrap_or_default();
+            .map_or_default(stashes::count_label);
         let header = div()
             .h(px(44.))
             .px_4()

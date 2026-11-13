@@ -682,8 +682,7 @@ impl StatusView {
         let repo = dialog
             .rows
             .get(index)
-            .map(|row| row.repo.clone())
-            .unwrap_or_default();
+            .map_or_default(|row| row.repo.clone());
         let filter = dialog.filter.clone();
         filter.update(cx, |area, cx| area.set_text("", cx));
         self.request_branches(&repo, cx);
@@ -1037,8 +1036,7 @@ impl StatusView {
             .model
             .workspace_plan
             .answer()
-            .map(|answer| outcomes(&form.members, answer).1)
-            .unwrap_or_default();
+            .map_or_default(|answer| outcomes(&form.members, answer).1);
         unclaimed
             .iter()
             .map(|problem| problem_line(problem, cx))

@@ -66,11 +66,9 @@ impl StatusView {
         let stacks_on = self.features.is_enabled(Feature::Stacks);
         let stack_open = stacks_on && !self.sidebar_folded.is_folded(Section::Stack);
         let branches_open = !self.sidebar_folded.is_folded(Section::Branches);
-        let repo = self
-            .model
-            .status()
-            .map(|status| crate::project_menu::folder_name(std::path::Path::new(&status.root)))
-            .unwrap_or_default();
+        let repo = self.model.status().map_or_default(|status| {
+            crate::project_menu::folder_name(std::path::Path::new(&status.root))
+        });
         let branches_title = if repo.is_empty() {
             "Branches".to_owned()
         } else {

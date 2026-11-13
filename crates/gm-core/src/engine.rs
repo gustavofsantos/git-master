@@ -1749,8 +1749,7 @@ impl Engine {
             branch,
             waiting: jobs
                 .front()
-                .map(|job| job.workflows.iter().cloned().collect())
-                .unwrap_or_default(),
+                .map_or_default(|job| job.workflows.iter().cloned().collect()),
             hunks: jobs,
             seq: transforms::Sequence::new(""),
             asked: BTreeSet::new(),
@@ -1828,8 +1827,7 @@ impl Engine {
             run.waiting = run
                 .hunks
                 .front()
-                .map(|job| job.workflows.iter().cloned().collect())
-                .unwrap_or_default();
+                .map_or_default(|job| job.workflows.iter().cloned().collect());
             if run.hunks.is_empty() {
                 return;
             }
@@ -3808,8 +3806,7 @@ impl Engine {
             .commits
             .iter()
             .find(|entry| &entry.oid == commit)
-            .map(|entry| entry.subject.clone())
-            .unwrap_or_default();
+            .map_or_default(|entry| entry.subject.clone());
         let parent = planned.parent.clone();
         self.restack_resolution = None;
         let worktree = self
@@ -5474,8 +5471,7 @@ impl Engine {
         // The file is read from the checkout the person is in, under the path it has there.
         let path = site.shown(&current.path);
         let lines = review_session::read_text(&view, &path)
-            .map(|text| review::current_region(&text, &current.anchor))
-            .unwrap_or_default();
+            .map_or_default(|text| review::current_region(&text, &current.anchor));
         Ok(vec![Event::ReviewCurrentText {
             id,
             comment,

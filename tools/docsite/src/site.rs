@@ -59,10 +59,7 @@ pub fn build(docs: &Docs, analyses: &[Analysis], options: &Options) -> Result<()
             path: page.html_path(),
             title: page.title.clone(),
             description: page.description.clone(),
-            section: docs
-                .section_of(page)
-                .map(|s| s.title.clone())
-                .unwrap_or_default(),
+            section: docs.section_of(page).map_or_default(|s| s.title.clone()),
             status: Some(page.status),
             preview: page.preview.clone(),
             html: rendered.html,

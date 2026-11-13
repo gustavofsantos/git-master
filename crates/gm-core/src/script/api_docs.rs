@@ -1025,8 +1025,7 @@ pub(super) fn pascal(path: &str) -> String {
             let mut chars = segment.chars();
             chars
                 .next()
-                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-                .unwrap_or_default()
+                .map_or_default(|first| first.to_uppercase().chain(chars).collect::<String>())
         })
         .collect()
 }

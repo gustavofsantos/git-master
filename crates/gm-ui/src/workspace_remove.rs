@@ -366,7 +366,7 @@ impl StatusView {
         let name = crate::workspace_list::folder_name(&dialog.path);
         let allowed = blockers.is_some_and(|found| may_remove(found, dialog.confirmed));
         let forced = blockers.is_some_and(asks_confirmation);
-        let label = blockers.map(confirmation_label).unwrap_or_default();
+        let label = blockers.map_or_default(confirmation_label);
         let body = blockers.map_or_else(
             || vec![CHECKING.to_owned()],
             |found| body_lines(&dialog.path, found),

@@ -923,8 +923,7 @@ fn detail_rows(count: usize, list: UniformListScrollHandle, cx: &mut Context<Sta
                         .model
                         .labels
                         .detail()
-                        .map(|detail| detail.label.name.clone())
-                        .unwrap_or_default();
+                        .map_or_default(|detail| detail.label.name.clone());
                     let rows = this.model.labels.detail_rows();
                     rows.get(range.clone())
                         .unwrap_or_default()

@@ -47,14 +47,12 @@ pub fn without_line(text: &str, line: &str) -> String {
 /// there is no file, and a file that cannot be read counts as empty too.
 #[must_use]
 pub fn read(common_dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_to_string(file_of(common_dir))
-        .map(|text| {
-            text.lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default()
+    std::fs::read_to_string(file_of(common_dir)).map_or_default(|text| {
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(PathBuf::from)
+            .collect()
+    })
 }
 
 /// Lists the workspace folder `workspace` (absolute) in the pointer file of `common_dir`. A line

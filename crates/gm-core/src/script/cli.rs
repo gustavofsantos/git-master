@@ -261,7 +261,7 @@ fn dry_run(options: &Options, engine: &dyn ScriptEngine, cwd: &Path) -> CliResul
     CliResult {
         code: i32::from(!matches!(run.end, RunEnd::Returned(_) | RunEnd::Blocked(_))),
         out,
-        err: note.map(|note| format!("{note}\n")).unwrap_or_default(),
+        err: note.map_or_default(|note| format!("{note}\n")),
     }
 }
 

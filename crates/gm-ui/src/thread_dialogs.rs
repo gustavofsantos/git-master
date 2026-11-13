@@ -268,8 +268,7 @@ impl StatusView {
             .model
             .threads
             .summary(&dialog.uid)
-            .map(|summary| summary.tags.clone())
-            .unwrap_or_default();
+            .map_or_default(|summary| summary.tags.clone());
         match curate::field_command(field, &dialog.uid, &text, &current) {
             Err(reason) => {
                 dialog.error = Some(reason.to_owned());
