@@ -246,8 +246,6 @@ A member whose folder is gone prints `(missing)` as its branch, and the command 
 
 ## Terminal companion
 
-> **Planned.** `gitmaster tui` is not available yet.
-
 ```sh
 gitmaster tui [PATH]
 ```
