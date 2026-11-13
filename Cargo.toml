@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 exclude = ["tools/docsite"]
-members = ["crates/gm-schema", "crates/gm-core", "crates/gm-ui", "crates/gm-mcp", "crates/gitmaster"]
+members = ["crates/gm-schema", "crates/gm-core", "crates/gm-view", "crates/gm-ui", "crates/gm-mcp", "crates/gitmaster"]
 
 [workspace.package]
 version = "0.0.0"
@@ -48,6 +48,7 @@ tree-sitter-lua = "0.4"
 mlua = { version = "0.11", features = ["luau", "send", "serialize"] }
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }
+gm-view = { path = "crates/gm-view" }
 gm-ui = { path = "crates/gm-ui" }
 gm-mcp = { path = "crates/gm-mcp" }
 

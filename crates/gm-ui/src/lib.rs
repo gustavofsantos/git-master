@@ -24,7 +24,6 @@ mod context_menu;
 mod contexts_dialog;
 mod contexts_model;
 mod diff_pane;
-mod diff_rows;
 mod editor;
 mod file_discard;
 mod fuzzy;
@@ -64,7 +63,6 @@ mod remote_op;
 mod resize;
 mod resize_handle;
 mod restack_dialog;
-mod review;
 mod review_composer;
 mod review_files;
 mod review_run;
@@ -130,8 +128,11 @@ mod worktree_list;
 mod worktree_prune;
 mod worktree_remove;
 
+// diff_rows and review live in gm-view (D235); this import keeps the `crate::diff_rows`
+// and `crate::review` paths of the front end.
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
+use gm_view::{diff_rows, review};
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, actions, px, size,

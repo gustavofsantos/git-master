@@ -2200,6 +2200,7 @@ version = "0.0.0"
 dependencies = [
  "gm-core",
  "gm-schema",
+ "gm-view",
  "gpui",
  "proptest",
  "pulldown-cmark",
@@ -2208,6 +2209,17 @@ dependencies = [
  "tempfile",
  "unicode-width",
  "ureq",
+]
+
+[[package]]
+name = "gm-view"
+version = "0.0.0"
+dependencies = [
+ "gm-core",
+ "gm-schema",
+ "proptest",
+ "tempfile",
+ "unicode-width",
 ]
 
 [[package]]

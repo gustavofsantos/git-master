@@ -75,7 +75,7 @@ jobs:
           token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
       - uses: dtolnay/rust-toolchain@1.99.0 # workspace.package.rust-version
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p gm-schema -p gm-core -p gm-mcp --all-targets
+      - run: cargo check -p gm-schema -p gm-core -p gm-view -p gm-mcp --all-targets
 
   test:
     runs-on: ubuntu-latest

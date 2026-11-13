@@ -12,7 +12,7 @@ use gm_schema::{
 };
 
 use crate::diff_rows::{Diffs, Row, SplitRows};
-use crate::shell_history::relative_time;
+use crate::time::relative_time;
 
 /// The columns a card's body is wrapped to.
 pub const WRAP_COLUMNS: usize = 72;

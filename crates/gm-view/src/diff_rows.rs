@@ -733,17 +733,14 @@ pub fn changed_keys_between(
 
 /// Every changed line of one hunk.
 fn changed_keys_of_hunk(diffs: Diffs<'_>, side: Side, hunk_index: usize) -> BTreeSet<LineKey> {
-    diffs
-        .hunk(side, hunk_index)
-        .map(|hunk| {
-            hunk.lines
-                .iter()
-                .enumerate()
-                .filter(|(_, line)| is_change(line.kind))
-                .map(|(line_index, _)| (side, hunk_index, line_index))
-                .collect()
-        })
-        .unwrap_or_default()
+    diffs.hunk(side, hunk_index).map_or_default(|hunk| {
+        hunk.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| is_change(line.kind))
+            .map(|(line_index, _)| (side, hunk_index, line_index))
+            .collect()
+    })
 }
 
 /// The set of selected changed lines.
@@ -825,6 +822,7 @@ impl Selection {
 
     /// Keeps the lines whose hunk still exists under the same id in `new`,
     /// moved to the hunk's new index. Everything else is dropped.
+    #[must_use]
     pub fn retain_present(&self, old: Diffs<'_>, new: Diffs<'_>) -> Selection {
         let mut kept = Selection::default();
         for &(side, hunk_index, line_index) in &self.keys {
