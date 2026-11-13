@@ -81,11 +81,9 @@ Each hunk starts with a header bar that shows the function or section it is in, 
 
 ## Stage and unstage
 
-> **Planned.** Staging a whole file and staging selected lines are not available yet; a hunk stages and unstages with its button, `s` and `u`.
-
 Stage what you accept, at the size you choose:
 
-- A file: click **[stage]** on its row in the sidebar, or press `s` with the file selected.
+- A file: the selected file's row in the sidebar shows **[stage]**; click it, or press `s` in the sidebar. An untracked folder stages all its files.
 - A hunk: click **[stage]** on its header, or press `s` with the cursor in it and nothing selected.
 - Lines: select them (see below), then click **[stage lines]** or press `s`.
 
@@ -93,11 +91,11 @@ Under **Staged**, the same buttons and `u` unstage. Staging lines works as in th
 
 ## Select lines
 
-> **Planned.** Selecting lines is not available yet.
+Press on a line and drag to the last line, or press `V` and move the cursor. The selected lines are marked with `▌` in the gutter. `o` moves the cursor to the other end of the selection, and `Esc` or `V` clears it.
 
-Press on a line and drag to the last line, or press `V` and move the cursor. The header shows the range, such as `44–48 · 5 lines`, and the selected lines are marked in the gutter. `o` moves the cursor to the other end of the selection, and `Esc` clears it.
+While lines are selected, the diff's header shows the range, such as `44–48 · 5 lines`, and the buttons that act on it: **[comment]**, **[stage lines]** (or **[unstage lines]** under **Staged**) and **[clear]**. The same selection is used for a thread and for staging. A selection with no added or removed line stages nothing, and the companion says so.
 
-A selection shows a bar with **[comment]** and **[stage lines]** (or **[unstage lines]** under **Staged**). The same selection is used for both.
+> **Planned.** **[comment]** is not shown yet.
 
 ## Start a thread
 
