@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use gm_schema::{DiffLine, LineKind, SyntaxRole};
 use gm_view::compose;
 use gm_view::diff_rows::Row as DiffRow;
+use gm_view::local_review::Version;
 use gm_view::review::{self, Badge, Heading, Part, made_label, range_label, reply_head};
 use gm_view::time::relative_time;
 
@@ -291,11 +292,61 @@ fn history_line(app: &App, row: &Row<'_, Item>) -> Line<'static> {
     }
 }
 
+/// A row of the Thread and Keys screens.
+fn screen_line(row: &Row<'_, Item>) -> Line<'static> {
+    match &row.section.item {
+        Item::Version { version, caption } => Line::from(vec![
+            Span::styled(
+                format!("{} {}", fold_icon(row), version.label()),
+                color(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {caption}"), DIM),
+        ]),
+        Item::Text {
+            version,
+            number,
+            text,
+            marked,
+        } => {
+            let (sign, tint) = match (marked, version) {
+                (false, _) => (' ', None),
+                (true, Version::Before) => ('-', Some(Color::Red)),
+                (true, Version::After) => ('+', Some(Color::Green)),
+            };
+            let style = tint.map_or(Style::new(), color);
+            Line::from(vec![
+                Span::styled(format!("    {number:>5} "), DIM),
+                Span::styled(format!("{sign} "), style),
+                Span::styled(text.replace('\t', "    "), style),
+            ])
+        }
+        Item::Messages { count } => Line::from(vec![
+            Span::styled(
+                format!("{} Messages", fold_icon(row)),
+                color(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" ({count})"), DIM),
+        ]),
+        Item::KeyGroup { title, count } => Line::from(vec![
+            Span::styled(
+                format!("{} {title}", fold_icon(row)),
+                color(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" ({count})"), DIM),
+        ]),
+        Item::Binding { keys, description } => Line::from(vec![
+            Span::styled(format!("    {keys:<24}"), color(Color::Yellow)),
+            Span::raw(*description),
+        ]),
+        _ => Line::default(),
+    }
+}
+
 fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
     let repo = &app.repo;
     match &row.section.item {
         Item::Header { label, text } => Line::from(vec![
-            Span::styled(format!("{label:<7}"), DIM),
+            Span::styled(format!("{label:<8}"), DIM),
             Span::raw(text.clone()),
         ]),
         Item::Blank => Line::default(),
@@ -371,17 +422,11 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
         Item::Commits { .. } | Item::Commit { .. } | Item::Stashes { .. } | Item::Stash { .. } => {
             history_line(app, row)
         }
-        Item::KeyGroup { title, count } => Line::from(vec![
-            Span::styled(
-                format!("{} {title}", fold_icon(row)),
-                color(Color::Magenta).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" ({count})"), DIM),
-        ]),
-        Item::Binding { keys, description } => Line::from(vec![
-            Span::styled(format!("    {keys:<24}"), color(Color::Yellow)),
-            Span::raw(*description),
-        ]),
+        Item::Version { .. }
+        | Item::Text { .. }
+        | Item::Messages { .. }
+        | Item::KeyGroup { .. }
+        | Item::Binding { .. } => screen_line(row),
     }
 }
 

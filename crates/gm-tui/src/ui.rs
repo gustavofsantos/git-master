@@ -12,6 +12,7 @@ use gm_schema::{
 };
 use gm_view::compose::{self, ReviewTarget};
 use gm_view::diff_rows::Row as DiffRow;
+use gm_view::local_review::Filter;
 use gm_view::review::{self, Opened};
 use ratatui::crossterm::event::{KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -25,6 +26,7 @@ use crate::nav::keys::{Code, Key};
 use crate::nav::prompt::{Answer, Guard};
 use crate::nav::sections::Tree;
 use crate::nav::stack::{Addressed, Stack};
+use crate::review_screens::{self, ThreadPage};
 use crate::status::{self, Item, line_of};
 use crate::threads::Composer;
 
@@ -48,18 +50,34 @@ pub enum Screen {
     Status(View),
     /// Every key (`?`), as a screen of its own so it scrolls and searches.
     Keys(View),
+    /// The review threads under who acts next, narrowed by a filter (M3).
+    Threads {
+        view: View,
+        filter: Filter,
+    },
+    /// One review thread (M3).
+    Thread {
+        view: View,
+        page: Box<ThreadPage>,
+    },
 }
 
 impl Screen {
     pub fn view(&self) -> &View {
         match self {
-            Screen::Status(view) | Screen::Keys(view) => view,
+            Screen::Status(view)
+            | Screen::Keys(view)
+            | Screen::Threads { view, .. }
+            | Screen::Thread { view, .. } => view,
         }
     }
 
     pub fn view_mut(&mut self) -> &mut View {
         match self {
-            Screen::Status(view) | Screen::Keys(view) => view,
+            Screen::Status(view)
+            | Screen::Keys(view)
+            | Screen::Threads { view, .. }
+            | Screen::Thread { view, .. } => view,
         }
     }
 }
@@ -69,6 +87,8 @@ impl Addressed for Screen {
         match self {
             Screen::Status(_) => "status".to_owned(),
             Screen::Keys(_) => "keys".to_owned(),
+            Screen::Threads { .. } => "threads".to_owned(),
+            Screen::Thread { page, .. } => format!("thread/{}", page.id),
         }
     }
 }
@@ -279,10 +299,6 @@ impl App {
         &mut self.stack.root_mut().view_mut().tree
     }
 
-    fn on_status(&self) -> bool {
-        matches!(self.stack.top(), Screen::Status(_))
-    }
-
     /// The mode the keys are read in (D241 (2)).
     pub fn mode(&self) -> Mode {
         match self.overlays.last() {
@@ -304,6 +320,16 @@ impl App {
             CommandKind::LoadBranchChange { .. } => Pending::Range,
             CommandKind::LoadRevisionStack { .. } => Pending::Stack,
             CommandKind::LoadHistory { .. } => Pending::Commits,
+            CommandKind::LoadReviewChange { .. }
+            | CommandKind::LoadReviewSnapshotText { .. }
+            | CommandKind::LoadReviewCurrentText { .. } => {
+                for screen in self.stack.iter_mut() {
+                    if let Screen::Thread { page, .. } = screen {
+                        page.sent(id, kind);
+                    }
+                }
+                return;
+            }
             CommandKind::Stage { .. } => Pending::Write("Staging"),
             CommandKind::Unstage { .. } => Pending::Write("Unstaging"),
             CommandKind::ResolveReviewComment { .. } => Pending::Write("Resolving"),
@@ -337,7 +363,24 @@ impl App {
                 }
             }
             Event::ChangeStatsLoaded { stats, .. } => self.repo.stats.clone_from(stats),
-            Event::ReviewCommentsListed { comments, .. } => self.repo.comments.clone_from(comments),
+            Event::ReviewCommentsListed { comments, .. } => {
+                self.repo.comments.clone_from(comments);
+                // A thread on screen reads its texts again: the agent may have handled it.
+                self.ask_thread_texts();
+            }
+            Event::ReviewChange { .. }
+            | Event::ReviewSnapshotText { .. }
+            | Event::ReviewCurrentText { .. } => {
+                let mut took = false;
+                for screen in self.stack.iter_mut() {
+                    if let Screen::Thread { page, .. } = screen {
+                        took |= page.received(event);
+                    }
+                }
+                if !took {
+                    return;
+                }
+            }
             Event::DiffLoaded { id, diff, .. } => {
                 if let Some(Pending::Diff(group, path)) = self.in_flight.remove(id) {
                     self.file_loaded(group, &path, diff.clone());
@@ -468,6 +511,16 @@ impl App {
         }
     }
 
+    fn ask_thread_texts(&mut self) {
+        let mut reads = Vec::new();
+        for screen in self.stack.iter_mut() {
+            if let Screen::Thread { page, .. } = screen {
+                reads.extend(page.reads(&self.repo));
+            }
+        }
+        self.commands.extend(reads);
+    }
+
     fn ask_diff(&mut self, group: Group, path: &str) {
         if path.ends_with('/') {
             return;
@@ -527,6 +580,16 @@ impl App {
             };
             let sections = status::sections(&self.repo, opened);
             self.status_tree_mut().set(sections);
+        }
+        let repo = &self.repo;
+        for screen in self.stack.iter_mut() {
+            match screen {
+                Screen::Threads { view, filter } => {
+                    view.tree.set(review_screens::threads(repo, *filter));
+                }
+                Screen::Thread { view, page } => view.tree.set(page.sections(repo)),
+                Screen::Status(_) | Screen::Keys(_) => {}
+            }
         }
         if let Some(id) = self.reveal {
             let card = self
@@ -756,12 +819,23 @@ impl App {
         {
             return false;
         }
-        // The Keys screen only moves, folds, searches and goes back.
-        if !self.on_status() {
-            let spec = self.registry.get(name);
-            return name.starts_with("cursor.")
-                || matches!(name, "screen.back" | "screen.close")
-                || spec.is_some_and(|s| matches!(s.group, "Fold" | "Search" | "Help"));
+        let spec = self.registry.get(name);
+        let moves = name.starts_with("cursor.")
+            || matches!(name, "screen.back" | "screen.close")
+            || spec.is_some_and(|s| matches!(s.group, "Fold" | "Search" | "Help"));
+        let threads = name.starts_with("thread.") || matches!(name, "open" | "go.threads");
+        let allowed = match self.stack.top() {
+            // The Keys screen only moves, folds, searches and goes back.
+            Screen::Keys(_) => moves,
+            Screen::Threads { .. } => moves || threads || name.starts_with("filter."),
+            Screen::Thread { .. } => moves || threads,
+            Screen::Status(_) => !name.starts_with("filter."),
+        };
+        if !allowed {
+            return false;
+        }
+        if !matches!(self.stack.top(), Screen::Status(_)) && moves {
+            return true;
         }
         let current = self.tree().current().map(|s| &s.item);
         let group = current
@@ -771,9 +845,7 @@ impl App {
                 Some(Item::Group { group, .. }) => Some(*group),
                 _ => None,
             });
-        let thread = current
-            .and_then(Item::thread)
-            .and_then(|id| self.repo.comment(id));
+        let thread = self.current_thread().and_then(|id| self.repo.comment(id));
         match name {
             "stage" => group.and_then(Group::stages) == Some(true),
             "unstage" => group.and_then(Group::stages) == Some(false),
@@ -786,7 +858,7 @@ impl App {
             "thread.reply" => thread.is_some_and(|c| review::can_reply(c.status)),
             "thread.resolve" => thread.is_some_and(|c| c.status != ReviewStatus::Resolved),
             "thread.reopen" => thread.is_some_and(|c| c.status == ReviewStatus::Resolved),
-            "thread.delete" => thread.is_some(),
+            "thread.delete" | "thread.show" => thread.is_some(),
             "copy.reference" => current.and_then(Item::file).is_some(),
             "go.branch" => self.repo.range.is_some(),
             _ => true,
@@ -820,16 +892,23 @@ impl App {
             "select.toggle" => self.tree_mut().toggle_selection(),
             "select.down" => self.tree_mut().extend(1),
             "select.up" => self.tree_mut().extend(-1),
+            _ if self.run_screen_action(name) => {}
             "fold.toggle" | "open"
-                if !matches!(
-                    self.tree().current().map(|s| &s.item),
-                    Some(Item::Thread { .. })
-                ) =>
+                if name == "fold.toggle"
+                    || self
+                        .tree()
+                        .current()
+                        .and_then(|s| s.item.thread())
+                        .is_none() =>
             {
                 self.tree_mut().toggle();
                 self.rebuild();
             }
-            "open" => self.reveal_thread(),
+            "open" => {
+                if let Some(id) = self.current_thread() {
+                    self.open_thread(id);
+                }
+            }
             "fold.open" | "fold.close" => {
                 self.tree_mut().set_fold(name == "fold.close");
                 self.rebuild();
@@ -865,21 +944,10 @@ impl App {
             "thread.reply" => self.open_reply(now),
             "thread.resolve" | "thread.reopen" | "thread.delete" => self.thread_write(name, now),
             "copy.reference" => self.copy_reference(),
-            "go.threads" => {
-                self.tree_mut().unfold("threads");
-                self.rebuild();
-                self.tree_mut().move_to_id("threads");
-            }
             "go.branch" => {
                 self.tree_mut().unfold("group/Branch");
                 self.rebuild();
                 self.tree_mut().move_to_id("group/Branch");
-            }
-            "help.keys" => {
-                let mut view = View::default();
-                view.tree
-                    .set(crate::help::sections(&self.registry, &self.input));
-                self.stack.open(Screen::Keys(view));
             }
             "terminal.suspend" => self.requests.push(Request::Suspend),
             "terminal.redraw" => self.requests.push(Request::Redraw),
@@ -1032,8 +1100,68 @@ impl App {
         }
     }
 
+    /// Runs an action that opens or changes a screen; false when `name` is not one.
+    fn run_screen_action(&mut self, name: &str) -> bool {
+        match name {
+            "open" if self.on_thread_screen() => self.show_thread(),
+            "thread.show" => self.show_thread(),
+            "go.threads" => {
+                self.stack.open(Screen::Threads {
+                    view: View::default(),
+                    filter: Filter::Open,
+                });
+                self.rebuild();
+            }
+            _ if name.starts_with("filter.") => {
+                if let (Some(chosen), Screen::Threads { filter, .. }) =
+                    (review_screens::filter_of(name), self.stack.top_mut())
+                {
+                    *filter = chosen;
+                }
+                self.rebuild();
+            }
+            "help.keys" => {
+                let mut view = View::default();
+                view.tree
+                    .set(crate::help::sections(&self.registry, &self.input));
+                self.stack.open(Screen::Keys(view));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The thread actions act on: the Thread screen's, else the one at the cursor.
     fn current_thread(&self) -> Option<i64> {
-        self.tree().current().and_then(|s| s.item.thread())
+        match self.stack.top() {
+            Screen::Thread { page, .. } => Some(page.id),
+            _ => self.tree().current().and_then(|s| s.item.thread()),
+        }
+    }
+
+    fn on_thread_screen(&self) -> bool {
+        matches!(self.stack.top(), Screen::Thread { .. })
+    }
+
+    /// Opens the Thread screen of `id` and reads its texts.
+    fn open_thread(&mut self, id: i64) {
+        let mut page = Box::new(ThreadPage::new(id));
+        self.commands.extend(page.reads(&self.repo));
+        self.stack.open(Screen::Thread {
+            view: View::default(),
+            page,
+        });
+        self.rebuild();
+        self.tree_mut().move_to_id("messages");
+    }
+
+    /// Back to Status with the thread under its lines.
+    fn show_thread(&mut self) {
+        let Some(id) = self.current_thread() else {
+            return;
+        };
+        self.stack.back_to(0);
+        self.reveal_thread(id);
     }
 
     fn open_reply(&mut self, now: Instant) {
@@ -1091,9 +1219,9 @@ impl App {
         self.requests.push(Request::Copy(reference));
     }
 
-    /// `Enter` on a thread in the list: unfold its file and put the cursor on it.
-    fn reveal_thread(&mut self) {
-        let Some(comment) = self.current_thread().and_then(|id| self.repo.comment(id)) else {
+    /// Unfolds the file of thread `id` on Status and puts the cursor on the thread.
+    fn reveal_thread(&mut self, id: i64) {
+        let Some(comment) = self.repo.comment(id) else {
             return;
         };
         let (id, path) = (comment.id, comment.path.clone());
@@ -1664,6 +1792,144 @@ mod tests {
             "Status as it was left"
         );
         key(&mut app, "? <esc>", now);
+        assert_eq!(app.stack.trail(), ["status"]);
+    }
+
+    fn thread(id: i64, status: ReviewStatus, created_at: i64) -> gm_schema::ReviewComment {
+        gm_schema::ReviewComment {
+            id,
+            path: "src/lib.rs".to_owned(),
+            body: format!("body {id}"),
+            status,
+            anchor: gm_schema::ReviewAnchor {
+                text: "    new();".to_owned(),
+                before: Vec::new(),
+                after: Vec::new(),
+                start_line: 4,
+            },
+            created_at,
+            resolved_at: None,
+            snapshot: Some("snap".to_owned()),
+            after_snapshot: None,
+            location: Some(gm_schema::ReviewLocation {
+                start_line: 4,
+                end_line: 4,
+            }),
+            outdated: false,
+            replies: Vec::new(),
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
+            suggested_fix: None,
+            label: None,
+            decorations: Vec::new(),
+            scorecard: None,
+            workspace: None,
+        }
+    }
+
+    fn texts(app: &App) -> Vec<String> {
+        app.tree()
+            .rows()
+            .iter()
+            .map(|row| row.section.item.text(&app.repo))
+            .collect()
+    }
+
+    #[test]
+    fn threads_lists_by_who_acts_next_and_filters_from_the_menu() {
+        let now = Instant::now();
+        let mut app = app();
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(3),
+            comments: vec![
+                thread(1, ReviewStatus::Open, 10),
+                thread(2, ReviewStatus::Resolved, 20),
+            ],
+        });
+        app.take_commands();
+        key(&mut app, "<space> t", now);
+        assert_eq!(app.stack.trail(), ["status", "threads"]);
+        let rows = shown(&app);
+        assert!(
+            rows.iter().any(|r| r.contains("Thread { id: 1 }")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("Thread { id: 2 }")),
+            "{rows:?}"
+        );
+        // The filter is in the menu, on this screen only.
+        key(&mut app, "<space> f r", now);
+        let rows = shown(&app);
+        assert!(
+            rows.iter().any(|r| r.contains("Thread { id: 2 }")),
+            "{rows:?}"
+        );
+        assert!(
+            texts(&app)[0].starts_with("Filter: Resolved · 1 of 2"),
+            "{:?}",
+            texts(&app)
+        );
+        key(&mut app, "q", now);
+        assert!(!app.applies("filter.all"), "no filter on Status");
+    }
+
+    #[test]
+    fn a_thread_opens_on_its_screen_reads_its_texts_and_marks_the_change() {
+        let now = Instant::now();
+        let mut app = app();
+        let mut handled = thread(1, ReviewStatus::Handled, 10);
+        handled.after_snapshot = Some("after".to_owned());
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(3),
+            comments: vec![handled],
+        });
+        app.take_commands();
+        assert!(app.tree_mut().move_to_id("thread/1"));
+        key(&mut app, "<cr>", now);
+        assert_eq!(app.stack.trail(), ["status", "thread/1"]);
+        let asked = app.take_commands();
+        assert_eq!(asked, [CommandKind::LoadReviewChange { id: 1 }]);
+        app.sent(OperationId(8), &asked[0]);
+        app.apply(&Event::ReviewChange {
+            id: OperationId(8),
+            comment: 1,
+            path: "src/lib.rs".to_owned(),
+            change: Some(gm_schema::ReviewChange {
+                before: vec!["    old();".to_owned()],
+                after: vec!["    new();".to_owned(), "    more();".to_owned()],
+                changed: true,
+                before_start_line: 4,
+                after_start_line: 4,
+            }),
+        });
+        let marked: Vec<(u32, bool)> = app
+            .tree()
+            .rows()
+            .iter()
+            .filter_map(|r| match &r.section.item {
+                Item::Text {
+                    version: gm_view::local_review::Version::After,
+                    number,
+                    marked,
+                    ..
+                } => Some((*number, *marked)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marked, [(4, true), (5, true)]);
+        let all = texts(&app);
+        assert!(all.iter().any(|t| t.contains("changed +2 -1")), "{all:?}");
+        // Thread actions act on the screen's thread wherever the cursor is.
+        key(&mut app, "g g <space> R", now);
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::ResolveReviewComment { id: 1 }]
+        );
+        // Show in diff goes back to Status.
+        key(&mut app, "<space> g", now);
         assert_eq!(app.stack.trail(), ["status"]);
     }
 }

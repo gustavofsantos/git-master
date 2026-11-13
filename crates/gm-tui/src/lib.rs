@@ -8,6 +8,7 @@ mod draw;
 mod help;
 mod icons;
 mod nav;
+mod review_screens;
 mod reviews;
 mod status;
 mod terminal;

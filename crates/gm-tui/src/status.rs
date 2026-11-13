@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use gm_schema::{Change, ReviewStatus, StackState, StatusEntry};
 use gm_view::diff_rows::{self, Row as DiffRow};
-use gm_view::local_review::Filter;
+use gm_view::local_review::{Filter, Version};
 use gm_view::review::{self, Entry, Heading, Opened, Part};
 
 use crate::data::{FileData, Group, Repo};
@@ -81,6 +81,23 @@ pub enum Item {
     Stash {
         index: usize,
     },
+    /// The Before or After text of a thread, on the Thread screen.
+    Version {
+        version: Version,
+        caption: &'static str,
+    },
+    /// A line of a thread's text: its number, its text and whether it changed between the
+    /// two texts.
+    Text {
+        version: Version,
+        number: u32,
+        text: String,
+        marked: bool,
+    },
+    /// The comment and its replies, on the Thread screen.
+    Messages {
+        count: usize,
+    },
     /// A group of the Keys screen.
     KeyGroup {
         title: &'static str,
@@ -101,6 +118,7 @@ impl Item {
             Item::Group { group, .. } => group.title().to_owned(),
             Item::File { path: text, .. }
             | Item::Note(text)
+            | Item::Text { text, .. }
             | Item::Card {
                 part: Part::Text(text) | Part::Folded(text),
                 ..
@@ -549,10 +567,17 @@ fn stashes(repo: &Repo) -> Option<Section<Item>> {
 
 /// The open review threads, under who acts next.
 fn threads(repo: &Repo) -> Option<Section<Item>> {
-    let entries = reviews::entries(&repo.comments, Filter::Open);
-    if entries.is_empty() {
+    let groups = thread_groups(repo, Filter::Open);
+    if groups.is_empty() {
         return None;
     }
+    let count = groups.iter().map(|g| g.children.len()).sum();
+    Some(Section::with("threads", Item::Threads { count }, groups))
+}
+
+/// The threads `filter` keeps, under who acts next: a section per group, a row per thread.
+pub fn thread_groups(repo: &Repo, filter: Filter) -> Vec<Section<Item>> {
+    let entries = reviews::entries(&repo.comments, filter);
     let mut groups: Vec<Section<Item>> = Vec::new();
     for entry in entries {
         match entry {
@@ -570,8 +595,7 @@ fn threads(repo: &Repo) -> Option<Section<Item>> {
             }
         }
     }
-    let count = groups.iter().map(|g| g.children.len()).sum();
-    Some(Section::with("threads", Item::Threads { count }, groups))
+    groups
 }
 
 /// The files Status shows unfolded, by group and path: the ones whose diff must be read.

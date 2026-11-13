@@ -73,6 +73,11 @@ impl<S: Addressed> Stack<S> {
         self.screens.truncate(depth.max(1).min(self.screens.len()));
     }
 
+    /// Every screen, root first, so engine events reach them all.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut S> {
+        self.screens.iter_mut()
+    }
+
     /// The addresses from the root to the top, for the trail.
     pub fn trail(&self) -> Vec<String> {
         self.screens.iter().map(Addressed::address).collect()
