@@ -138,7 +138,7 @@ fn draw_top(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     right.push((" ".to_owned(), Style::new()));
-    if let Some(notice) = &app.notice {
+    if let Some(notice) = app.notice.as_ref().or(app.watch_notice.as_ref()) {
         right.insert(0, (format!("{notice}  "), Style::new().fg(Color::Yellow)));
     }
     let tail: usize = right
@@ -319,6 +319,12 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// The buttons of the bottom bar, each with its key, for where the person is.
 fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
+    if app.composer.is_some() {
+        return vec![
+            ("Enter", "save".to_owned(), Action::SaveComment),
+            ("Esc", "cancel".to_owned(), Action::CancelComment),
+        ];
+    }
     let focus = match app.focus {
         Focus::Sidebar => "main pane",
         Focus::Main => "files",
@@ -341,8 +347,22 @@ fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
                 buttons.push(("u", "unstage lines".to_owned(), Action::StageSelection));
             }
         }
+        buttons.push(("c", "comment".to_owned(), Action::Comment));
         buttons.push(("Esc", "clear".to_owned(), Action::ClearSelection));
     } else if app.focus == Focus::Main && app.tab == Tab::Diff && app.diff.is_some() {
+        if let Some(id) = app.thread_at_cursor() {
+            let resolved = app
+                .comment(id)
+                .is_some_and(|comment| comment.status == gm_schema::ReviewStatus::Resolved);
+            buttons.push(("r", "reply".to_owned(), Action::Reply(id)));
+            if resolved {
+                buttons.push(("o", "reopen".to_owned(), Action::Reopen(id)));
+            } else {
+                buttons.push(("R", "resolve".to_owned(), Action::Resolve(id)));
+            }
+            buttons.push(("D", "delete".to_owned(), Action::Delete(id)));
+        }
+        buttons.push(("c", "comment".to_owned(), Action::Comment));
         match app.context {
             Context::Unstaged => {
                 buttons.push(("s", "stage hunk".to_owned(), Action::StageCursorHunk));
@@ -404,6 +424,10 @@ const KEYS: &[(&str, &str)] = &[
         "s u",
         "stage or unstage the file, the selection or the hunk",
     ),
+    ("c", "comment on the selection or the line"),
+    ("} {", "next or previous thread"),
+    ("Enter", "unfold or fold the thread at the cursor"),
+    ("r R o D", "reply, resolve, reopen, delete the thread"),
     ("?", "these keys"),
     ("q", "quit"),
 ];
@@ -599,7 +623,7 @@ mod tests {
         drag(&mut app, 60, 5); // the added line
         let lines = screen(&mut app, 120, 30);
         assert!(
-            lines[1].ends_with("│ src/lib.rs · 3–4 · 3 lines  [stage lines] [clear]"),
+            lines[1].ends_with("│ src/lib.rs · 3–4 · 3 lines  [comment] [stage lines] [clear]"),
             "{lines:?}"
         );
         assert!(lines[3].contains("│ ▌   3"), "{lines:?}");
@@ -622,6 +646,108 @@ mod tests {
             }]
         );
         assert!(app.diff.as_ref().unwrap().anchor.is_none());
+    }
+
+    #[test]
+    fn a_comment_is_written_with_its_type_and_drawn_under_its_line_with_its_buttons() {
+        use gm_schema::{
+            CommandKind, CommentLabel, Event, OperationId, OperationState, ReviewLocation,
+            ReviewStatus,
+        };
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut app = app();
+        app.apply(&diff_event());
+        app.take_commands();
+        app.focus = Focus::Main;
+        // The cursor starts on the first line (3); select down to the added line (4).
+        app.on_key(key(KeyCode::Char('V')));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(app.composer.is_some(), "{:?}", app.notice);
+        for letter in "Use ? here.".chars() {
+            app.on_key(key(KeyCode::Char(letter)));
+        }
+        let lines = screen(&mut app, 120, 30);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Comment on lines 3–4")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("type  change   question   nit")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Use ? here.█")),
+            "{lines:?}"
+        );
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::AddReviewComment {
+                path: "src/lib.rs".to_owned(),
+                start_line: 3,
+                end_line: 4,
+                body: "Use ? here.".to_owned(),
+                label: Some(CommentLabel::Issue),
+            }]
+        );
+        // The engine takes it, lists it, and the write ends: the box closes.
+        app.sent(
+            OperationId(8),
+            &CommandKind::ListReviewComments {
+                author: gm_schema::ReviewAuthorFilter::Any,
+            },
+        );
+        let mut listed = crate::app::tests::comment(4, "src/lib.rs", ReviewStatus::Open);
+        listed.body = "Use ? here.".to_owned();
+        listed.location = Some(ReviewLocation {
+            start_line: 3,
+            end_line: 4,
+        });
+        listed.label = Some(CommentLabel::Issue);
+        if let Some(composer) = app.composer.as_mut() {
+            composer.pending = Some(OperationId(9));
+        }
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(9),
+            comments: vec![listed],
+        });
+        app.apply(&Event::OperationChanged {
+            id: OperationId(9),
+            actor: gm_schema::Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        });
+        assert!(app.composer.is_none());
+        let lines = screen(&mut app, 120, 30);
+        let head = lines
+            .iter()
+            .position(|line| line.contains("│ Open · lines 3–4"))
+            .expect("the card's head");
+        assert!(lines[head - 1].contains("4 +"), "{lines:?}");
+        assert!(
+            lines[head].contains("issue  [reply] [resolve] [delete]"),
+            "{lines:?}"
+        );
+        assert!(lines[head + 1].ends_with("│ Use ? here."), "{lines:?}");
+        assert!(lines[3].contains("┃   3"), "{lines:?}");
+        let column = u16::try_from(
+            lines[head]
+                .find("[resolve]")
+                .map_or(0, |at| lines[head][..at].chars().count()),
+        )
+        .unwrap();
+        click(&mut app, column + 2, u16::try_from(head).unwrap());
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::ResolveReviewComment { id: 4 }]
+        );
     }
 
     #[test]

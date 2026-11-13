@@ -17,7 +17,13 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 
+use std::time::Instant;
+
+use gm_view::compose::{self, ReviewTarget};
+use gm_view::review::{self, Delete};
+
 use crate::diff::{ColorJob, DiffView, side_of};
+use crate::threads::{Composer, Folds};
 
 /// Narrower than this, the sidebar and the main pane show one at a time (D235 (9)).
 pub const SPLIT_MIN_WIDTH: u16 = 100;
@@ -147,6 +153,24 @@ pub enum Action {
     /// Stages the selected lines under **Unstaged**, unstages them under **Staged**.
     StageSelection,
     ClearSelection,
+    /// Opens the comment box on the selected lines, or on the line at the cursor.
+    Comment,
+    Reply(i64),
+    Resolve(i64),
+    Reopen(i64),
+    /// The first press asks, a second within a few seconds deletes (`review::DeleteArm`).
+    Delete(i64),
+    /// Opens or folds a resolved thread.
+    OpenThread(i64),
+    /// Shows all of a thread's replies, or folds the earlier ones.
+    ExpandThread(i64),
+    ToggleOutdated,
+    /// Moves the diff's cursor to the next (`true`) or the previous thread.
+    JumpThread(bool),
+    /// Picks the comment type at this index of `threads::TYPES`.
+    CommentType(usize),
+    SaveComment,
+    CancelComment,
 }
 
 /// A button the last draw put on screen.
@@ -330,8 +354,10 @@ pub struct App {
     pub areas: Areas,
     /// The buttons of the last draw. A click runs the last one that contains it.
     pub hits: Vec<Hit>,
-    /// A message for the top bar, such as why watching is off.
+    /// A message about the last action, for the top bar; the next action clears it.
     pub notice: Option<String>,
+    /// Why the watcher is not watching, while it is not; it stays up.
+    pub watch_notice: Option<String>,
     pub quit: bool,
     /// What changed since the last draw.
     pub dirty: bool,
@@ -341,6 +367,10 @@ pub struct App {
     /// The file shown in the main pane, per context.
     selected: [Option<String>; 2],
     folded: BTreeSet<String>,
+    /// The box that writes a comment or a reply, while it is open.
+    pub composer: Option<Composer>,
+    /// Which threads show unfolded.
+    pub folds: Folds,
     /// The **Diff** tab's diff of the selected file.
     pub diff: Option<DiffView>,
     /// Counts the diff views made, so an answer for an older one is known.
@@ -373,6 +403,7 @@ impl App {
             areas: Areas::default(),
             hits: Vec::new(),
             notice: None,
+            watch_notice: None,
             quit: false,
             dirty: true,
             follow_cursor: true,
@@ -384,6 +415,8 @@ impl App {
             diff_request: None,
             writes: HashMap::new(),
             drag_from: None,
+            composer: None,
+            folds: Folds::default(),
             commands: Vec::new(),
         };
         app.rebuild();
@@ -434,7 +467,38 @@ impl App {
             CommandKind::Unstage { .. } => {
                 self.writes.insert(id, "Unstaging");
             }
+            CommandKind::AddReviewComment { .. }
+            | CommandKind::AddReviewCommentByText { .. }
+            | CommandKind::ReplyToReviewComment { .. } => {
+                if let Some(composer) = self.composer.as_mut() {
+                    composer.pending = Some(id);
+                }
+            }
+            CommandKind::ResolveReviewComment { .. } => {
+                self.writes.insert(id, "Resolving");
+            }
+            CommandKind::ReopenReviewComment { .. } => {
+                self.writes.insert(id, "Reopening");
+            }
+            CommandKind::DeleteReviewComment { .. } => {
+                self.writes.insert(id, "Deleting");
+            }
             _ => {}
+        }
+    }
+
+    /// Text pasted into the terminal: it goes into the comment box when one is open.
+    pub fn on_paste(&mut self, text: &str) {
+        if let Some(composer) = self.composer.as_mut() {
+            composer.type_text(text);
+            self.dirty = true;
+        }
+    }
+
+    /// Lays the diff out again with the threads under their lines.
+    fn relayout(&mut self) {
+        if let Some(view) = self.diff.as_mut() {
+            view.relayout(&self.comments, self.folds.as_opened());
         }
     }
 
@@ -466,6 +530,7 @@ impl App {
             Event::ReviewCommentsListed { comments, .. } => {
                 self.comments.clone_from(comments);
                 self.rebuild();
+                self.relayout();
             }
             Event::DiffLoaded { side, diff, .. } => self.diff_loaded(*side, diff),
             Event::OperationChanged {
@@ -487,6 +552,7 @@ impl App {
         if let Some(job) = view.color_job() {
             self.color_jobs.push(job);
         }
+        self.relayout();
     }
 
     fn operation_changed(&mut self, id: OperationId, state: OperationState, detail: Option<&str>) {
@@ -506,6 +572,17 @@ impl App {
         }
         if let Some(what) = self.writes.remove(&id).filter(|_| failed) {
             self.notice = Some(format!("{what} failed: {reason}"));
+        }
+        if let Some(composer) = self.composer.as_mut().filter(|c| c.pending == Some(id)) {
+            composer.pending = None;
+            if failed {
+                composer.error = Some(reason);
+            } else {
+                self.composer = None;
+                if let Some(view) = self.diff.as_mut() {
+                    view.anchor = None;
+                }
+            }
         }
     }
 
@@ -557,13 +634,18 @@ impl App {
         self.dirty = true;
     }
 
-    pub fn set_notice(&mut self, notice: Option<String>) {
-        self.notice = notice;
+    pub fn set_watch_notice(&mut self, notice: Option<String>) {
+        self.watch_notice = notice;
         self.dirty = true;
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
+            return;
+        }
+        if self.composer.is_some() {
+            self.composer_key(key);
+            self.dirty = true;
             return;
         }
         if let Some(action) = self.action_of(key) {
@@ -575,7 +657,148 @@ impl App {
         }
     }
 
+    /// Keys while the comment box is open: they type, except `Enter` (save), `Alt+Enter` (a
+    /// new line), `Tab` (the next type), `Backspace` and `Esc` (close, asking first when the
+    /// box holds text).
+    fn composer_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let Some(composer) = self.composer.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Char('c') if ctrl => self.quit = true,
+            KeyCode::Esc => self.act(&Action::CancelComment),
+            KeyCode::Enter if alt => composer.type_text("\n"),
+            KeyCode::Enter => self.act(&Action::SaveComment),
+            KeyCode::Tab => composer.next_type(),
+            KeyCode::Backspace => composer.backspace(),
+            KeyCode::Char(letter) if !ctrl => composer.type_text(letter.encode_utf8(&mut [0; 4])),
+            _ => {}
+        }
+    }
+
+    /// The thread drawn first under the diff's cursor row.
+    pub fn thread_at_cursor(&self) -> Option<i64> {
+        let view = self.diff.as_ref()?;
+        view.thread_under(view.cursor)
+    }
+
+    /// The thread keys of the diff, as actions; `None` for any other key.
+    fn thread_action(&self, key: KeyEvent) -> Option<Action> {
+        let selecting = self.diff.as_ref().is_some_and(|view| view.anchor.is_some());
+        Some(match key.code {
+            KeyCode::Char('c') => Action::Comment,
+            KeyCode::Char('}') => Action::JumpThread(true),
+            KeyCode::Char('{') => Action::JumpThread(false),
+            KeyCode::Char('r') => Action::Reply(self.thread_at_cursor()?),
+            KeyCode::Char('R') => Action::Resolve(self.thread_at_cursor()?),
+            KeyCode::Char('o') if !selecting => Action::Reopen(self.thread_at_cursor()?),
+            KeyCode::Char('D') => Action::Delete(self.thread_at_cursor()?),
+            KeyCode::Enter => {
+                let id = self.thread_at_cursor()?;
+                let resolved = self
+                    .comment(id)
+                    .is_some_and(|comment| comment.status == ReviewStatus::Resolved);
+                if resolved {
+                    Action::OpenThread(id)
+                } else {
+                    Action::ExpandThread(id)
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    pub fn comment(&self, id: i64) -> Option<&ReviewComment> {
+        self.comments.iter().find(|comment| comment.id == id)
+    }
+
+    /// Opens the comment box on the selected lines, or the line at the cursor, as the app's
+    /// Comment on Selection does: the same spot and the same refusals (`gm_view::compose`).
+    fn open_comment(&mut self) {
+        let Some(view) = self.diff.as_ref() else {
+            return;
+        };
+        let (from, to) = view.selected_rows().unwrap_or((view.cursor, view.cursor));
+        let diffs = view.diffs();
+        let covered = review::covered(&view.rows, diffs, from, to);
+        let picked = review::picked(&view.rows, diffs, from, to);
+        let spot = compose::diff_spot(side_of(view.context), covered, &picked, &view.path);
+        if let Err(reason) = compose::spot_refusal(spot) {
+            self.notice = Some(reason.to_owned());
+            return;
+        }
+        let text = || (!picked.lines.is_empty()).then(|| picked.text());
+        if let Some(target) = ReviewTarget::for_spot(spot, text) {
+            self.notice = None;
+            self.composer = Some(Composer::new(target));
+        }
+    }
+
+    fn open_reply(&mut self, id: i64) {
+        let Some(comment) = self.comment(id) else {
+            return;
+        };
+        if !review::can_reply(comment.status) {
+            self.notice = Some("Reopen the thread to reply to it.".to_owned());
+            return;
+        }
+        let (start_line, end_line) = review::shown_range(comment);
+        let target = ReviewTarget::Reply {
+            id,
+            path: comment.path.clone(),
+            start_line,
+            end_line,
+        };
+        self.composer = Some(Composer::new(target));
+    }
+
+    /// The resolve, reopen and delete of a thread.
+    fn thread_write(&mut self, action: &Action) {
+        let (id, wanted) = match *action {
+            Action::Resolve(id) => (id, false),
+            Action::Reopen(id) => (id, true),
+            Action::Delete(id) => {
+                match self.folds.delete.press(id, Instant::now()) {
+                    Delete::Ask => {
+                        self.notice = Some(format!(
+                            "Press D, or [delete], again to delete thread {id}."
+                        ));
+                    }
+                    Delete::Confirmed => {
+                        self.notice = None;
+                        self.commands.push(CommandKind::DeleteReviewComment { id });
+                    }
+                }
+                return;
+            }
+            _ => return,
+        };
+        let Some(comment) = self.comment(id) else {
+            return;
+        };
+        let resolved = comment.status == ReviewStatus::Resolved;
+        if resolved != wanted {
+            self.notice = Some(if wanted {
+                "The thread is not resolved.".to_owned()
+            } else {
+                "The thread is already resolved.".to_owned()
+            });
+            return;
+        }
+        self.commands.push(if wanted {
+            CommandKind::ReopenReviewComment { id }
+        } else {
+            CommandKind::ResolveReviewComment { id }
+        });
+    }
+
     fn diff_key_press(&mut self, key: KeyEvent) {
+        if let Some(action) = self.thread_action(key) {
+            self.act(&action);
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = self.half_page();
         let Some(view) = self.diff.as_mut() else {
@@ -713,6 +936,11 @@ impl App {
 
     /// Runs `action`, from a key or a click.
     pub fn act(&mut self, action: &Action) {
+        // A notice is about the last action; the next one replaces it. Only a delete's
+        // first press keeps its question up for the second.
+        if !matches!(action, Action::Delete(_)) {
+            self.notice = None;
+        }
         match *action {
             Action::Tab(tab) => self.tab = tab,
             Action::Context(context) => self.set_context(context),
@@ -743,6 +971,41 @@ impl App {
             }
             Action::StageFile => self.stage_file(),
             Action::StageSelection => self.stage_selection(),
+            Action::Comment => self.open_comment(),
+            Action::Reply(id) => self.open_reply(id),
+            Action::Resolve(_) | Action::Reopen(_) | Action::Delete(_) => self.thread_write(action),
+            Action::OpenThread(id) => {
+                self.folds.toggle_opened(id);
+                self.relayout();
+            }
+            Action::ExpandThread(id) => {
+                self.folds.toggle_expanded(id);
+                self.relayout();
+            }
+            Action::ToggleOutdated => {
+                self.folds.outdated = !self.folds.outdated;
+                self.relayout();
+            }
+            Action::JumpThread(forward) => {
+                if let Some(view) = self.diff.as_mut() {
+                    view.jump_thread(forward);
+                }
+            }
+            Action::CommentType(index) => {
+                if let Some(composer) = self.composer.as_mut() {
+                    composer.kind = index;
+                }
+            }
+            Action::SaveComment => {
+                if let Some(command) = self.composer.as_ref().and_then(Composer::save) {
+                    self.commands.push(command);
+                }
+            }
+            Action::CancelComment => {
+                if self.composer.as_mut().is_some_and(Composer::escape) {
+                    self.composer = None;
+                }
+            }
             Action::ClearSelection => {
                 if let Some(view) = self.diff.as_mut() {
                     view.anchor = None;
@@ -816,7 +1079,10 @@ impl App {
             return;
         };
         let offset = usize::from(at.y.saturating_sub(view.body_top));
-        let row = (view.scroll + offset).min(view.rows.len().saturating_sub(1));
+        // A card under a row counts as that row.
+        let Some(row) = view.row_of_entry(view.scroll + offset) else {
+            return;
+        };
         if row != from || view.anchor.is_some() {
             view.anchor = Some(from);
             view.cursor = row;
@@ -946,7 +1212,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gm_schema::{BranchInfo, OperationId, ReviewAnchor};
     use ratatui::crossterm::event::KeyEventState;
@@ -983,7 +1249,7 @@ mod tests {
         }
     }
 
-    fn comment(id: i64, path: &str, status: ReviewStatus) -> ReviewComment {
+    pub(crate) fn comment(id: i64, path: &str, status: ReviewStatus) -> ReviewComment {
         ReviewComment {
             id,
             path: path.to_owned(),

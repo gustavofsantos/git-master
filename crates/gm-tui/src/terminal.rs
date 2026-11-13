@@ -7,7 +7,8 @@ use std::io::{self, Stdout};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
-    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -34,7 +35,8 @@ impl Screen {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableFocusChange
+            EnableFocusChange,
+            EnableBracketedPaste
         ) {
             restore();
             return Err(error);
@@ -61,6 +63,7 @@ impl Drop for Screen {
 fn restore() {
     let _ = execute!(
         io::stdout(),
+        DisableBracketedPaste,
         DisableFocusChange,
         DisableMouseCapture,
         LeaveAlternateScreen

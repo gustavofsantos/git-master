@@ -10,10 +10,12 @@ use ratatui::widgets::Paragraph;
 
 use gm_schema::{DiffLine, LineKind, SyntaxRole};
 use gm_view::diff_rows::{Notice, Row, no_newline_mark, notice_text};
+use gm_view::review::Entry;
 
 use crate::app::{Action, App, Context, Focus, Hit};
 use crate::diff::{DiffView, LineColors};
 use crate::render::{BOLD, DIM, ON, Strip};
+use crate::render_threads::{card_line, draw_composer, heading_line};
 
 /// Columns of the line number.
 const NUMBER_WIDTH: usize = 5;
@@ -57,43 +59,88 @@ pub fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
     let height = usize::from(body.height);
     view.keep_cursor_visible(height);
     let width = usize::from(body.width);
+    let comments = &app.comments;
+    let folds = &app.folds;
+    let hits = &mut app.hits;
     let mut lines = Vec::with_capacity(height);
-    for (index, row) in view.rows.iter().enumerate().skip(view.scroll).take(height) {
-        let y = body.y + u16::try_from(index - view.scroll).unwrap_or(u16::MAX);
+    for (offset, entry) in view
+        .listing
+        .entries
+        .iter()
+        .skip(view.scroll)
+        .take(height)
+        .enumerate()
+    {
         let row_area = Rect {
-            y,
+            y: body.y + u16::try_from(offset).unwrap_or(u16::MAX),
             height: 1,
             ..body
         };
-        app.hits.push(Hit {
-            area: row_area,
-            action: Action::DiffRow(index),
-        });
-        let mut line = match *row {
-            Row::HunkHeader { hunk_index, .. } => {
-                hunk_bar(view, hunk_index, row_area, &mut app.hits)
+        let line = match entry {
+            Entry::Diff(index) => {
+                hits.push(Hit {
+                    area: row_area,
+                    action: Action::DiffRow(*index),
+                });
+                let mut line = diff_row(view, *index, row_area, width, hits);
+                if focused && *index == view.cursor {
+                    line = line.patch_style(ON);
+                }
+                line
             }
-            Row::Line {
-                hunk_index,
-                line_index,
-                ..
-            } => match view.line(hunk_index, line_index) {
-                Some(line) => code_line(
-                    line,
-                    view.colors.get(&(hunk_index, line_index)),
-                    width,
-                    view.is_selected(index),
-                ),
-                None => Line::default(),
-            },
-            _ => Line::default(),
+            Entry::Heading(heading) => heading_line(heading, row_area, hits),
+            Entry::Card { id, part } => {
+                let comment = comments.iter().find(|comment| comment.id == *id);
+                card_line(comment, *id, part, row_area, folds, hits)
+            }
         };
-        if focused && index == view.cursor {
-            line = line.patch_style(ON);
-        }
         lines.push(line);
     }
     frame.render_widget(Paragraph::new(lines), body);
+    if let Some(composer) = app.composer.as_ref() {
+        // Under the selection, or under the line at the cursor for a reply.
+        let last = view.selected_rows().map_or(view.cursor, |(_, last)| last);
+        let below = view.entry_of(last) + 1;
+        let top = body.y + u16::try_from(below.saturating_sub(view.scroll)).unwrap_or(u16::MAX);
+        draw_composer(
+            frame,
+            composer,
+            body,
+            top.min(body.y + body.height),
+            &mut app.hits,
+        );
+    }
+}
+
+/// One diff row: a hunk's bar or a line of code.
+fn diff_row(
+    view: &DiffView,
+    index: usize,
+    area: Rect,
+    width: usize,
+    hits: &mut Vec<Hit>,
+) -> Line<'static> {
+    match view.rows.get(index) {
+        Some(Row::HunkHeader { hunk_index, .. }) => hunk_bar(view, *hunk_index, area, hits),
+        Some(Row::Line {
+            hunk_index,
+            line_index,
+            ..
+        }) => match view.line(*hunk_index, *line_index) {
+            Some(line) => {
+                let marked = line.new_no.is_some_and(|no| view.marked.contains(&no));
+                code_line(
+                    line,
+                    view.colors.get(&(*hunk_index, *line_index)),
+                    width,
+                    view.is_selected(index),
+                    marked,
+                )
+            }
+            None => Line::default(),
+        },
+        _ => Line::default(),
+    }
 }
 
 fn header(view: &DiffView) -> Line<'static> {
@@ -131,6 +178,8 @@ fn selection_header(view: &DiffView, strip: &mut Strip<'static>) {
         Context::Staged => ("[unstage lines]", Color::Yellow),
     };
     strip
+        .button("[comment]", Style::new().fg(Color::Blue), Action::Comment)
+        .text(" ", Style::new())
         .button(label, Style::new().fg(color), Action::StageSelection)
         .text(" ", Style::new())
         .button("[clear]", DIM, Action::ClearSelection);
@@ -180,6 +229,7 @@ fn code_line(
     colors: Option<&LineColors>,
     width: usize,
     selected: bool,
+    marked: bool,
 ) -> Line<'static> {
     let (number, sign, sign_style, text_style) = match line.kind {
         LineKind::Added => (line.new_no, "+", Style::new().fg(Color::Green), None),
@@ -201,6 +251,13 @@ fn code_line(
         vec![
             Span::styled("▌", Style::new().fg(Color::Blue)),
             Span::styled(rest, sign_style.add_modifier(Modifier::BOLD)),
+        ]
+    } else if marked {
+        // A line an open thread covers: its mark takes the first column of the number.
+        let rest: String = number.chars().skip(1).collect();
+        vec![
+            Span::styled("┃", Style::new().fg(Color::Yellow)),
+            Span::styled(rest, sign_style),
         ]
     } else {
         vec![Span::styled(number, sign_style)]

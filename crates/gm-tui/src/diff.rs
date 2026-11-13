@@ -2,10 +2,11 @@
 //! over them and the colors of its code. The rows come from `gm_view::diff_rows`, the same
 //! model the app's diff pane uses.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use gm_schema::{DiffLine, FileDiff, Hunk, LineKind, SyntaxRole};
+use gm_schema::{DiffLine, FileDiff, Hunk, LineKind, ReviewComment, SyntaxRole};
 use gm_view::diff_rows::{self, Diffs, Row, Side};
+use gm_view::review::{self, Entry, Listing, Opened};
 
 use crate::app::Context;
 
@@ -46,9 +47,14 @@ pub struct DiffView {
     /// Why the diff could not be read.
     pub error: Option<String>,
     pub rows: Vec<Row>,
+    /// What is drawn: the rows with the threads under their lines, as the app's diff lays
+    /// them out (`gm_view::review::notes`).
+    pub listing: Listing,
+    /// Working-tree lines an open thread covers; their gutter is marked.
+    pub marked: BTreeSet<u32>,
     /// Index into `rows`.
     pub cursor: usize,
-    /// The first row on screen.
+    /// The first entry of `listing` on screen.
     pub scroll: usize,
     /// The next draw brings the cursor on screen; the wheel clears it.
     pub follow_cursor: bool,
@@ -70,6 +76,8 @@ impl DiffView {
             diff: None,
             error: None,
             rows: Vec::new(),
+            listing: Listing::default(),
+            marked: BTreeSet::new(),
             cursor: 0,
             scroll: 0,
             follow_cursor: true,
@@ -99,6 +107,69 @@ impl DiffView {
         self.diff = Some(diff);
         self.error = None;
         self.colors.clear();
+    }
+
+    /// The hunks of the side shown, as `gm_view` reads them.
+    pub fn diffs(&self) -> Diffs<'_> {
+        let hunks = self.hunks();
+        match side_of(self.context) {
+            Side::Unstaged => Diffs {
+                unstaged: hunks,
+                staged: &[],
+            },
+            Side::Staged => Diffs {
+                unstaged: &[],
+                staged: hunks,
+            },
+        }
+    }
+
+    /// Lays the rows out again with the threads of `comments` under their lines.
+    pub fn relayout(&mut self, comments: &[ReviewComment], opened: Opened<'_>) {
+        let diffs = self.diffs();
+        let split = diff_rows::split_rows(diffs, side_of(self.context));
+        let notes = review::notes(&self.rows, diffs, &split, comments, &self.path, opened);
+        self.listing = notes.unified;
+        self.marked = notes.marked;
+    }
+
+    /// The entry of row `row` in the listing.
+    pub fn entry_of(&self, row: usize) -> usize {
+        self.listing.at.get(row).copied().unwrap_or(row)
+    }
+
+    /// The row an entry belongs to: its own for a diff row, else the diff row above it.
+    pub fn row_of_entry(&self, entry: usize) -> Option<usize> {
+        self.listing.entries[..=entry.min(self.listing.entries.len().checked_sub(1)?)]
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::Diff(row) => Some(*row),
+                _ => None,
+            })
+    }
+
+    /// The thread drawn first under row `row`, if any.
+    pub fn thread_under(&self, row: usize) -> Option<i64> {
+        let at = self.listing.at.get(row)?;
+        match self.listing.entries.get(at + 1)? {
+            Entry::Card { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Moves the cursor to the next (`forward`) or the previous row with a thread under it.
+    pub fn jump_thread(&mut self, forward: bool) {
+        let has_thread = |row: &usize| self.thread_under(*row).is_some();
+        let found = if forward {
+            (self.cursor + 1..self.rows.len()).find(has_thread)
+        } else {
+            (0..self.cursor).rev().find(has_thread)
+        };
+        if let Some(row) = found {
+            self.cursor = row;
+            self.follow_cursor = true;
+        }
     }
 
     pub fn hunks(&self) -> &[Hunk] {
@@ -262,19 +333,21 @@ impl DiffView {
         if height == 0 {
             return;
         }
-        self.scroll = self.scroll.min(self.rows.len().saturating_sub(height));
+        let entries = self.listing.entries.len();
+        self.scroll = self.scroll.min(entries.saturating_sub(height));
         if !self.follow_cursor {
             return;
         }
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + height {
-            self.scroll = self.cursor + 1 - height;
+        let at = self.entry_of(self.cursor);
+        if at < self.scroll {
+            self.scroll = at;
+        } else if at >= self.scroll + height {
+            self.scroll = at + 1 - height;
         }
     }
 
     pub fn scroll_by(&mut self, by: isize, height: usize) {
-        let bottom = self.rows.len().saturating_sub(height);
+        let bottom = self.listing.entries.len().saturating_sub(height);
         self.scroll = self.scroll.saturating_add_signed(by).min(bottom);
         self.follow_cursor = false;
     }
@@ -392,6 +465,15 @@ mod tests {
                 ),
             ],
         });
+        let none = BTreeSet::new();
+        view.relayout(
+            &[],
+            Opened {
+                outdated: false,
+                comments: &none,
+                threads: &none,
+            },
+        );
         view
     }
 

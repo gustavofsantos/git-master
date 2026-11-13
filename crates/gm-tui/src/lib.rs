@@ -7,7 +7,9 @@ mod color;
 mod diff;
 mod render;
 mod render_diff;
+mod render_threads;
 mod terminal;
+mod threads;
 
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -157,7 +159,8 @@ fn run(opened: Opened) -> io::Result<()> {
                         app.redraw();
                     }
                     Input::Resize(..) => app.redraw(),
-                    Input::FocusLost | Input::Paste(_) => {}
+                    Input::Paste(text) => app.on_paste(&text),
+                    Input::FocusLost => {}
                 }
                 if !event::poll(Duration::ZERO)? {
                     break;
@@ -170,9 +173,9 @@ fn run(opened: Opened) -> io::Result<()> {
         while let Ok(notice) = notices.try_recv() {
             match notice {
                 Notice::Degraded { reason } => {
-                    app.set_notice(Some(format!("Not watching: {reason}")));
+                    app.set_watch_notice(Some(format!("Not watching: {reason}")));
                 }
-                Notice::Watching { .. } => app.set_notice(None),
+                Notice::Watching { .. } => app.set_watch_notice(None),
                 Notice::Refreshing(_) => {}
             }
         }
