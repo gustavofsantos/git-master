@@ -49,14 +49,14 @@ Every screen is made of sections you can fold. `Tab` folds or unfolds the sectio
 
 ## The Status screen
 
-> **Planned.** The **Stack** line, **Commits** and **Stashes** are not available yet. The branch's changes against its base show as a **Branch changes** section, folded, until the Diff screen takes them.
+> **Planned.** The [Diff screen](#diff-file-blame-and-origin) is not available yet, so Status also shows the branch's changes against its base as a **Branch changes** section, folded, after **Commits**.
 
-Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream or base; **Stack**, when the branch is in a [stack](stacks.md). Then come its sections, each with a count:
+Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream, with how far ahead and behind it is; **Stack**, when the branch is in a [stack](stacks.md): the branches from the root to yours, how far ahead and behind its parent it is, whether a restack is due and how many branches sit on it; **Base**, the default branch it is compared with. Then come its sections, each with a count:
 
 - **Untracked files**, **Unstaged changes** and **Staged changes**. A file unfolds into its hunks, with line numbers, `+` and `-` in your terminal's green and red, and code colored by its language. Review threads are drawn under the lines they are about.
 - **Review threads**, by who acts next: waiting for you, waiting for the agent.
-- **Commits** on the branch that are not on its base.
-- **Stashes**.
+- **Commits** on the branch that are not on its base, newest first, with when each was written. In a stack, the base is the default branch, so the commits of the branches below yours are listed too.
+- **Stashes**, newest first.
 
 Each file shows its status, an icon for its type, `+a -r` and how many threads on it are not resolved.
 
