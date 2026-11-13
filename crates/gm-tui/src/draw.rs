@@ -25,7 +25,7 @@ use crate::nav::keys::show_sequence;
 use crate::nav::prompt::Answer;
 use crate::nav::sections::Row;
 use crate::reviews::Turn;
-use crate::status::{self, Item};
+use crate::status::{self, Item, Mark};
 use crate::threads::TYPES;
 use crate::ui::{App, Click, Hit, MIN_HEIGHT, MIN_WIDTH, Overlay};
 
@@ -342,6 +342,30 @@ fn screen_line(row: &Row<'_, Item>) -> Line<'static> {
     }
 }
 
+/// A line of the File screen: its number, its mark and its colored code.
+fn file_line_row(app: &App, index: usize, mark: Mark, width: usize) -> Line<'static> {
+    let Some(file) = app.repo.file.as_ref() else {
+        return Line::default();
+    };
+    let text = file.lines.get(index).map_or("", String::as_str);
+    let (sign, style) = match mark {
+        Mark::Same => (" ", DIM),
+        Mark::Unstaged => ("+", color(Color::Green)),
+        Mark::Staged => ("+", color(Color::Cyan)),
+    };
+    let mut spans = vec![
+        Span::styled(format!("{:>6} ", index + 1), DIM),
+        Span::styled(format!("{sign} "), style),
+    ];
+    spans.extend(code_spans(
+        text,
+        file.colors.get(&index),
+        None,
+        width.saturating_sub(9),
+    ));
+    Line::from(spans)
+}
+
 fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
     let repo = &app.repo;
     match &row.section.item {
@@ -421,6 +445,10 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
         Item::Thread { id } => thread_line(app, *id, width),
         Item::Commits { .. } | Item::Commit { .. } | Item::Stashes { .. } | Item::Stash { .. } => {
             history_line(app, row)
+        }
+        Item::FileLine { index, mark } => file_line_row(app, *index, *mark, width),
+        Item::Unchanged { count } => {
+            Line::styled(format!("  {} {count} unchanged lines", fold_icon(row)), DIM)
         }
         Item::Version { .. }
         | Item::Text { .. }

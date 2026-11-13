@@ -4,6 +4,7 @@
 
 mod color;
 mod data;
+mod diff_screen;
 mod draw;
 mod help;
 mod icons;
@@ -212,12 +213,44 @@ fn run(opened: Opened) -> io::Result<()> {
                     app.redraw();
                 }
                 Request::Copy(text) => copy(&text)?,
+                Request::Edit { path, line } => {
+                    // The editor takes the terminal; the companion takes it back after.
+                    drop(screen);
+                    if let Err(error) = edit(&path, line) {
+                        app.notify(format!("The editor did not start: {error}"));
+                    }
+                    screen = Screen::take()?;
+                    screen.terminal.clear()?;
+                    app.redraw();
+                }
             }
         }
         if app.quit {
             return Ok(());
         }
     }
+}
+
+/// Runs `$VISUAL`, else `$EDITOR`, else `vi` on `path` at `line`, and waits for it. The
+/// variable may hold arguments (`code -w`), split on spaces as a shell would for words.
+fn edit(path: &str, line: u32) -> io::Result<()> {
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "vi".to_owned());
+    let mut words = editor.split_whitespace();
+    let program = words.next().unwrap_or("vi");
+    std::process::Command::new(program)
+        .args(words)
+        .arg(format!("+{line}"))
+        .arg(path)
+        .status()
+        .map(|_| ())
 }
 
 /// Puts `text` on the clipboard with OSC 52, which terminals and tmux pass on.

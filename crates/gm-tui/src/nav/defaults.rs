@@ -282,6 +282,14 @@ const SPECS: &[Spec] = &[
         OneShot,
     ),
     spec(
+        "file.open",
+        "file",
+        "Open the whole file on the File screen.",
+        "Go to",
+        MOVE,
+        OneShot,
+    ),
+    spec(
         "thread.show",
         "show in diff",
         "Show the thread under its lines on Status.",
@@ -477,6 +485,7 @@ const NORMAL: &[(&str, &str)] = &[
     ("<space> y", "copy.reference"),
     ("<space> t", "go.threads"),
     ("<space> g", "thread.show"),
+    ("g f", "file.open"),
     ("<space> f o", "filter.open"),
     ("<space> f r", "filter.resolved"),
     ("<space> f u", "filter.outdated"),

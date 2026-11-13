@@ -16,6 +16,16 @@ use crate::icons;
 use crate::nav::sections::Section;
 use crate::reviews::{self, Turn};
 
+/// How a line of the File screen differs from the last commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Same,
+    /// Added or changed in the working tree, not staged.
+    Unstaged,
+    /// Added or changed, and staged.
+    Staged,
+}
+
 /// What a row of Status is about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
@@ -98,6 +108,15 @@ pub enum Item {
     Messages {
         count: usize,
     },
+    /// A line of the File screen, by its index in `Repo::file`, and how it changed.
+    FileLine {
+        index: usize,
+        mark: Mark,
+    },
+    /// A run of unchanged lines of the File screen, folded.
+    Unchanged {
+        count: usize,
+    },
     /// A group of the Keys screen.
     KeyGroup {
         title: &'static str,
@@ -133,6 +152,12 @@ impl Item {
                 .and_then(|history| history.commits.get(*index))
                 .map_or_default(|commit| format!("{} {}", commit.short, commit.subject)),
             Item::KeyGroup { title, .. } => (*title).to_owned(),
+            Item::FileLine { index, .. } => repo
+                .file
+                .as_ref()
+                .and_then(|file| file.lines.get(*index))
+                .cloned()
+                .unwrap_or_default(),
             Item::Binding { keys, description } => format!("{keys} {description}"),
             Item::Stash { index } => repo
                 .stashes
@@ -197,10 +222,10 @@ fn change_letter(change: Change) -> char {
 }
 
 /// A file of a group: its path, its status letter and its added and deleted line counts.
-type Listed = (String, char, Option<(u32, u32)>);
+pub type Listed = (String, char, Option<(u32, u32)>);
 
 /// The files of `group` in the status or the branch's range, with letter and counts.
-fn files_of(repo: &Repo, group: Group) -> Vec<Listed> {
+pub fn files_of(repo: &Repo, group: Group) -> Vec<Listed> {
     let counts = |side: &[gm_schema::LineCounts], path: &str| {
         side.iter()
             .find(|c| c.path == path)
@@ -237,24 +262,32 @@ fn files_of(repo: &Repo, group: Group) -> Vec<Listed> {
             &|e| e.staged.filter(|_| !e.conflicted).map(change_letter),
             &repo.stats.staged,
         ),
-        Group::Branch => repo.range.as_ref().map_or_default(|range| {
-            range
-                .files
-                .iter()
-                .map(|f| {
-                    (
-                        f.path.clone(),
-                        change_letter(f.change),
-                        (!f.binary).then_some((f.added, f.deleted)),
-                    )
-                })
-                .collect()
-        }),
+        Group::Branch => repo
+            .range
+            .as_ref()
+            .map_or_default(|range| commit_files(&range.files)),
+        Group::Commit => repo
+            .commit
+            .as_ref()
+            .map_or_default(|commit| commit_files(&commit.files)),
     }
 }
 
+fn commit_files(files: &[gm_schema::CommitFile]) -> Vec<Listed> {
+    files
+        .iter()
+        .map(|f| {
+            (
+                f.path.clone(),
+                change_letter(f.change),
+                (!f.binary).then_some((f.added, f.deleted)),
+            )
+        })
+        .collect()
+}
+
 /// The rows under an unfolded file: its hunks and lines, threads under their lines.
-fn file_children(
+pub fn file_children(
     repo: &Repo,
     group: Group,
     path: &str,
@@ -484,8 +517,6 @@ pub fn sections(repo: &Repo, opened: Opened<'_>) -> Vec<Section<Item>> {
     }
     out.extend(threads(repo));
     out.extend(commits(repo));
-    // The branch's changes are long and read-only: they start folded.
-    out.extend(group_section(repo, Group::Branch, opened).map(Section::folded));
     out.extend(stashes(repo));
     out
 }
@@ -609,6 +640,7 @@ pub fn unfolded_files(open: &BTreeSet<String>) -> Vec<(Group, String)> {
                 "Unstaged" => Group::Unstaged,
                 "Staged" => Group::Staged,
                 "Branch" => Group::Branch,
+                "Commit" => Group::Commit,
                 _ => return None,
             };
             Some((group, path.to_owned()))

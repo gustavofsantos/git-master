@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use gm_schema::{
-    ChangeStats, DiffSide, FileDiff, HighlightSpan, History, LineKind, RepoStatus, ReviewComment,
-    RevisionRange, StackSnapshot, StashEntry, SyntaxRole,
+    ChangeStats, CommitDetail, DiffSide, FileBody, FileDiff, FileView, HighlightSpan, History,
+    LineKind, RepoStatus, ReviewComment, RevisionRange, StackSnapshot, StashEntry, SyntaxRole,
 };
 use gm_view::diff_rows::{self, Diffs, Row, Side};
 
@@ -24,6 +24,8 @@ pub enum Group {
     Staged,
     /// The branch's commits against its base (D237).
     Branch,
+    /// The commit the Diff screen shows (`Repo::commit`).
+    Commit,
 }
 
 impl Group {
@@ -33,6 +35,7 @@ impl Group {
             Group::Unstaged => "Unstaged changes",
             Group::Staged => "Staged changes",
             Group::Branch => "Branch changes",
+            Group::Commit => "Commit",
         }
     }
 
@@ -41,7 +44,7 @@ impl Group {
     pub fn side(self) -> Side {
         match self {
             Group::Untracked | Group::Unstaged => Side::Unstaged,
-            Group::Staged | Group::Branch => Side::Staged,
+            Group::Staged | Group::Branch | Group::Commit => Side::Staged,
         }
     }
 
@@ -50,7 +53,7 @@ impl Group {
         match self {
             Group::Untracked | Group::Unstaged => Some(DiffSide::Unstaged),
             Group::Staged => Some(DiffSide::Staged),
-            Group::Branch => None,
+            Group::Branch | Group::Commit => None,
         }
     }
 
@@ -59,7 +62,7 @@ impl Group {
         match self {
             Group::Untracked | Group::Unstaged => Some(true),
             Group::Staged => Some(false),
-            Group::Branch => None,
+            Group::Branch | Group::Commit => None,
         }
     }
 }
@@ -125,6 +128,75 @@ pub struct Repo {
     pub commits: Option<History>,
     pub stashes: Vec<StashEntry>,
     pub stacks: StackSnapshot,
+    /// The commit the Diff screen shows, with its files.
+    pub commit: Option<CommitDetail>,
+    /// The file the File screen shows.
+    pub file: Option<FileText>,
+}
+
+/// A file of the working tree, cut into lines, with the colors of its code.
+#[derive(Debug, Default)]
+pub struct FileText {
+    pub path: String,
+    pub lines: Vec<String>,
+    /// The colors of each line, by line index.
+    pub colors: HashMap<usize, LineColors>,
+    /// Why there are no lines to show: binary, missing, a folder, a link.
+    pub note: Option<String>,
+    /// The text is the first part of a larger file.
+    pub truncated: bool,
+}
+
+impl FileText {
+    pub fn from_view(view: FileView) -> Self {
+        let mut file = FileText {
+            path: view.path,
+            truncated: view.truncated,
+            ..FileText::default()
+        };
+        match view.body {
+            FileBody::Text { text } => file.lines = text.lines().map(str::to_owned).collect(),
+            FileBody::Binary => {
+                file.note = Some("Binary file: its contents are not shown.".to_owned());
+            }
+            FileBody::Missing => {
+                file.note = Some("There is no such file in the working tree.".to_owned());
+            }
+            FileBody::Symlink { target } => {
+                file.note = Some(format!("A symbolic link to {target}."));
+            }
+            FileBody::Directory => file.note = Some("This path is a folder.".to_owned()),
+        }
+        file
+    }
+
+    /// Takes the colors of the whole text, cut at each line.
+    pub fn colored(&mut self, spans: &[HighlightSpan]) {
+        let mut starts = Vec::with_capacity(self.lines.len());
+        let mut at = 0;
+        for line in &self.lines {
+            starts.push(at);
+            at += line.len() + 1;
+        }
+        self.colors.clear();
+        for (index, line) in self.lines.iter().enumerate() {
+            let (start, end) = (starts[index], starts[index] + line.len());
+            let own: LineColors = spans
+                .iter()
+                .filter(|span| span.start < end && span.end > start)
+                .map(|span| {
+                    (
+                        span.start.max(start) - start,
+                        span.end.min(end) - start,
+                        span.role,
+                    )
+                })
+                .collect();
+            if !own.is_empty() {
+                self.colors.insert(index, own);
+            }
+        }
+    }
 }
 
 impl Repo {

@@ -17,7 +17,8 @@ use gm_view::review::{self, Opened};
 use ratatui::crossterm::event::{KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-use crate::data::{ColorJob, Group, Repo, color_job};
+use crate::data::{ColorJob, FileText, Group, Repo, color_job};
+use crate::diff_screen::{self, DiffKind};
 use crate::nav::Mode;
 use crate::nav::action::{Behavior, Registry};
 use crate::nav::defaults;
@@ -55,6 +56,17 @@ pub enum Screen {
         view: View,
         filter: Filter,
     },
+    /// The branch against its base, or a commit (M4).
+    Diff {
+        view: View,
+        kind: DiffKind,
+    },
+    /// A whole file of the working tree (M4); `keep` is a line to show and put the cursor on.
+    File {
+        view: View,
+        path: String,
+        keep: Option<u32>,
+    },
     /// One review thread (M3).
     Thread {
         view: View,
@@ -68,6 +80,8 @@ impl Screen {
             Screen::Status(view)
             | Screen::Keys(view)
             | Screen::Threads { view, .. }
+            | Screen::Diff { view, .. }
+            | Screen::File { view, .. }
             | Screen::Thread { view, .. } => view,
         }
     }
@@ -77,6 +91,8 @@ impl Screen {
             Screen::Status(view)
             | Screen::Keys(view)
             | Screen::Threads { view, .. }
+            | Screen::Diff { view, .. }
+            | Screen::File { view, .. }
             | Screen::Thread { view, .. } => view,
         }
     }
@@ -88,6 +104,8 @@ impl Addressed for Screen {
             Screen::Status(_) => "status".to_owned(),
             Screen::Keys(_) => "keys".to_owned(),
             Screen::Threads { .. } => "threads".to_owned(),
+            Screen::Diff { kind, .. } => kind.address(),
+            Screen::File { path, .. } => format!("file/{path}"),
             Screen::Thread { page, .. } => format!("thread/{}", page.id),
         }
     }
@@ -155,6 +173,11 @@ pub enum Request {
     Redraw,
     /// Put this text on the clipboard (OSC 52).
     Copy(String),
+    /// Open the file at `path` (absolute) in `$VISUAL` or `$EDITOR`, at `line`.
+    Edit {
+        path: String,
+        line: u32,
+    },
 }
 
 /// What a read or a write in flight is for.
@@ -165,12 +188,19 @@ enum Pending {
     Stack,
     /// The branch's own commits.
     Commits,
+    /// The commit the Diff screen shows, then its diffs.
+    CommitDetail,
+    CommitStack,
+    /// The file the File screen shows.
+    File,
     Write(&'static str),
     Text,
 }
 
 pub struct App {
     pub repo: Repo,
+    /// The read of the file the File screen shows, whose colors follow its answer.
+    file_read: Option<OperationId>,
     pub stack: Stack<Screen>,
     pub input: Input,
     pub registry: Registry,
@@ -216,6 +246,7 @@ impl App {
                 status,
                 ..Repo::default()
             },
+            file_read: None,
             stack: Stack::new(Screen::Status(View::default())),
             input: defaults::input(),
             registry: defaults::registry(),
@@ -254,6 +285,12 @@ impl App {
 
     pub fn take_requests(&mut self) -> Vec<Request> {
         std::mem::take(&mut self.requests)
+    }
+
+    /// Shows `text` on the hint line.
+    pub fn notify(&mut self, text: String) {
+        self.notice = Some(text);
+        self.dirty = true;
     }
 
     pub fn set_watch_notice(&mut self, notice: Option<String>) {
@@ -320,6 +357,12 @@ impl App {
             CommandKind::LoadBranchChange { .. } => Pending::Range,
             CommandKind::LoadRevisionStack { .. } => Pending::Stack,
             CommandKind::LoadHistory { .. } => Pending::Commits,
+            CommandKind::LoadCommitDetail { .. } => Pending::CommitDetail,
+            CommandKind::LoadCommitStack { .. } => Pending::CommitStack,
+            CommandKind::ReadFile { .. } => {
+                self.file_read = Some(id);
+                Pending::File
+            }
             CommandKind::LoadReviewChange { .. }
             | CommandKind::LoadReviewSnapshotText { .. }
             | CommandKind::LoadReviewCurrentText { .. } => {
@@ -355,6 +398,15 @@ impl App {
             Event::StatusLoaded { status, .. } => {
                 self.repo.status.clone_from(status);
                 self.ask_for_reads();
+                // The File screen's file may have changed too.
+                let file = self
+                    .stack
+                    .trail()
+                    .iter()
+                    .find_map(|a| a.strip_prefix("file/").map(str::to_owned));
+                if let Some(path) = file {
+                    self.read_file(&path);
+                }
                 // Unfolded files may have changed: read them again; their old diff shows meanwhile.
                 for (group, path) in status::unfolded_files(self.status_tree().toggled()) {
                     if group != Group::Branch {
@@ -421,10 +473,53 @@ impl App {
             Event::OperationChanged {
                 id, state, detail, ..
             } => self.ended(*id, *state, detail.as_deref()),
+            _ if self.apply_screen_read(event) => {}
             _ => return,
         }
         self.rebuild();
         self.dirty = true;
+    }
+
+    /// Takes an answer to a read of the Diff or File screen; false when `event` is not one.
+    fn apply_screen_read(&mut self, event: &Event) -> bool {
+        match event {
+            Event::CommitDetailLoaded { id, detail }
+                if self.in_flight.get(id) == Some(&Pending::CommitDetail) =>
+            {
+                self.in_flight.remove(id);
+                self.repo.commit = Some(detail.clone());
+                self.repo
+                    .files
+                    .retain(|(group, _), _| *group != Group::Commit);
+            }
+            Event::CommitStackLoaded { id, diffs }
+                if self.in_flight.get(id) == Some(&Pending::CommitStack) =>
+            {
+                self.in_flight.remove(id);
+                for diff in diffs {
+                    self.file_loaded(Group::Commit, &diff.path.clone(), diff.clone());
+                }
+            }
+            Event::FileRead { id, file } if self.in_flight.get(id) == Some(&Pending::File) => {
+                self.in_flight.remove(id);
+                let mut read = FileText::from_view(file.clone());
+                // The same text read again keeps its colors until the new ones come.
+                if let Some(old) = self.repo.file.take()
+                    && old.path == read.path
+                    && old.lines == read.lines
+                {
+                    read.colors = old.colors;
+                }
+                self.repo.file = Some(read);
+            }
+            Event::FileHighlighted { id, spans } if self.file_read == Some(*id) => {
+                if let Some(file) = self.repo.file.as_mut() {
+                    file.colored(spans);
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn file_loaded(&mut self, group: Group, path: &str, diff: gm_schema::FileDiff) {
@@ -450,7 +545,15 @@ impl App {
         if !failed
             && matches!(
                 self.in_flight.get(&id),
-                Some(Pending::Diff(..) | Pending::Range | Pending::Stack | Pending::Commits)
+                Some(
+                    Pending::Diff(..)
+                        | Pending::Range
+                        | Pending::Stack
+                        | Pending::Commits
+                        | Pending::CommitDetail
+                        | Pending::CommitStack
+                        | Pending::File
+                )
             )
         {
             return;
@@ -466,6 +569,14 @@ impl App {
                 self.repo.commits = None;
             }
             Some(Pending::Commits) => self.repo.commits = None,
+            Some(Pending::CommitDetail | Pending::File) => self.notice = Some(reason),
+            Some(Pending::CommitStack) => {
+                for ((group, _), file) in &mut self.repo.files {
+                    if *group == Group::Commit && file.diff.is_none() {
+                        file.error = Some(reason.clone());
+                    }
+                }
+            }
             Some(Pending::Stack) => {
                 for ((group, _), file) in &mut self.repo.files {
                     if *group == Group::Branch && file.diff.is_none() {
@@ -533,6 +644,20 @@ impl App {
                     side,
                 });
             }
+            None if group == Group::Commit => {
+                if let Some(commit) = &self.repo.commit {
+                    self.commands.push(CommandKind::LoadCommitStack {
+                        oid: commit.oid.clone(),
+                        files: commit.files.clone(),
+                    });
+                    for file in &commit.files {
+                        self.repo
+                            .files
+                            .entry((Group::Commit, file.path.clone()))
+                            .or_default();
+                    }
+                }
+            }
             // The branch's diff is one read for all its files (D237 (2)).
             None => {
                 if let Some(range) = &self.repo.range {
@@ -582,14 +707,44 @@ impl App {
             self.status_tree_mut().set(sections);
         }
         let repo = &self.repo;
+        let opened = Opened {
+            outdated: self.outdated_open,
+            comments: &self.opened,
+            threads: &self.expanded,
+        };
+        let mut wanted: Vec<(Group, String)> = Vec::new();
         for screen in self.stack.iter_mut() {
             match screen {
                 Screen::Threads { view, filter } => {
                     view.tree.set(review_screens::threads(repo, *filter));
                 }
                 Screen::Thread { view, page } => view.tree.set(page.sections(repo)),
+                Screen::Diff { view, kind } => {
+                    view.tree.set(diff_screen::diff(repo, kind, opened));
+                    let group = kind.group();
+                    wanted.extend(
+                        status::files_of(repo, group)
+                            .into_iter()
+                            .filter(|(path, ..)| !repo.files.contains_key(&(group, path.clone())))
+                            .map(|(path, ..)| (group, path)),
+                    );
+                }
+                Screen::File { view, path, keep } => {
+                    view.tree.set(diff_screen::file(repo, path, *keep));
+                    if let Some(line) =
+                        keep.filter(|_| repo.file.as_ref().is_some_and(|f| &f.path == path))
+                    {
+                        view.tree.move_to_id(&format!("line/{line}"));
+                        *keep = None;
+                    }
+                }
                 Screen::Status(_) | Screen::Keys(_) => {}
             }
+        }
+        // A diff screen's files are read once, together.
+        if let Some((group, path)) = wanted.into_iter().next() {
+            self.ask_diff(group, &path);
+            self.rebuild();
         }
         if let Some(id) = self.reveal {
             let card = self
@@ -828,8 +983,9 @@ impl App {
             // The Keys screen only moves, folds, searches and goes back.
             Screen::Keys(_) => moves,
             Screen::Threads { .. } => moves || threads || name.starts_with("filter."),
-            Screen::Thread { .. } => moves || threads,
-            Screen::Status(_) => !name.starts_with("filter."),
+            Screen::Thread { .. } => moves || threads || name == "file.open",
+            Screen::Diff { .. } | Screen::Status(_) => !name.starts_with("filter."),
+            Screen::File { .. } => moves || matches!(name, "open" | "go.threads" | "go.branch"),
         };
         if !allowed {
             return false;
@@ -861,6 +1017,7 @@ impl App {
             "thread.delete" | "thread.show" => thread.is_some(),
             "copy.reference" => current.and_then(Item::file).is_some(),
             "go.branch" => self.repo.range.is_some(),
+            "file.open" => self.current_file().is_some(),
             _ => true,
         }
     }
@@ -944,11 +1101,6 @@ impl App {
             "thread.reply" => self.open_reply(now),
             "thread.resolve" | "thread.reopen" | "thread.delete" => self.thread_write(name, now),
             "copy.reference" => self.copy_reference(),
-            "go.branch" => {
-                self.tree_mut().unfold("group/Branch");
-                self.rebuild();
-                self.tree_mut().move_to_id("group/Branch");
-            }
             "terminal.suspend" => self.requests.push(Request::Suspend),
             "terminal.redraw" => self.requests.push(Request::Redraw),
             "quit" => self.quit = true,
@@ -1104,6 +1256,26 @@ impl App {
     fn run_screen_action(&mut self, name: &str) -> bool {
         match name {
             "open" if self.on_thread_screen() => self.show_thread(),
+            "open" if self.edit_target().is_some() => {
+                if let Some((path, line)) = self.edit_target() {
+                    let path = std::path::Path::new(&self.repo.status.root).join(path);
+                    self.requests.push(Request::Edit {
+                        path: path.to_string_lossy().into_owned(),
+                        line,
+                    });
+                }
+            }
+            "open" if self.current_commit().is_some() => {
+                if let Some(oid) = self.current_commit() {
+                    self.open_diff(DiffKind::Commit(oid));
+                }
+            }
+            "go.branch" => self.open_diff(DiffKind::Branch),
+            "file.open" => {
+                if let Some((path, line)) = self.current_file() {
+                    self.open_file(path, line);
+                }
+            }
             "thread.show" => self.show_thread(),
             "go.threads" => {
                 self.stack.open(Screen::Threads {
@@ -1129,6 +1301,100 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// The file and line `Enter` opens in the editor: a line of a diff or of the File screen.
+    fn edit_target(&self) -> Option<(String, u32)> {
+        match &self.tree().current()?.item {
+            Item::Line { group, path, row } => {
+                let line = line_of(&self.repo, *group, path, *row)?;
+                Some((path.clone(), line.new_no.or(line.old_no)?))
+            }
+            Item::FileLine { index, .. } => {
+                let file = self.repo.file.as_ref()?;
+                Some((file.path.clone(), u32::try_from(index + 1).ok()?))
+            }
+            _ => None,
+        }
+    }
+
+    /// The full id of the commit at the cursor.
+    fn current_commit(&self) -> Option<String> {
+        let Item::Commit { index } = self.tree().current()?.item else {
+            return None;
+        };
+        let history = self.repo.commits.as_ref()?;
+        Some(history.commits.get(index)?.oid.clone())
+    }
+
+    /// The file `g f` opens, and the line to show: of the line, the file or the thread at the
+    /// cursor, or of the Thread screen's thread.
+    fn current_file(&self) -> Option<(String, Option<u32>)> {
+        if let Some(comment) = self.current_thread().and_then(|id| self.repo.comment(id)) {
+            return Some((comment.path.clone(), Some(review::shown_range(comment).0)));
+        }
+        let item = &self.tree().current()?.item;
+        let (_, path) = item.file()?;
+        let line = match item {
+            Item::Line { group, path, row } => {
+                line_of(&self.repo, *group, path, *row).and_then(|l| l.new_no)
+            }
+            _ => None,
+        };
+        Some((path.to_owned(), line))
+    }
+
+    /// Closes the screen at `address` (and those above it) when it is on the stack.
+    fn close_screens(&mut self, prefix: &str) {
+        if let Some(at) = self
+            .stack
+            .trail()
+            .iter()
+            .position(|address| address.starts_with(prefix))
+        {
+            self.stack.back_to(at);
+        }
+    }
+
+    /// Opens a Diff screen; it replaces the one on the stack, whose reads it would supersede.
+    fn open_diff(&mut self, kind: DiffKind) {
+        self.close_screens("diff/");
+        if let DiffKind::Commit(oid) = &kind
+            && self.repo.commit.as_ref().is_none_or(|c| &c.oid != oid)
+        {
+            self.repo.commit = None;
+            self.repo
+                .files
+                .retain(|(group, _), _| *group != Group::Commit);
+            self.commands
+                .push(CommandKind::LoadCommitDetail { oid: oid.clone() });
+        }
+        self.stack.open(Screen::Diff {
+            view: View::default(),
+            kind,
+        });
+        self.rebuild();
+    }
+
+    /// Opens the File screen of `path`, at `line`; it replaces the one on the stack.
+    fn open_file(&mut self, path: String, line: Option<u32>) {
+        self.close_screens("file/");
+        self.read_file(&path);
+        self.stack.open(Screen::File {
+            view: View::default(),
+            path,
+            keep: line,
+        });
+        self.rebuild();
+    }
+
+    /// Reads `path` and its two diffs, for the File screen's lines and marks.
+    fn read_file(&mut self, path: &str) {
+        self.commands.push(CommandKind::ReadFile {
+            path: path.to_owned(),
+        });
+        self.ask_diff(Group::Unstaged, path);
+        self.ask_diff(Group::Staged, path);
     }
 
     /// The thread actions act on: the Thread screen's, else the one at the cursor.
@@ -1931,5 +2197,163 @@ mod tests {
         // Show in diff goes back to Status.
         key(&mut app, "<space> g", now);
         assert_eq!(app.stack.trail(), ["status"]);
+    }
+
+    #[test]
+    fn the_branch_and_a_commit_open_on_the_diff_screen() {
+        let now = Instant::now();
+        let mut app = app();
+        app.sent(
+            OperationId(1),
+            &CommandKind::LoadBranchChange { base: None },
+        );
+        let file = gm_schema::CommitFile {
+            path: "src/lib.rs".to_owned(),
+            old_path: None,
+            change: gm_schema::Change::Modified,
+            added: 1,
+            deleted: 1,
+            binary: false,
+        };
+        app.apply(&Event::RevisionRangeLoaded {
+            id: OperationId(1),
+            range: gm_schema::RevisionRange {
+                from_name: "main".to_owned(),
+                to_name: "feature".to_owned(),
+                base: "b0".to_owned(),
+                tip: "t9".to_owned(),
+                files: vec![file.clone()],
+                ..gm_schema::RevisionRange::default()
+            },
+        });
+        app.take_commands();
+        key(&mut app, "<space> d b", now);
+        assert_eq!(app.stack.trail(), ["status", "diff/branch"]);
+        let asked = app.take_commands();
+        assert!(
+            matches!(asked.as_slice(), [CommandKind::LoadRevisionStack { files, .. }] if files.len() == 1),
+            "{asked:?}"
+        );
+        app.sent(OperationId(2), &asked[0]);
+        app.apply(&Event::RevisionStackLoaded {
+            id: OperationId(2),
+            diffs: vec![diff()],
+        });
+        let rows = shown(&app);
+        assert!(rows[0].contains("feature against main"), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("Hunk { group: Branch")),
+            "{rows:?}"
+        );
+        assert!(!app.applies("stage"), "read-only");
+        // A commit replaces the branch's diff on the stack.
+        let commit = gm_schema::CommitSummary {
+            oid: "c0ffee1234".to_owned(),
+            parents: Vec::new(),
+            short: "c0ffee1".to_owned(),
+            subject: "Tidy".to_owned(),
+            refs: Vec::new(),
+            author_time: 0,
+        };
+        app.sent(
+            OperationId(3),
+            &CommandKind::LoadHistory {
+                scope: gm_schema::HistoryScope::CurrentBranch,
+            },
+        );
+        app.apply(&Event::HistoryLoaded {
+            id: OperationId(3),
+            history: gm_schema::History {
+                commits: vec![commit],
+                unborn: false,
+                more: false,
+            },
+        });
+        key(&mut app, "q", now);
+        assert!(app.tree_mut().move_to_id("commit/0"));
+        key(&mut app, "<cr>", now);
+        assert_eq!(app.stack.trail(), ["status", "diff/c0ffee1"]);
+        let asked = app.take_commands();
+        assert_eq!(
+            asked,
+            [CommandKind::LoadCommitDetail {
+                oid: "c0ffee1234".to_owned()
+            }]
+        );
+        app.sent(OperationId(4), &asked[0]);
+        app.apply(&Event::CommitDetailLoaded {
+            id: OperationId(4),
+            detail: gm_schema::CommitDetail {
+                oid: "c0ffee1234".to_owned(),
+                short: "c0ffee1".to_owned(),
+                subject: "Tidy".to_owned(),
+                files: vec![file],
+                ..gm_schema::CommitDetail::default()
+            },
+        });
+        let asked = app.take_commands();
+        assert!(
+            matches!(asked.as_slice(), [CommandKind::LoadCommitStack { oid, .. }] if oid == "c0ffee1234"),
+            "{asked:?}"
+        );
+        assert!(texts(&app)[0].contains("c0ffee1 Tidy"), "{:?}", texts(&app));
+    }
+
+    #[test]
+    fn g_f_opens_the_file_at_the_line_and_enter_opens_the_editor_there() {
+        let now = Instant::now();
+        let mut app = app();
+        unfolded(&mut app, now);
+        key(&mut app, "<down> <down> <down> <down>", now); // the added line 4
+        key(&mut app, "g f", now);
+        assert_eq!(app.stack.trail(), ["status", "file/src/lib.rs"]);
+        let asked = app.take_commands();
+        assert!(
+            asked.contains(&CommandKind::ReadFile {
+                path: "src/lib.rs".to_owned()
+            }),
+            "{asked:?}"
+        );
+        let read = asked
+            .iter()
+            .position(|k| matches!(k, CommandKind::ReadFile { .. }))
+            .unwrap();
+        app.sent(OperationId(9), &asked[read]);
+        let text = (1..=30)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.apply(&Event::FileRead {
+            id: OperationId(9),
+            file: gm_schema::FileView {
+                path: "src/lib.rs".to_owned(),
+                size: 0,
+                body: gm_schema::FileBody::Text { text },
+                truncated: false,
+            },
+        });
+        // The cursor is on line 4; the unstaged diff marks it; the far lines are folded.
+        assert!(matches!(
+            app.tree().current().map(|s| &s.item),
+            Some(Item::FileLine {
+                index: 3,
+                mark: crate::status::Mark::Unstaged
+            })
+        ));
+        assert!(
+            shown(&app)
+                .iter()
+                .any(|r| r.starts_with("Unchanged { count: 23")),
+            "{:?}",
+            shown(&app)
+        );
+        key(&mut app, "<cr>", now);
+        assert_eq!(
+            app.take_requests(),
+            [Request::Edit {
+                path: "/repo/src/lib.rs".to_owned(),
+                line: 4
+            }]
+        );
     }
 }
