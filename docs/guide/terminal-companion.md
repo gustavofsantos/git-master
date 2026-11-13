@@ -30,7 +30,7 @@ The companion uses your terminal's colors, so it matches your terminal theme and
 
 ## Screens
 
-> **Planned.** **Blame**, **Origin** and **Agent thread** are not available yet.
+> **Planned.** **Agent thread** is not available yet.
 
 The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread/12`; click a step to go back to it.
 
@@ -97,6 +97,8 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 | `Enter` | Open what is at the cursor: a line in your editor, a thread, a commit's diff; on a section, fold or unfold it. |
 | `g f` | Open the whole file of the line, file or thread at the cursor on the **File** screen. |
 | `Space d b` | Open the branch's changes on the **Diff** screen. |
+| `g b` | Open who last changed each line of the file at the cursor on the **Blame** screen. |
+| `Space w` | Show how the selected lines, or the line, got where they are on the **Origin** screen. |
 | `q`, `Esc` | Close the menu, clear the selection, or go back one screen; on **Status**, `q` quits. |
 | `Space` | Open the menu. |
 | `?` | Open the **Keys** screen. |
@@ -136,11 +138,15 @@ Open **Threads** from the menu anywhere (`Space t`). It lists the review threads
 
 `Enter` on a line, on Status, Diff or File, opens the file at that line in `$VISUAL`, else `$EDITOR`, else `vi`. The companion hands the terminal to the editor and takes it back when the editor quits.
 
-> **Planned.** The screens below are not available yet.
+**Blame** (`g b` on a line, a file or a thread) shows the file as it is in your working tree, cut into runs of lines that one change last touched. Each run is a section headed by the commit, its subject, who made it and when, or **not committed** for lines you have not committed yet, staged or not. `Enter` on a run's heading opens the commit on the **Diff** screen; `Enter` on a line opens your editor there; `Space w` asks **Origin** about the line or the lines you selected.
 
-**Blame** shows, for each line, the change that last touched it and who made it: a person, or an agent and the thread it ran in, or **not committed** for your working tree. The section of a line tells its origin: the commit, the agent thread and its request.
+> **Planned.** A run made by an agent does not name the agent and its thread on Blame yet; `Space w` shows them on Origin.
 
-**Origin** answers how some lines got where they are, newest first: for each change, the request that led to it, the review thread it answered, the change itself, and the evidence, such as the tests the agent ran. Every result states how strongly it is tied to the code, as the app's [**Show Why This Code Is Here…**](threads.md#understand-why-code-is-the-way-it-is) does.
+**Origin** (`Space w` on a line or a selection, on Status, Diff, File or Blame) answers how those lines got where they are: each commit that last changed some of them, and under it the agent threads tied to it, with their edits and the requests and answers around each edit. Every thread and edit states how strongly it is tied to the code (a blob match, a line match, a hunk overlap, a commit made during the thread, a link you made), as the app's [**Show Why This Code Is Here…**](threads.md#understand-why-code-is-the-way-it-is) does, in the same words. `Enter` on a commit opens it on the **Diff** screen.
+
+> **Planned.** Origin does not yet show the review thread a change answered, nor the tests the agent ran; `Enter` on an agent thread does not open it yet.
+
+> **Planned.** The screen below is not available yet.
 
 **Agent thread** shows a captured agent session by sections: the **Request**, the **Decisions** (questions the agent asked you and your answers), the **Changes** to each file, the **Runs** of commands and how they ended, the **Files read**, and the **Timeline**.
 
