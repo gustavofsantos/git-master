@@ -1,11 +1,11 @@
 ---
 title: Command line
-description: The gitmaster command, the arguments it accepts, the subcommands that list and create worktrees and workspaces, and the ones that check and test workflow scripts.
+description: The gitmaster command, the arguments it accepts, the terminal companion, the subcommands that list and create worktrees and workspaces, and the ones that check and test workflow scripts.
 status: partial
 order: 30
 ---
 
-The `gitmaster` command opens the app. The worktree, workspace, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add`, `remove` and `include`, and `gitmaster workspace create`, `add` and `remove`, change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts.
+The `gitmaster` command opens the app. The worktree, workspace, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add`, `remove` and `include`, and `gitmaster workspace create`, `add` and `remove`, change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts. `gitmaster tui` runs GitMaster in the terminal until you quit it.
 
 ## Open a repository
 
@@ -20,7 +20,7 @@ gitmaster --version       # print the version and exit
 - With no argument, the app opens the repository that contains the current directory. Outside a repository, it opens the most recent repository that still exists.
 - With a path, the app opens the repository at that path. A relative path is resolved from the current directory.
 - `--version` prints `gitmaster` followed by the version number, then exits. When a preview feature is on, it also prints a `preview features:` line. See [Preview features](configuration.md#preview-features).
-- Any other single argument is taken as a path, so `--help` is not a help option. The words `worktree`, `workspace` and `workflow` are the subcommands below; to open a folder with one of those names, write `./worktree`, `./workspace` or `./workflow`.
+- Any other single argument is taken as a path, so `--help` is not a help option. The words `worktree`, `workspace`, `workflow` and `tui` are the subcommands below; to open a folder with one of those names, write `./worktree`, `./workspace`, `./workflow` or `./tui`.
 - Two or more arguments print `usage: gitmaster [PATH]` to the standard error and exit with status `2`.
 
 The theme is chosen with the `GITMASTER_THEME` environment variable, as described in [Configuration](configuration.md). Installation puts the command on your `PATH`, as described in [Installation](../getting-started/installation.md).
@@ -243,6 +243,18 @@ A member whose folder is gone prints `(missing)` as its branch, and the command 
 - A member whose folder is gone is pruned from its repository's worktree records.
 - It refuses a workspace whose member's repository is gone, even with `--force`, because Git cannot remove that member's worktree.
 - Members are removed one at a time. When one fails, the ones before it stay removed, the message says which failed, and the workspace folder is kept.
+
+## Terminal companion
+
+> **Planned.** `gitmaster tui` is not available yet.
+
+```sh
+gitmaster tui [PATH]
+```
+
+Runs GitMaster in the terminal, for reading, staging and commenting on the changes next to a coding agent. With no path it works on the repository that contains the current directory; a path is resolved as for the app. It opens no window and needs no display. It runs until you press `q`, then restores the terminal. See [Terminal companion](../guide/terminal-companion.md).
+
+The exit status is `0` after you quit, `1` when the repository cannot be opened or the terminal cannot be used (standard input or output is not a terminal), and `2` for a wrong command line.
 
 ## MCP server
 

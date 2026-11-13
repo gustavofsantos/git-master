@@ -61,6 +61,7 @@ GitMaster runs on Linux and macOS. Each release has prebuilt Linux binaries for 
 | Guide | [Code health](guide/code-health.md) | Hotspots, quiet files that wake up, files that change together. |
 | Guide | [Command palette](guide/command-palette.md) | Finding and running any action. |
 | Guide | [Threads](guide/threads.md) | Reading and searching your agent sessions. |
+| Guide | [Terminal companion](guide/terminal-companion.md) | Reading, staging and commenting on changes in a terminal next to your agent. |
 | Workflows | [Overview](workflows/overview.md) | Automating GitMaster with workflow scripts. |
 | Agents | [Agent integration](agents/agent-integration.md) | Capturing agent sessions as threads. |
 | Agents | [MCP server](agents/mcp-server.md) | Connecting an agent to the app. |

@@ -39,7 +39,7 @@ What an agent did is measured from the repository, by comparing its state before
 
 ## Local-first
 
-GitMaster is for one engineer on one machine. It has no account, and it has no headless, server or CI mode. The processes that run without a window are its command-line subcommands: `gitmaster mcp`, `gitmaster workflow`, `gitmaster thread` and `gitmaster harness`. They are started by you or by your agent, for the length of one command or one session. `gitmaster mcp` talks over standard input and output and opens no port and no socket.
+GitMaster is for one engineer on one machine. It has no account, and it has no headless, server or CI mode. It runs in three ways, each started by you or by your agent: in a window, in your terminal as the [terminal companion](../guide/terminal-companion.md), and as command-line subcommands. The terminal companion is interactive: it runs while you use it and ends when you quit. The processes that run without a window or a terminal screen are its command-line subcommands: `gitmaster mcp`, `gitmaster workflow`, `gitmaster thread` and `gitmaster harness`. They are started by you or by your agent, for the length of one command or one session. `gitmaster mcp` talks over standard input and output and opens no port and no socket.
 
 ## Self-contained
 
@@ -51,6 +51,6 @@ The app stays smooth and fast as repositories grow. Long lists draw only the row
 
 ## What GitMaster is not
 
-- **A server or a CI tool.** There is no headless, server or CI mode. GitMaster runs in a window on your machine. The MCP server is started by your agent, for the length of its session, and listens on nothing.
+- **A server or a CI tool.** There is no headless, server or CI mode. GitMaster runs on your machine, in a window, in your terminal or as a command you run. The MCP server is started by your agent, for the length of its session, and listens on nothing.
 - **A web or JavaScript front end.** The interface is native and is not built with web or JavaScript technology.
 - **A host for plugins loaded as dynamic libraries.** Extensions run as separate processes, or as workflow scripts.

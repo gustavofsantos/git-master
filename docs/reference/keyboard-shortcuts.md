@@ -11,6 +11,8 @@ The **Status** column shows which keys work in the app. Each row is either imple
 
 Actions without a shortcut on this page can be run from the [command palette](../guide/command-palette.md).
 
+The [terminal companion](../guide/terminal-companion.md) has keys of its own, listed on its page.
+
 ## Global
 
 | Action | Linux and Windows | macOS | Status |

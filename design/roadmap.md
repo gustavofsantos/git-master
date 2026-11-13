@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-11-11 (slice 6h, code health, planned, D225; before that, 2026-11-10: slice S5 of 8s done, D221; before that, slice S4 of 8s done, D220; before that, slice 8s S1 to S3 done; slice 8r is replaced by slice 8s, D219; before that, 2026-11-07: M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-13 (slice T, terminal companion, planned, D235; before that, 2026-11-11: slice 6h, code health, planned, D225; before that, 2026-11-10: slice S5 of 8s done, D221; before that, slice S4 of 8s done, D220; before that, slice 8s S1 to S3 done; slice 8r is replaced by slice 8s, D219; before that, 2026-11-07: M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -947,6 +947,21 @@ Known gaps: nothing was seen in a window and no smoke scenario was written or ru
 ## Review reply threads (D198: done 2026-11-07, with gaps)
 
 A reply is a review comment with a parent, and the agent's summary is its reply (review store v4 migrates the existing summaries). The MCP tool `review_comment_reply` writes a reply, and the app shows each thread under its comment on the Local review page and in the Working Copy diff, with a Reply box on the Local review page. Known gaps: in the diff, Reply opens the composer dialog, not an inline box, because a diff row cannot hold a growing text area; no palette action; `scripts/ui-smoke.sh` does not cover replies; the `ai/` plugin skill does not name `review_comment_reply` yet. Nothing was seen in a window.
+
+## Slice T: terminal companion (planned 2026-11-13; D235)
+
+Requested by the author on 2026-11-13: GitMaster in a terminal pane next to Claude Code in tmux, as a code-review companion. Behaviour in `docs/guide/terminal-companion.md` (`status: planned`) and the `gitmaster tui` section of `docs/reference/cli.md`. Each slice is one brief; every engine command it needs exists already.
+
+1. **T0, docs and decision (done 2026-11-13):** the guide page, the CLI section, the principles (window, terminal or CLI), D235, `architecture.md`, the crate table in `AGENTS.md`.
+2. **T1, `gm-view` (to do):** move the GPUI-free diff rows, line selection and review model from `gm-ui` into `gm-view` (depends on `gm-schema` only); `gm-ui` uses it; its tests move with it. No behaviour change.
+3. **T2, skeleton (to do):** crate `gm-tui` (ratatui, crossterm); `gitmaster tui [PATH]` dispatched before GPUI starts; raw mode, alternate screen and mouse capture, restored on exit and on panic; the engine and the watcher started; file list in **Unstaged** and **Staged** groups; status bar; `q`; the size rules (80x24 minimum, one pane below 100 columns).
+4. **T3, diff view (to do):** the diff of the selected row, its side from its group; cursor, scrolling, wheel, clicks; only visible rows are built.
+5. **T4, staging (to do):** file, hunk and line-range staging by key (`s`, `u`, `v`) and by mouse (drag, **[stage]**, the selection bar); one `Lines` target per hunk; refresh through the watcher.
+6. **T5, comments (to do):** comment box (`Ctrl+S`, `Esc`), `AddReviewComment` on the unstaged side and `AddReviewCommentByText` on the staged side, removed-only selections refused; comments drawn inline with their badge and replies; the comments list (`C`).
+7. **T6, threads and the agent loop (to do):** reply, resolve, reopen, delete; the view refreshes when `gitmaster mcp` in another process changes the review store (check whether the watcher already sees `.git/gitmaster/` writes; add it if not).
+8. **T7, smoke (to do):** `scripts/tui-smoke.sh` drives `gitmaster tui` inside a private tmux server (`send-keys`, SGR mouse sequences, `capture-pane`) and checks the result with `git` and the review store; `make check` stays free of tmux.
+
+**Done when:** in tmux, with the mouse, a person stages a line range, comments on another, an agent over MCP handles the comment and the companion shows it **Handled** without a key press; the page's `Planned` marker is removed; `make check` passes.
 
 ## Slice 9: premium polish
 

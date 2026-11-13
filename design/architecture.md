@@ -1,20 +1,24 @@
 # Architecture
 
-Last updated: 2026-10-29. The status of each decision is in `design/decisions.md`.
+Last updated: 2026-11-13. The status of each decision is in `design/decisions.md`.
 
 ## Overview (D08, decided)
 
 One engine, two front ends (GPUI and MCP). Dependencies point inward (hexagonal architecture, ports and adapters).
 
 ```
-gm-ui (GPUI)          gm-mcp (stdio JSON-RPC, own process)
-      \                    /
-            gm-core
-   (engine, ports and their adapters:
-    git subprocess, hooks, SQLite stores)
+gm-ui (GPUI)     gm-tui (ratatui)     gm-mcp (stdio JSON-RPC, own process)
+      \                |                  /
+       \            gm-view              /
+        \   (GPUI-free view models)     /
+                     gm-core
+        (engine, ports and their adapters:
+         git subprocess, hooks, SQLite stores)
 
-gm-schema: shared types (serde + JSON Schema) for UI, MCP and hooks
+gm-schema: shared types (serde + JSON Schema) for UI, TUI, MCP and hooks
 ```
+
+The terminal companion (`gm-tui`, `gitmaster tui`, D235) is a third front end. Like `gitmaster mcp` it runs its own engine on the repository and shares only the files in `.git/gitmaster/`. The view models it shares with `gm-ui` (diff rows, line selection, the review model) live in `gm-view`, which depends on `gm-schema` only and never on GPUI or ratatui.
 
 The core defines the traits (`GitPort` and the others), and the adapters live in `gm-core` too. D27 allows extracting them into `gm-git`, `gm-hooks` and `gm-store` when the core grows heavy; until then "the UI never imports the Git adapter" is a convention. The core is tested with fakes, without a real repository.
 

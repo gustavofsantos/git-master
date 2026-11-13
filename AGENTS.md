@@ -69,6 +69,8 @@ Hexagonal: dependencies point inward to the engine. Details and rules in `design
 | `gm-schema` | Shared types (commands, events, operation state, status); serde and JSON Schema. No logic that needs I/O. |
 | `gm-core` | The engine: commands in, events out; `GitPort` and its adapters (subprocess `git` first); hooks; watcher; history, diff, worktrees. Testable with fakes, no window, no real repository needed. |
 | `gm-ui` | GPUI front end: pure models and view state kept apart from GPUI elements so logic is tested without a window. Action registry, palette, context menus, diff and history views. |
+| `gm-view` | GPUI-free view models shared by the front ends (diff rows, line selection, review model). Depends on `gm-schema` only. |
+| `gm-tui` | Terminal front end (ratatui, crossterm), started by `gitmaster tui`. |
 | `gm-mcp` | MCP front end over the same engine handle as the UI. |
 | `gitmaster` | Thin binary, the composition root. |
 
