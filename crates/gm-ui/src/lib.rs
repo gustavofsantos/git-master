@@ -53,7 +53,7 @@ mod open_window;
 mod palette;
 mod palette_view;
 mod project_menu;
-mod provenance_view;
+
 mod quick_open;
 mod quick_open_view;
 mod recent;
@@ -130,7 +130,7 @@ mod worktree_remove;
 // and `crate::review` paths of the front end.
 use gm_core::EngineHandle;
 use gm_core::command_log::CommandLog;
-use gm_view::{diff_rows, local_review, review, review_scorecards};
+use gm_view::{diff_rows, local_review, provenance_view, review, review_scorecards};
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, actions, px, size,

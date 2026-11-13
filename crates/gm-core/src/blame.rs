@@ -34,6 +34,16 @@ struct Pending {
 /// Parses the output of `git blame --line-porcelain`. A line Git has not committed yet (an
 /// all-zero id) is left out: no commit owns it.
 pub fn parse_line_porcelain(raw: &[u8]) -> Result<Vec<BlameLine>, String> {
+    parse(raw, false)
+}
+
+/// Parses the output of `git blame --line-porcelain` of a whole file, keeping the lines Git
+/// has not committed yet: their commit is the all-zero id (see `is_uncommitted`).
+pub fn parse_line_porcelain_all(raw: &[u8]) -> Result<Vec<BlameLine>, String> {
+    parse(raw, true)
+}
+
+fn parse(raw: &[u8], keep_uncommitted: bool) -> Result<Vec<BlameLine>, String> {
     let text = String::from_utf8_lossy(raw);
     let mut lines = Vec::new();
     let mut pending: Option<Pending> = None;
@@ -42,7 +52,7 @@ pub fn parse_line_porcelain(raw: &[u8]) -> Result<Vec<BlameLine>, String> {
             let Some(head) = pending.take() else {
                 return Err("blame printed content before a header".to_owned());
             };
-            if !is_uncommitted(&head.commit) {
+            if keep_uncommitted || !is_uncommitted(&head.commit) {
                 lines.push(BlameLine {
                     line: head.line,
                     commit: head.commit,
@@ -97,7 +107,7 @@ fn start_of_line(row: &str) -> Option<u32> {
     }
 }
 
-fn is_uncommitted(commit: &str) -> bool {
+pub fn is_uncommitted(commit: &str) -> bool {
     commit.bytes().all(|byte| byte == b'0')
 }
 

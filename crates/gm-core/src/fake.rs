@@ -647,6 +647,16 @@ impl GitPort for FakeGit {
         }))
     }
 
+    fn blame_file(&self, _root: &Path, _path: &str) -> Result<BlameRead, GitError> {
+        let lines = self.blame.lock().unwrap().clone();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            if stop.load(Ordering::SeqCst) {
+                return Err(GitError("the blame was superseded".into()));
+            }
+            lines
+        }))
+    }
+
     fn blob_at_commit(
         &self,
         _root: &Path,

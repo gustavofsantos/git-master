@@ -9,7 +9,7 @@ use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
 use crate::files::{DirListing, FileSearch, FileView};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::health::{HealthProgress, HealthReport};
-use crate::history::{CommitDetail, CommitFile, History, HistoryScope};
+use crate::history::{BlameEntry, CommitDetail, CommitFile, History, HistoryScope};
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
@@ -139,6 +139,13 @@ pub enum CommandKind {
     /// commit the list holds. Never recorded in the command log (D28).
     LoadHistoryPage {
         after: String,
+    },
+    /// Reads who last changed each line of `path` in the working tree (`git blame
+    /// --line-porcelain -M`), the lines not committed yet included (the terminal companion's
+    /// Blame screen, D247). Answers `BlameLoaded`. Never recorded in the command log (D28).
+    /// A request in flight is superseded by the next one.
+    LoadBlame {
+        path: String,
     },
     /// Reads what commit `oid` changed: its header and its files, against
     /// the first parent. Never recorded in the command log (D28). A request
@@ -1396,6 +1403,12 @@ pub enum Event {
     CommitDetailLoaded {
         id: OperationId,
         detail: CommitDetail,
+    },
+    /// Answers `LoadBlame`: one entry per line of `path`, in order.
+    BlameLoaded {
+        id: OperationId,
+        path: String,
+        lines: Vec<BlameEntry>,
     },
     /// Answers `LoadCommitStack`: one diff per listed file, in the same order.
     CommitStackLoaded {

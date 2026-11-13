@@ -1628,8 +1628,10 @@ impl Model {
         | Event::ScorecardsListed { .. }
         // A branch intent is read by the window from S5 on; the model keeps none yet (D215).
         | Event::BranchDescriptionRead { .. }
-        // Line counts are read by the terminal companion; the window does not ask (D236 (8)).
-        | Event::ChangeStatsLoaded { .. } => None,
+        // Line counts and whole-file blame are read by the terminal companion; the window does
+        // not ask (D236 (8), D247).
+        | Event::ChangeStatsLoaded { .. }
+        | Event::BlameLoaded { .. } => None,
             // A suggestion for a hunk of the file the resolver shows; the card offers it (D168).
             Event::HunkSuggested { .. } => {
                 if let Some(conflict) = self.conflict.as_mut() {
@@ -2034,6 +2036,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::GateStarted { id, .. }
         | Event::DiffLoaded { id, .. }
         | Event::ChangeStatsLoaded { id, .. }
+        | Event::BlameLoaded { id, .. }
         | Event::Committed { id, .. }
         | Event::BranchesLoaded { id, .. }
         | Event::StacksLoaded { id, .. }

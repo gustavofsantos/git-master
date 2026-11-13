@@ -18,7 +18,7 @@ use gm_schema::{
 use gm_schema::{resolve_kind, resolve_severity};
 
 use crate::GitPort;
-use crate::blame::BlameLine;
+use crate::blame::{self, BlameLine};
 use crate::branch;
 use crate::combination;
 use crate::commit_detail::{DetailJob, DetailReport};
@@ -153,6 +153,8 @@ pub struct Engine {
     text_jobs: Vec<TextJob>,
     /// The blame of the provenance read in flight (D144), if any.
     provenance: Option<ActiveDetail>,
+    /// The whole-file blame in flight (D247); it runs as a provenance job.
+    blame: Option<ActiveDetail>,
     /// Provenance reads accepted since the last call; see `take_provenance_jobs`.
     provenance_jobs: Vec<ProvenanceJob>,
     /// The code health read in flight (D225), if any.
@@ -387,6 +389,7 @@ impl Engine {
             text_search: None,
             text_jobs: Vec::new(),
             provenance: None,
+            blame: None,
             provenance_jobs: Vec::new(),
             health: None,
             health_jobs: Vec::new(),
@@ -2269,6 +2272,12 @@ impl Engine {
     /// Turns the blame of a provenance read into its answer (D144). A report for a read that was
     /// superseded, or for a repository that was left, is dropped.
     pub fn provenance_report(&mut self, report: ProvenanceReport) -> Vec<Event> {
+        if let Some(active) = self.blame.take() {
+            if active.op.id == report.id {
+                return Self::blame_report(&active, report);
+            }
+            self.blame = Some(active);
+        }
         match self.provenance.take() {
             Some(active) if active.op.id == report.id => {
                 let CommandKind::ReadProvenance {
@@ -2546,6 +2555,7 @@ impl Engine {
                 from_line,
                 to_line,
             } => self.start_provenance(id, actor, kind, path, *from_line, *to_line),
+            CommandKind::LoadBlame { path } => self.start_blame(id, actor, kind, path),
             _ => return None,
         })
     }
@@ -3416,6 +3426,96 @@ impl Engine {
         });
         self.provenance_jobs.push(ProvenanceJob { id, read, stop });
         Ok(superseded)
+    }
+
+    /// Starts the blame of a whole file (D247), as a provenance job. A blame in flight is
+    /// superseded: it is stopped and cancelled.
+    fn start_blame(
+        &mut self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        path: &str,
+    ) -> Result<Vec<Event>, String> {
+        if path.is_empty() || path.starts_with('-') {
+            return Err("Choose a file to blame.".to_owned());
+        }
+        let root = self.open_root()?;
+        let read = self.git.blame_file(&root, path).map_err(|e| e.0)?;
+        let superseded = self.drop_blame();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.blame = Some(ActiveDetail {
+            op: ActiveHistory {
+                id,
+                actor: actor.clone(),
+                kind: kind.clone(),
+            },
+            stop: Arc::clone(&stop),
+        });
+        self.provenance_jobs.push(ProvenanceJob { id, read, stop });
+        Ok(superseded)
+    }
+
+    /// Ends the whole-file blame: it is stopped, and a request in flight is cancelled.
+    fn drop_blame(&mut self) -> Vec<Event> {
+        let Some(active) = self.blame.take() else {
+            return Vec::new();
+        };
+        active.stop.store(true, Ordering::SeqCst);
+        vec![Self::operation_changed(
+            &active.op,
+            OperationState::Cancelled,
+            None,
+        )]
+    }
+
+    /// Turns the lines of a whole-file blame into its answer (D247).
+    fn blame_report(active: &ActiveDetail, report: ProvenanceReport) -> Vec<Event> {
+        let CommandKind::LoadBlame { path } = &active.op.kind else {
+            return vec![Self::operation_changed(
+                &active.op,
+                OperationState::Failed,
+                None,
+            )];
+        };
+        match report.lines {
+            Ok(lines) => vec![
+                Self::operation_changed(&active.op, OperationState::Done, None),
+                Event::BlameLoaded {
+                    id: report.id,
+                    path: path.clone(),
+                    lines: lines
+                        .into_iter()
+                        .map(|line| {
+                            // Git names a line not committed yet with made-up fields; they
+                            // are left empty here.
+                            let committed = !blame::is_uncommitted(&line.commit);
+                            gm_schema::BlameEntry {
+                                line: line.line,
+                                commit: committed.then_some(line.commit),
+                                author: if committed {
+                                    line.author
+                                } else {
+                                    String::new()
+                                },
+                                author_at: if committed { line.author_at } else { 0 },
+                                subject: if committed {
+                                    line.subject
+                                } else {
+                                    String::new()
+                                },
+                                text: line.text,
+                            }
+                        })
+                        .collect(),
+                },
+            ],
+            Err(message) => vec![Self::operation_changed(
+                &active.op,
+                OperationState::Failed,
+                Some(message),
+            )],
+        }
     }
 
     /// Ends the provenance read: it is stopped, and a request in flight is cancelled.
@@ -4383,6 +4483,7 @@ impl Engine {
         events.extend(self.drop_tags());
         events.extend(self.drop_files());
         events.extend(self.drop_provenance());
+        events.extend(self.drop_blame());
         events.extend(self.drop_health());
         self.health_cache = None;
         // A resolution belongs to the repository it was started in. Its worktree is left for
@@ -6237,6 +6338,7 @@ impl Engine {
                 | CommandKind::SearchThreads { .. }
                 | CommandKind::ReadThread { .. }
                 | CommandKind::ReadProvenance { .. }
+                | CommandKind::LoadBlame { .. }
                 | CommandKind::LoadHealth { .. }
                 | CommandKind::ReadThreadEdit { .. }
                 | CommandKind::ReadThreadMarkdown { .. }

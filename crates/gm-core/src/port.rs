@@ -741,6 +741,13 @@ pub trait GitPort: Send {
         Err(GitError("blame is not supported by this adapter".into()))
     }
 
+    /// Starts the blame of the whole of `path` as the working tree holds it: `git blame
+    /// --line-porcelain -M`, the lines not committed yet kept with the all-zero id. Starts
+    /// nothing but the returned read. Never records anything (D28).
+    fn blame_file(&self, _root: &Path, _path: &str) -> Result<BlameRead, GitError> {
+        Err(GitError("blame is not supported by this adapter".into()))
+    }
+
     /// The blob id of `path` in commit `oid`, or `None` when the commit has no such
     /// file. Lists the tree and reads nothing else. Never records anything (D28).
     fn blob_at_commit(

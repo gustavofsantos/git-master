@@ -1764,6 +1764,19 @@ impl GitPort for SubprocessGit {
         }))
     }
 
+    fn blame_file(&self, root: &Path, path: &str) -> Result<BlameRead, GitError> {
+        let git = self.clone();
+        let root = root.to_path_buf();
+        let path = path.to_owned();
+        Ok(Box::new(move |stop: &AtomicBool| {
+            // `-M` follows lines moved within the file; `-C`, across files, is left to the
+            // provenance read of a few lines (D144), as it costs much more on a whole file.
+            let args = ["blame", "--line-porcelain", "-M", "--", path.as_str()];
+            let raw = git.run_stoppable(&root, &args, stop)?;
+            blame::parse_line_porcelain_all(&raw).map_err(GitError)
+        }))
+    }
+
     fn commit_presence(&self, root: &Path, oid: &str) -> Result<CommitPresence, GitError> {
         let id = object_id_arg(oid)?;
         let mut exists = self.git(root);

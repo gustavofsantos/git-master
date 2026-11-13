@@ -43,7 +43,7 @@ pub use health::{
     age_bucket,
 };
 pub use history::{
-    CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History,
+    BlameEntry, CommitDetail, CommitFile, CommitSummary, DETAIL_FILE_LIMIT, HISTORY_PAGE, History,
     HistoryScope, RefKind, RefLabel,
 };
 pub use move_changes::{MoveBlocker, MoveOutcome, MovePreview, MoveTarget};

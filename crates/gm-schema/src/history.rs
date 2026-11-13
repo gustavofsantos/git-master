@@ -100,6 +100,23 @@ pub struct CommitDetail {
     pub more_files: usize,
 }
 
+/// Who last changed one line of a file in the working tree, as `LoadBlame` answers it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BlameEntry {
+    /// 1-based line number in the working tree file.
+    pub line: u32,
+    /// Full id of the commit that last changed the line; `None` when the line is not
+    /// committed yet.
+    pub commit: Option<String>,
+    pub author: String,
+    /// The author date, in milliseconds since the Unix epoch.
+    pub author_at: i64,
+    /// The subject of the commit; empty when the line is not committed.
+    pub subject: String,
+    /// The line's content, without its line break.
+    pub text: String,
+}
+
 /// One file changed by a commit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CommitFile {
