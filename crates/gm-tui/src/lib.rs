@@ -6,6 +6,10 @@ mod app;
 mod color;
 mod diff;
 mod icons;
+// Temporary: the navigator's core lands before the screens use it; the wiring commit of M0
+// removes this allow (design/roadmap.md, M0).
+#[allow(dead_code)]
+mod nav;
 mod render;
 mod render_diff;
 mod render_reviews;
