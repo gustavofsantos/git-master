@@ -29,6 +29,11 @@ pub fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     let header_area = Rect { height: 1, ..area };
+    // What the diff compares: the side, or for the branch, the branch against its base.
+    let scope = match (view.context, app.range.as_ref()) {
+        (Context::Branch, Some(range)) => format!("{} against {}", range.to_name, range.from_name),
+        (context, _) => context.title().to_lowercase(),
+    };
     if view.anchor.is_some() {
         let mut strip = Strip::new(header_area);
         selection_header(view, &mut strip);
@@ -36,7 +41,7 @@ pub fn draw_diff(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(Line::from(spans)), header_area);
         app.hits.extend(buttons);
     } else {
-        frame.render_widget(Paragraph::new(header(view)), header_area);
+        frame.render_widget(Paragraph::new(header(view, &scope)), header_area);
     }
     let body = Rect {
         y: area.y + 1,
@@ -143,7 +148,7 @@ fn diff_row(
     }
 }
 
-fn header(view: &DiffView) -> Line<'static> {
+fn header(view: &DiffView, scope: &str) -> Line<'static> {
     let mut spans = vec![Span::styled(view.path.clone(), BOLD)];
     if view.diff.is_some() {
         let (added, removed) = view.counts();
@@ -160,10 +165,7 @@ fn header(view: &DiffView) -> Line<'static> {
             spans.push(Span::styled(format!(" · hunk {}/{hunks}", hunk + 1), DIM));
         }
     }
-    spans.push(Span::styled(
-        format!(" · {}", view.context.title().to_lowercase()),
-        DIM,
-    ));
+    spans.push(Span::styled(format!(" · {scope}"), DIM));
     Line::from(spans)
 }
 
@@ -173,16 +175,20 @@ fn selection_header(view: &DiffView, strip: &mut Strip<'static>) {
     if let Some(label) = view.selection_label() {
         strip.text(format!(" · {label}  "), Style::new().fg(Color::Blue));
     }
-    let (label, color) = match view.context {
-        Context::Unstaged => ("[stage lines]", Color::Green),
-        Context::Staged => ("[unstage lines]", Color::Yellow),
-    };
     strip
         .button("[comment]", Style::new().fg(Color::Blue), Action::Comment)
-        .text(" ", Style::new())
-        .button(label, Style::new().fg(color), Action::StageSelection)
-        .text(" ", Style::new())
-        .button("[clear]", DIM, Action::ClearSelection);
+        .text(" ", Style::new());
+    let stage = match view.context {
+        Context::Unstaged => Some(("[stage lines]", Color::Green)),
+        Context::Staged => Some(("[unstage lines]", Color::Yellow)),
+        Context::Branch => None,
+    };
+    if let Some((label, color)) = stage {
+        strip
+            .button(label, Style::new().fg(color), Action::StageSelection)
+            .text(" ", Style::new());
+    }
+    strip.button("[clear]", DIM, Action::ClearSelection);
 }
 
 /// What shows in place of the lines, if anything.
@@ -214,11 +220,15 @@ fn hunk_bar(view: &DiffView, hunk_index: usize, area: Rect, hits: &mut Vec<Hit>)
         hunk.header.trim().to_owned()
     };
     strip.text(title, BOLD).text("  ", Style::new());
-    let (label, color) = match view.context {
-        Context::Unstaged => ("[stage]", Color::Green),
-        Context::Staged => ("[unstage]", Color::Yellow),
+    let stage = match view.context {
+        Context::Unstaged => Some(("[stage]", Color::Green)),
+        Context::Staged => Some(("[unstage]", Color::Yellow)),
+        // The branch's diff is read-only (D237).
+        Context::Branch => None,
     };
-    strip.button(label, Style::new().fg(color), Action::StageHunk(hunk_index));
+    if let Some((label, color)) = stage {
+        strip.button(label, Style::new().fg(color), Action::StageHunk(hunk_index));
+    }
     let (spans, buttons) = strip.into_parts();
     hits.extend(buttons);
     Line::from(spans)

@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use gm_schema::{
-    Change, ChangeStats, CommandKind, Event, LineCounts, OperationId, OperationState, RepoStatus,
-    ReviewAuthorFilter, ReviewComment, ReviewStatus, StageTarget, StatusEntry,
+    Change, ChangeStats, CommandKind, Event, OperationId, OperationState, RepoStatus,
+    ReviewAuthorFilter, ReviewComment, ReviewStatus, RevisionRange, StageTarget, StatusEntry,
 };
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -30,6 +30,8 @@ pub const SPLIT_MIN_WIDTH: u16 = 100;
 /// Smaller than this, only a message shows (D235 (9)).
 pub const MIN_WIDTH: u16 = 80;
 pub const MIN_HEIGHT: u16 = 24;
+/// Why the branch's diff has no staging.
+const READ_ONLY: &str = "The branch's changes are committed: there is nothing to stage.";
 /// Rows a turn of the mouse wheel scrolls.
 const WHEEL_ROWS: usize = 3;
 
@@ -61,36 +63,55 @@ impl Tab {
     }
 }
 
-/// What the sidebar lists: the changes not staged yet, or the staged ones (D236 (3)).
+/// What the sidebar lists: the changes not staged yet, the staged ones (D236 (3)), or the
+/// changes of the branch's commits against its base (D237).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Context {
     Unstaged,
     Staged,
+    Branch,
 }
 
 impl Context {
-    pub const ALL: [Context; 2] = [Context::Unstaged, Context::Staged];
+    pub const ALL: [Context; 3] = [Context::Unstaged, Context::Staged, Context::Branch];
 
     pub fn title(self) -> &'static str {
         match self {
             Context::Unstaged => "Unstaged",
             Context::Staged => "Staged",
+            Context::Branch => "Branch",
         }
     }
 
-    pub fn other(self) -> Context {
+    /// The context `t` goes to.
+    pub fn next(self) -> Context {
         match self {
             Context::Unstaged => Context::Staged,
-            Context::Staged => Context::Unstaged,
+            Context::Staged => Context::Branch,
+            Context::Branch => Context::Unstaged,
         }
+    }
+
+    /// Whether the context's changes can be staged or unstaged: the branch's are committed.
+    pub fn stages(self) -> bool {
+        self != Context::Branch
     }
 
     fn index(self) -> usize {
         match self {
             Context::Unstaged => 0,
             Context::Staged => 1,
+            Context::Branch => 2,
         }
     }
+}
+
+/// A changed file of one context, before the sidebar groups it by folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changed {
+    pub path: String,
+    pub letter: char,
+    pub counts: Option<(u32, u32)>,
 }
 
 /// The pane that has the keyboard.
@@ -255,6 +276,7 @@ fn files_of(status: &RepoStatus, context: Context) -> Vec<(&StatusEntry, char)> 
                 Context::Unstaged => entry.unstaged.map(change_letter),
                 Context::Staged if entry.conflicted => None,
                 Context::Staged => entry.staged.map(change_letter),
+                Context::Branch => None,
             }?;
             Some((entry, letter))
         })
@@ -285,19 +307,14 @@ fn split_path(path: &str) -> (&str, &str) {
 /// The sidebar rows: one folder row for each folder with changed files directly in it, in
 /// path order with the root last, each followed by its files unless it is folded.
 pub fn sidebar_rows(
-    status: &RepoStatus,
-    context: Context,
-    counts: &[LineCounts],
+    files: &[Changed],
     comments: &[ReviewComment],
     folded: &BTreeSet<String>,
 ) -> Vec<Row> {
     let mut dirs: BTreeMap<&str, Vec<FileItem>> = BTreeMap::new();
-    for (entry, letter) in files_of(status, context) {
+    for entry in files {
         let (dir, name) = split_path(&entry.path);
-        let counts = counts
-            .iter()
-            .find(|counts| counts.path == entry.path)
-            .map(|counts| (counts.added, counts.deleted));
+        let (letter, counts) = (entry.letter, entry.counts);
         let threads = comments
             .iter()
             .filter(|comment| {
@@ -365,7 +382,19 @@ pub struct App {
     /// away from the cursor until the cursor moves again.
     follow_cursor: bool,
     /// The file shown in the main pane, per context.
-    selected: [Option<String>; 2],
+    selected: [Option<String>; 3],
+    /// The branch's changes against its base, as last read (D237).
+    pub range: Option<RevisionRange>,
+    /// Why the branch's changes could not be read: on the default branch, no common
+    /// ancestor, no default branch.
+    pub range_error: Option<String>,
+    /// The read of the branch's changes in flight.
+    range_request: Option<OperationId>,
+    /// The branch and commit HEAD was on when the branch's changes were last asked for.
+    range_head: Option<(Option<String>, Option<String>)>,
+    /// The diffs of the branch's files, read in one go for the range from `base` to `tip`,
+    /// so moving between them reads nothing again.
+    branch_diffs: Option<((String, String), Vec<gm_schema::FileDiff>)>,
     folded: BTreeSet<String>,
     /// The box that writes a comment or a reply, while it is open.
     pub composer: Option<Composer>,
@@ -407,7 +436,12 @@ impl App {
             quit: false,
             dirty: true,
             follow_cursor: true,
-            selected: [None, None],
+            selected: [None, None, None],
+            range: None,
+            range_error: None,
+            range_request: None,
+            range_head: None,
+            branch_diffs: None,
             folded: BTreeSet::new(),
             diff: None,
             generation: 0,
@@ -435,7 +469,46 @@ impl App {
 
     /// The number of files `context` lists.
     pub fn file_count(&self, context: Context) -> usize {
-        files_of(&self.status, context).len()
+        match context {
+            Context::Branch => self
+                .range
+                .as_ref()
+                .map_or(0, |range| range.files.len() + range.more_files),
+            _ => files_of(&self.status, context).len(),
+        }
+    }
+
+    /// The changed files `context` lists, with their letters and counts.
+    pub fn changed(&self, context: Context) -> Vec<Changed> {
+        if context == Context::Branch {
+            let files = self
+                .range
+                .as_ref()
+                .map_or(&[][..], |range| range.files.as_slice());
+            return files
+                .iter()
+                .map(|file| Changed {
+                    path: file.path.clone(),
+                    letter: change_letter(file.change),
+                    counts: (!file.binary).then_some((file.added, file.deleted)),
+                })
+                .collect();
+        }
+        let counts = match context {
+            Context::Staged => &self.stats.staged,
+            _ => &self.stats.unstaged,
+        };
+        files_of(&self.status, context)
+            .into_iter()
+            .map(|(entry, letter)| Changed {
+                path: entry.path.clone(),
+                letter,
+                counts: counts
+                    .iter()
+                    .find(|counts| counts.path == entry.path)
+                    .map(|counts| (counts.added, counts.deleted)),
+            })
+            .collect()
     }
 
     /// The threads that are not resolved.
@@ -460,7 +533,10 @@ impl App {
     /// must show.
     pub fn sent(&mut self, id: OperationId, kind: &CommandKind) {
         match kind {
-            CommandKind::LoadDiff { .. } => self.diff_request = Some(id),
+            CommandKind::LoadDiff { .. } | CommandKind::LoadRevisionStack { .. } => {
+                self.diff_request = Some(id);
+            }
+            CommandKind::LoadBranchChange { .. } => self.range_request = Some(id),
             CommandKind::Stage { .. } => {
                 self.writes.insert(id, "Staging");
             }
@@ -532,7 +608,19 @@ impl App {
                 self.rebuild();
                 self.relayout();
             }
-            Event::DiffLoaded { side, diff, .. } => self.diff_loaded(*side, diff),
+            Event::DiffLoaded { side, diff, .. } => self.diff_loaded(Some(*side), diff),
+            Event::RevisionRangeLoaded { id, range } if self.range_request == Some(*id) => {
+                self.range = Some(range.clone());
+                self.range_error = None;
+                self.range_loaded();
+            }
+            Event::RevisionStackLoaded { id, diffs } if self.diff_request == Some(*id) => {
+                if let Some(range) = self.range.as_ref() {
+                    let ends = (range.base.clone(), range.tip.clone());
+                    self.branch_diffs = Some((ends, diffs.clone()));
+                }
+                self.reload_diff();
+            }
             Event::OperationChanged {
                 id, state, detail, ..
             } => self.operation_changed(*id, *state, detail.as_deref()),
@@ -541,11 +629,26 @@ impl App {
         self.dirty = true;
     }
 
-    fn diff_loaded(&mut self, side: gm_schema::DiffSide, diff: &gm_schema::FileDiff) {
+    /// The branch's changes were read (again): the list, and the diff on screen when it is
+    /// the branch's, since the range may have moved.
+    fn range_loaded(&mut self) {
+        let before = self.diff_key();
+        self.rebuild();
+        if self.context == Context::Branch && self.diff_key() == before {
+            self.reload_diff();
+        }
+    }
+
+    /// A diff arrived: `side` for the working tree's, `None` for the branch's.
+    fn diff_loaded(&mut self, side: Option<gm_schema::DiffSide>, diff: &gm_schema::FileDiff) {
         let Some(view) = self.diff.as_mut() else {
             return;
         };
-        if view.path != diff.path || side_of(view.context).diff_side() != side {
+        let wanted = view
+            .context
+            .stages()
+            .then(|| side_of(view.context).diff_side());
+        if view.path != diff.path || wanted != side {
             return;
         }
         view.load(diff.clone());
@@ -564,9 +667,17 @@ impl App {
             return;
         }
         let reason = detail.unwrap_or("no reason given").to_owned();
-        if self.diff_request == Some(id) {
+        if self.range_request == Some(id) && failed {
+            self.range_request = None;
+            self.range = None;
+            self.range_error = Some(reason.clone());
+            self.range_loaded();
+        }
+        // A read on a job of its own (the branch's diff) is done before its answer arrives:
+        // only a failure ends it here; a newer read replaces it.
+        if self.diff_request == Some(id) && failed {
             self.diff_request = None;
-            if let Some(view) = self.diff.as_mut().filter(|_| failed) {
+            if let Some(view) = self.diff.as_mut() {
                 view.error = Some(reason.clone());
             }
         }
@@ -616,6 +727,30 @@ impl App {
         let Some(view) = self.diff.as_mut() else {
             return;
         };
+        if view.context == Context::Branch {
+            let Some(range) = self.range.as_ref() else {
+                view.error = Some("Reading the branch's changes…".to_owned());
+                return;
+            };
+            let ends = (range.base.clone(), range.tip.clone());
+            let cached = self
+                .branch_diffs
+                .as_ref()
+                .filter(|(read, _)| *read == ends)
+                .and_then(|(_, diffs)| diffs.iter().find(|diff| diff.path == view.path))
+                .cloned();
+            match cached {
+                Some(diff) => self.diff_loaded(None, &diff),
+                // One patch for the range, cut in the order of its files: all of them are
+                // asked for, as the app's Branch tab does.
+                None => self.commands.push(CommandKind::LoadRevisionStack {
+                    base: ends.0,
+                    tip: ends.1,
+                    files: range.files.clone(),
+                }),
+            }
+            return;
+        }
         if view.path.ends_with('/') {
             view.error = Some(
                 "An untracked folder: its files are listed one by one once they are staged."
@@ -840,6 +975,10 @@ impl App {
     /// hunk the selection touches, each naming its hunk by id. Hunk ids hash content, not line
     /// numbers, so staging one hunk leaves the next one's id as it was.
     fn stage_selection(&mut self) {
+        if !self.context.stages() {
+            self.notice = Some(READ_ONLY.to_owned());
+            return;
+        }
         let Some(view) = self.diff.as_mut() else {
             return;
         };
@@ -860,26 +999,34 @@ impl App {
             };
             self.commands.push(match view.context {
                 Context::Unstaged => CommandKind::Stage { target },
-                Context::Staged => CommandKind::Unstage { target },
+                Context::Staged | Context::Branch => CommandKind::Unstage { target },
             });
         }
     }
 
     /// Stages the selected file, or unstages it under **Staged**.
     fn stage_file(&mut self) {
+        if !self.context.stages() {
+            self.notice = Some(READ_ONLY.to_owned());
+            return;
+        }
         let Some(path) = self.selected().map(|file| file.path.clone()) else {
             return;
         };
         let target = StageTarget::File { path };
         self.commands.push(match self.context {
             Context::Unstaged => CommandKind::Stage { target },
-            Context::Staged => CommandKind::Unstage { target },
+            Context::Staged | Context::Branch => CommandKind::Unstage { target },
         });
     }
 
     /// Stages hunk `index` of the diff on screen, or unstages it under **Staged**. The hunk is
     /// named by its id, so a hunk that changed meanwhile is refused, never guessed.
     fn stage_hunk(&mut self, index: usize) {
+        if !self.context.stages() {
+            self.notice = Some(READ_ONLY.to_owned());
+            return;
+        }
         let Some(view) = self.diff.as_ref() else {
             return;
         };
@@ -892,7 +1039,7 @@ impl App {
         };
         self.commands.push(match view.context {
             Context::Unstaged => CommandKind::Stage { target },
-            Context::Staged => CommandKind::Unstage { target },
+            Context::Staged | Context::Branch => CommandKind::Unstage { target },
         });
     }
 
@@ -944,7 +1091,7 @@ impl App {
         match *action {
             Action::Tab(tab) => self.tab = tab,
             Action::Context(context) => self.set_context(context),
-            Action::OtherContext => self.set_context(self.context.other()),
+            Action::OtherContext => self.set_context(self.context.next()),
             Action::ToggleFocus => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Main,
@@ -1114,6 +1261,16 @@ impl App {
         self.commands.push(CommandKind::ListReviewComments {
             author: ReviewAuthorFilter::Any,
         });
+        // The branch's changes move only with HEAD: a commit, a checkout, a rebase.
+        let head = (
+            self.status.branch.head.clone(),
+            self.status.branch.oid.clone(),
+        );
+        if self.range_head.as_ref() != Some(&head) {
+            self.range_head = Some(head);
+            self.commands
+                .push(CommandKind::LoadBranchChange { base: None });
+        }
     }
 
     fn set_context(&mut self, context: Context) {
@@ -1128,17 +1285,8 @@ impl App {
     /// Builds the rows again and puts the cursor back on the selected file, or near where it
     /// was when that file is gone.
     fn rebuild(&mut self) {
-        let counts = match self.context {
-            Context::Unstaged => &self.stats.unstaged,
-            Context::Staged => &self.stats.staged,
-        };
-        self.rows = sidebar_rows(
-            &self.status,
-            self.context,
-            counts,
-            &self.comments,
-            &self.folded,
-        );
+        let files = self.changed(self.context);
+        self.rows = sidebar_rows(&files, &self.comments, &self.folded);
         let wanted = self.selected[self.context.index()].clone();
         let found = wanted.and_then(|path| {
             self.rows
@@ -1214,7 +1362,7 @@ impl App {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use gm_schema::{BranchInfo, OperationId, ReviewAnchor};
+    use gm_schema::{BranchInfo, LineCounts, OperationId, ReviewAnchor};
     use ratatui::crossterm::event::KeyEventState;
 
     fn entry(path: &str, staged: Option<Change>, unstaged: Option<Change>) -> StatusEntry {
@@ -1388,12 +1536,143 @@ pub(crate) mod tests {
                 author: ReviewAuthorFilter::Any,
             },
         ];
-        assert_eq!(app.take_commands(), reads);
+        let branch = CommandKind::LoadBranchChange { base: None };
+        let mut opening = reads.to_vec();
+        opening.push(branch.clone());
+        assert_eq!(app.take_commands(), opening);
         app.apply(&Event::StatusLoaded {
             id: OperationId(2),
             status: app.status.clone(),
         });
+        // HEAD did not move: the branch's changes are as they were.
         assert_eq!(app.take_commands(), reads);
+        let mut committed = app.status.clone();
+        committed.branch.oid = Some("b1".to_owned());
+        app.apply(&Event::StatusLoaded {
+            id: OperationId(3),
+            status: committed,
+        });
+        assert_eq!(app.take_commands(), opening);
+    }
+
+    #[test]
+    fn the_branch_context_lists_the_ranges_files_read_only() {
+        use gm_schema::{CommitFile, RevisionRange};
+        let mut app = sample();
+        app.take_commands();
+        app.sent(
+            OperationId(4),
+            &CommandKind::LoadBranchChange { base: None },
+        );
+        let file = |path: &str, change, added, deleted| CommitFile {
+            path: path.to_owned(),
+            old_path: None,
+            change,
+            added,
+            deleted,
+            binary: false,
+        };
+        app.apply(&Event::RevisionRangeLoaded {
+            id: OperationId(4),
+            range: RevisionRange {
+                base: "base0".to_owned(),
+                tip: "tip0".to_owned(),
+                from_name: "main".to_owned(),
+                to_name: "feature".to_owned(),
+                files: vec![
+                    file("src/ledger/posting.rs", Change::Modified, 48, 12),
+                    file("README.md", Change::Added, 5, 0),
+                ],
+                ..RevisionRange::default()
+            },
+        });
+        app.on_key(key(KeyCode::Char('t')));
+        app.take_commands(); // Staged's diff, on the way
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.context, Context::Branch);
+        assert_eq!(app.file_count(Context::Branch), 2);
+        assert_eq!(
+            shown(&app),
+            [
+                "v src/ledger 1",
+                "  M posting.rs +48 -12 t0",
+                "v  1",
+                "  A README.md +5 -0 t0"
+            ]
+        );
+        // The diffs are read in the range, all of the branch's files in one go.
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::LoadRevisionStack {
+                base: "base0".to_owned(),
+                tip: "tip0".to_owned(),
+                files: vec![
+                    file("src/ledger/posting.rs", Change::Modified, 48, 12),
+                    file("README.md", Change::Added, 5, 0),
+                ],
+            }]
+        );
+        app.sent(
+            OperationId(5),
+            &CommandKind::LoadRevisionStack {
+                base: String::new(),
+                tip: String::new(),
+                files: Vec::new(),
+            },
+        );
+        let diff = |path: &str| gm_schema::FileDiff {
+            path: path.to_owned(),
+            old_path: None,
+            binary: false,
+            hunks: Vec::new(),
+        };
+        app.apply(&Event::RevisionStackLoaded {
+            id: OperationId(5),
+            diffs: vec![diff("src/ledger/posting.rs"), diff("README.md")],
+        });
+        assert_eq!(
+            app.diff
+                .as_ref()
+                .and_then(|view| view.diff.as_ref())
+                .map(|d| d.path.as_str()),
+            Some("src/ledger/posting.rs")
+        );
+        // Another file of the branch comes from what was read: nothing is asked.
+        app.on_key(key(KeyCode::Char('G')));
+        assert_eq!(
+            app.diff
+                .as_ref()
+                .and_then(|view| view.diff.as_ref())
+                .map(|d| d.path.as_str()),
+            Some("README.md")
+        );
+        assert_eq!(app.take_commands(), []);
+        // Nothing stages here.
+        app.on_key(key(KeyCode::Char('s')));
+        app.on_key(key(KeyCode::Char('u')));
+        assert_eq!(app.take_commands(), []);
+    }
+
+    #[test]
+    fn a_failed_branch_read_says_why() {
+        let mut app = sample();
+        app.take_commands();
+        app.sent(
+            OperationId(4),
+            &CommandKind::LoadBranchChange { base: None },
+        );
+        app.apply(&Event::OperationChanged {
+            id: OperationId(4),
+            actor: gm_schema::Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("You are on the default branch. Choose another base.".to_owned()),
+        });
+        assert!(app.range.is_none());
+        assert_eq!(
+            app.range_error.as_deref(),
+            Some("You are on the default branch. Choose another base.")
+        );
+        assert_eq!(app.file_count(Context::Branch), 0);
     }
 
     #[test]

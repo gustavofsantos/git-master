@@ -177,8 +177,17 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     if app.rows.is_empty() {
-        let empty = format!(" No {} changes.", app.context.title().to_lowercase());
-        frame.render_widget(Paragraph::new(empty).style(DIM), list);
+        let empty = match (app.context, &app.range_error) {
+            // The engine's message ends with advice about the app's base picker, which the
+            // companion has not: its first sentence is the reason.
+            (Context::Branch, Some(reason)) => format!(" {}", first_sentence(reason)),
+            (Context::Branch, None) if app.range.is_none() => " Reading the branch…".to_owned(),
+            (context, _) => format!(" No {} changes.", context.title().to_lowercase()),
+        };
+        frame.render_widget(
+            Paragraph::new(empty).style(DIM).wrap(Wrap { trim: false }),
+            list,
+        );
         return;
     }
     let height = usize::from(list.height);
@@ -194,12 +203,11 @@ fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
             action: Action::Row(index),
         });
         let button = match (row, app.context) {
-            (Row::File(file), context) if Some(&file.path) == selected.as_ref() => {
-                Some(match context {
-                    Context::Unstaged => "[stage]",
-                    Context::Staged => "[unstage]",
-                })
-            }
+            (Row::File(file), context) if Some(&file.path) == selected.as_ref() => match context {
+                Context::Unstaged => Some("[stage]"),
+                Context::Staged => Some("[unstage]"),
+                Context::Branch => None,
+            },
             _ => None,
         };
         if let Some(label) = button {
@@ -279,6 +287,14 @@ fn sidebar_line(row: &Row, width: usize, button: Option<&'static str>) -> Line<'
     }
 }
 
+/// The first sentence of `text`, with its full stop.
+fn first_sentence(text: &str) -> String {
+    match text.find(". ") {
+        Some(end) => text[..=end].to_owned(),
+        None => text.to_owned(),
+    }
+}
+
 fn letter_color(letter: char) -> Color {
     match letter {
         'U' => Color::Magenta,
@@ -332,7 +348,7 @@ fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
     let mut buttons = vec![
         (
             "t",
-            app.context.other().title().to_owned(),
+            app.context.next().title().to_owned(),
             Action::OtherContext,
         ),
         ("Tab", focus.to_owned(), Action::ToggleFocus),
@@ -346,6 +362,7 @@ fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
             Context::Staged => {
                 buttons.push(("u", "unstage lines".to_owned(), Action::StageSelection));
             }
+            Context::Branch => {}
         }
         buttons.push(("c", "comment".to_owned(), Action::Comment));
         buttons.push(("Esc", "clear".to_owned(), Action::ClearSelection));
@@ -370,6 +387,7 @@ fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
             Context::Staged => {
                 buttons.push(("u", "unstage hunk".to_owned(), Action::StageCursorHunk));
             }
+            Context::Branch => {}
         }
         buttons.push(("J", "next hunk".to_owned(), Action::JumpHunk(true)));
         buttons.push(("K", "previous hunk".to_owned(), Action::JumpHunk(false)));

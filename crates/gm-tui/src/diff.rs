@@ -18,7 +18,8 @@ pub const COLOR_LINE_LIMIT: usize = 20_000;
 pub fn side_of(context: Context) -> Side {
     match context {
         Context::Unstaged => Side::Unstaged,
-        Context::Staged => Side::Staged,
+        // The branch's diff is read like a commit's: by its text, never staged.
+        Context::Staged | Context::Branch => Side::Staged,
     }
 }
 
