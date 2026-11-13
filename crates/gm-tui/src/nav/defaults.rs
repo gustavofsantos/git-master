@@ -353,6 +353,22 @@ const SPECS: &[Spec] = &[
         INSERT,
         OneShot,
     ),
+    spec(
+        "screen.close",
+        "back or quit",
+        "Clear the selection, go back one screen, or quit on Status.",
+        "Go to",
+        MOVE,
+        OneShot,
+    ),
+    spec(
+        "text.type",
+        "next type",
+        "Choose the next type of comment: change, question, nit.",
+        "Write",
+        INSERT,
+        OneShot,
+    ),
 ];
 
 /// The registry of every action.
@@ -387,7 +403,7 @@ const NORMAL: &[(&str, &str)] = &[
     ("z M", "fold.close_all"),
     ("<cr>", "open"),
     ("<esc>", "screen.back"),
-    ("q", "screen.back"),
+    ("q", "screen.close"),
     ("/", "search.start"),
     ("n", "search.next"),
     ("N", "search.previous"),
@@ -413,11 +429,12 @@ const INSERT_KEYS: &[(&str, &str)] = &[
     ("<esc>", "text.cancel"),
     ("<cr>", "text.newline"),
     ("<bs>", "text.backspace"),
+    ("<tab>", "text.type"),
 ];
 
 const LABELS: &[(&str, &str)] = &[
     ("<space>", "Actions"),
-    ("<space> d", "Diff…"),
+    ("<space> d", "Diff"),
     ("g", "Go"),
     ("z", "Fold"),
     ("]", "Next"),

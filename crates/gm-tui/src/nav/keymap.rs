@@ -70,7 +70,9 @@ impl KeyMap {
         Ok(())
     }
 
-    /// Removes whatever `sequence` binds, leaf or prefix. Used when a person's map rebinds.
+    /// Removes whatever `sequence` binds, leaf or prefix. Used when a person's map rebinds
+    /// (Q50); used by tests until then.
+    #[cfg(test)]
     pub fn unbind(&mut self, sequence: &str) -> Result<(), String> {
         let keys = parse_sequence(sequence)?;
         let (last, path) = keys.split_last().ok_or("an empty key sequence")?;

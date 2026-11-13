@@ -217,6 +217,44 @@ impl<T> Tree<T> {
         }
     }
 
+    /// The sections whose fold the person changed: for Status, whose files start folded,
+    /// the files unfolded.
+    pub fn toggled(&self) -> &BTreeSet<String> {
+        &self.toggled
+    }
+
+    /// Unfolds the section `id` (and only it), whatever it starts as.
+    pub fn unfold(&mut self, id: &str) {
+        fn starts<T>(sections: &[Section<T>], id: &str) -> Option<bool> {
+            sections.iter().find_map(|s| {
+                if s.id == id {
+                    Some(s.starts_folded)
+                } else {
+                    starts(&s.children, id)
+                }
+            })
+        }
+        match starts(&self.roots, id) {
+            Some(true) => {
+                self.toggled.insert(id.to_owned());
+            }
+            Some(false) => {
+                self.toggled.remove(id);
+            }
+            None => {}
+        }
+    }
+
+    /// Puts the cursor on the section `id`, when it is shown.
+    pub fn move_to_id(&mut self, id: &str) -> bool {
+        if self.index_of(id).is_some() {
+            self.cursor = Some(id.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+
     /// Starts a selection at the cursor, or ends the one there is.
     pub fn toggle_selection(&mut self) {
         self.anchor = match self.anchor {

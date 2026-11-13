@@ -3,11 +3,8 @@
 //! commented (`compose`), the command a comment sends (`compose::command`), and how a
 //! thread folds (`review`).
 
-use std::collections::BTreeSet;
-
 use gm_schema::{CommandKind, CommentLabel, OperationId};
 use gm_view::compose::{self, ReviewTarget};
-use gm_view::review::{DeleteArm, Opened};
 
 /// The types a person picks for a new comment, as chips, with the label each stands for
 /// (D236 (7)).
@@ -82,49 +79,6 @@ impl Composer {
         }
         compose::command(&self.target, &self.text, self.label())
     }
-
-    /// `Esc`: `true` when the box closes. A box with text asks first.
-    pub fn escape(&mut self) -> bool {
-        if self.text.trim().is_empty() || self.discarding {
-            return true;
-        }
-        self.discarding = true;
-        false
-    }
-}
-
-/// Which threads the diff shows unfolded, and the delete waiting for its second press.
-#[derive(Debug, Default)]
-pub struct Folds {
-    /// Resolved threads opened.
-    pub opened: BTreeSet<i64>,
-    /// Threads showing all their replies.
-    pub expanded: BTreeSet<i64>,
-    /// Whether the strip of outdated threads is open.
-    pub outdated: bool,
-    pub delete: DeleteArm,
-}
-
-impl Folds {
-    pub fn as_opened(&self) -> Opened<'_> {
-        Opened {
-            outdated: self.outdated,
-            comments: &self.opened,
-            threads: &self.expanded,
-        }
-    }
-
-    pub fn toggle_opened(&mut self, id: i64) {
-        if !self.opened.remove(&id) {
-            self.opened.insert(id);
-        }
-    }
-
-    pub fn toggle_expanded(&mut self, id: i64) {
-        if !self.expanded.remove(&id) {
-            self.expanded.insert(id);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -176,17 +130,5 @@ mod tests {
                 body: "Use ParseError.".to_owned(),
             })
         );
-    }
-
-    #[test]
-    fn escape_asks_before_it_discards_text() {
-        let mut composer = new_comment();
-        assert!(composer.escape());
-        composer.type_text("draft");
-        assert!(!composer.escape());
-        assert!(composer.escape());
-        composer.discarding = false;
-        composer.backspace();
-        assert_eq!(composer.text, "draf");
     }
 }

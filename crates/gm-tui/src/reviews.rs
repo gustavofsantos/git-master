@@ -1,10 +1,8 @@
-//! The **Reviews** tab's model (D236, D240). The page state is the app's own Local review
-//! model, `gm_view::local_review::LocalReview`: the filter, the selected thread, its Before
-//! and After texts and the lines that changed between them. The companion adds only the
-//! grouping of the sketch: by who acts next.
+//! The review threads grouped by who acts next (D240 (3)), over the app's filters
+//! (`gm_view::local_review::Filter`).
 
-use gm_schema::{OperationId, ReviewComment, ReviewStatus};
-use gm_view::local_review::{Filter, LocalReview, reads_change};
+use gm_schema::{ReviewComment, ReviewStatus};
+use gm_view::local_review::Filter;
 use gm_view::review;
 
 /// Who acts next on a thread.
@@ -88,151 +86,40 @@ pub fn entries(comments: &[ReviewComment], filter: Filter) -> Vec<Entry> {
     out
 }
 
-/// The tab's state: the app's page model, and the list's cursor and scroll.
-#[derive(Debug, Default)]
-pub struct ReviewsView {
-    pub page: LocalReview,
-    pub entries: Vec<Entry>,
-    /// Index into `entries`; always on a thread when there is one.
-    pub cursor: usize,
-    pub scroll: usize,
-    /// The Before read sent, waiting for its After read to be sent, so both are expected
-    /// together, as the page model takes them.
-    before_read: Option<OperationId>,
-}
-
-impl ReviewsView {
-    /// Lays the list out again and keeps the cursor on the thread it was on, else near.
-    pub fn relist(&mut self, comments: &[ReviewComment]) {
-        let kept = self.selected_entry();
-        self.page.keep_listed(comments);
-        self.entries = entries(comments, self.page.filter());
-        self.cursor = kept
-            .and_then(|id| {
-                self.entries
-                    .iter()
-                    .position(|entry| *entry == Entry::Thread(id))
-            })
-            .or_else(|| self.nearest_thread(self.cursor))
-            .unwrap_or(0);
-    }
-
-    fn selected_entry(&self) -> Option<i64> {
-        match self.entries.get(self.cursor) {
-            Some(Entry::Thread(id)) => Some(*id),
-            _ => None,
-        }
-    }
-
-    /// The thread the cursor is on.
-    pub fn at_cursor(&self) -> Option<i64> {
-        self.selected_entry()
-    }
-
-    fn nearest_thread(&self, from: usize) -> Option<usize> {
-        let is_thread = |index: &usize| matches!(self.entries[*index], Entry::Thread(_));
-        let from = from.min(self.entries.len().saturating_sub(1));
-        (from..self.entries.len())
-            .find(is_thread)
-            .or_else(|| (0..from).rev().find(is_thread))
-    }
-
-    /// Moves the cursor `by` threads, past the group lines, and stops at either end.
-    pub fn move_cursor(&mut self, by: isize) {
-        let threads: Vec<usize> = (0..self.entries.len())
-            .filter(|index| matches!(self.entries[*index], Entry::Thread(_)))
-            .collect();
-        let Some(at) = threads.iter().position(|&index| index == self.cursor) else {
-            if let Some(&first) = threads.first() {
-                self.cursor = first;
-            }
-            return;
-        };
-        let target = at.saturating_add_signed(by).min(threads.len() - 1);
-        self.cursor = threads[target];
-    }
-
-    /// The next filter, in the order of their chips.
-    pub fn next_filter(&mut self, comments: &[ReviewComment]) {
-        let at = Filter::ALL
-            .iter()
-            .position(|filter| *filter == self.page.filter())
-            .unwrap_or(0);
-        self.set_filter(Filter::ALL[(at + 1) % Filter::ALL.len()], comments);
-    }
-
-    pub fn set_filter(&mut self, filter: Filter, comments: &[ReviewComment]) {
-        self.page.set_filter(filter);
-        self.relist(comments);
-    }
-
-    /// The reads the selected thread's texts need, as the app's page asks them: one read of
-    /// its two snapshots once an agent handled it, else its snapshot and the file now.
-    pub fn text_reads(&self, comments: &[ReviewComment]) -> Vec<gm_schema::CommandKind> {
-        use gm_schema::CommandKind;
-        let Some(id) = self.page.selected_id() else {
-            return Vec::new();
-        };
-        let handled = comments
-            .iter()
-            .find(|comment| comment.id == id)
-            .is_some_and(reads_change);
-        if handled {
-            vec![CommandKind::LoadReviewChange { id }]
-        } else {
-            vec![
-                CommandKind::LoadReviewSnapshotText { id },
-                CommandKind::LoadReviewCurrentText { id },
-            ]
-        }
-    }
-
-    /// The engine took a text read as operation `id`.
-    pub fn sent(&mut self, id: OperationId, kind: &gm_schema::CommandKind) {
-        use gm_schema::CommandKind;
-        match kind {
-            CommandKind::LoadReviewChange { .. } => self.page.expect_change(id),
-            CommandKind::LoadReviewSnapshotText { .. } => self.before_read = Some(id),
-            CommandKind::LoadReviewCurrentText { .. } => {
-                if let Some(before) = self.before_read.take() {
-                    self.page.expect(before, id);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Lines added and removed in the thread's lines between its two texts, once both are
-    /// read: what the agent changed there, when they are its snapshots.
-    pub fn measured(&self) -> Option<(usize, usize)> {
-        use gm_view::local_review::Version;
-        self.page.lines(Version::Before)?;
-        self.page.lines(Version::After)?;
-        let added = self
-            .page
-            .marks(Version::After)
-            .iter()
-            .filter(|m| **m)
-            .count();
-        let removed = self
-            .page
-            .marks(Version::Before)
-            .iter()
-            .filter(|m| **m)
-            .count();
-        Some((added, removed))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::{CommandKind, ReviewReply};
+    use gm_schema::{ReviewAnchor, ReviewReply};
 
     fn comment(id: i64, status: ReviewStatus, created_at: i64) -> ReviewComment {
-        let mut comment = crate::app::tests::comment(id, "a.rs", status);
-        comment.created_at = created_at;
-        comment
+        ReviewComment {
+            id,
+            path: "a.rs".to_owned(),
+            body: "body".to_owned(),
+            status,
+            anchor: ReviewAnchor {
+                text: "x".to_owned(),
+                before: Vec::new(),
+                after: Vec::new(),
+                start_line: 1,
+            },
+            created_at,
+            resolved_at: None,
+            snapshot: None,
+            after_snapshot: None,
+            location: None,
+            outdated: false,
+            replies: Vec::new(),
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
+            suggested_fix: None,
+            label: None,
+            decorations: Vec::new(),
+            scorecard: None,
+            workspace: None,
+        }
     }
 
     fn reply(id: i64, author: &str, created_at: i64) -> ReviewReply {
@@ -277,48 +164,5 @@ mod tests {
         );
         // The app's Open filter keeps what is not resolved.
         assert_eq!(entries(&all, Filter::Open).len(), 7);
-    }
-
-    #[test]
-    fn the_cursor_skips_groups_and_follows_its_thread_across_a_relist() {
-        let all = [
-            comment(1, ReviewStatus::Open, 10),
-            comment(2, ReviewStatus::Handled, 20),
-        ];
-        let mut view = ReviewsView::default();
-        view.set_filter(Filter::All, &all);
-        assert_eq!(view.at_cursor(), Some(2));
-        view.move_cursor(1);
-        assert_eq!(view.at_cursor(), Some(1));
-        // Thread 2 is resolved meanwhile: thread 1 keeps the cursor.
-        let later = [
-            comment(1, ReviewStatus::Open, 10),
-            comment(2, ReviewStatus::Resolved, 20),
-        ];
-        view.relist(&later);
-        assert_eq!(view.at_cursor(), Some(1));
-    }
-
-    #[test]
-    fn a_handled_thread_reads_its_two_snapshots_in_one_go() {
-        let mut handled = comment(4, ReviewStatus::Handled, 1);
-        handled.after_snapshot = Some("after".to_owned());
-        let open = comment(5, ReviewStatus::Open, 2);
-        let all = [handled, open];
-        let mut view = ReviewsView::default();
-        view.set_filter(Filter::All, &all);
-        assert!(view.page.select(&all[0]));
-        assert_eq!(
-            view.text_reads(&all),
-            [CommandKind::LoadReviewChange { id: 4 }]
-        );
-        assert!(view.page.select(&all[1]));
-        assert_eq!(
-            view.text_reads(&all),
-            [
-                CommandKind::LoadReviewSnapshotText { id: 5 },
-                CommandKind::LoadReviewCurrentText { id: 5 }
-            ]
-        );
     }
 }

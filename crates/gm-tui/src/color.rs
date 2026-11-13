@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use gm_core::syntax::{highlight, language_for_path};
 use gm_schema::HighlightSpan;
 
-use crate::diff::ColorJob;
+use crate::data::ColorJob;
 
 /// The colors of a job's text; empty when its language has no grammar.
 pub type Colored = (ColorJob, Vec<HighlightSpan>);

@@ -49,7 +49,8 @@ impl Registry {
     }
 
     /// The actions whose title or description holds every word of `query`, ignoring case,
-    /// in registry order: what a palette lists.
+    /// in registry order: what a palette lists (D242 (7)); used by tests until a palette is.
+    #[cfg(test)]
     pub fn search(&self, query: &str) -> Vec<&Spec> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         self.specs

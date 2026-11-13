@@ -54,11 +54,6 @@ impl Input {
         }
     }
 
-    /// Leaves the pending prefix, as a menu entry that ran does.
-    pub fn leave(&mut self) {
-        self.pending.clear();
-    }
-
     /// Goes back to the prefix `keys`, as a menu that stays open for repeating does.
     pub fn keep(&mut self, keys: &[Key]) {
         self.pending = keys.to_vec();

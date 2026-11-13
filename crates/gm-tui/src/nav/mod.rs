@@ -23,6 +23,7 @@ pub enum Mode {
 }
 
 impl Mode {
+    #[cfg(test)]
     pub const ALL: [Mode; 3] = [Mode::Normal, Mode::Visual, Mode::Insert];
 
     /// As the mode line shows it.

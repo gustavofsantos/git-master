@@ -4,26 +4,16 @@
 
 /// `nf-dev-git_branch`
 pub const BRANCH: &str = "\u{e725}";
-/// `nf-fa-arrow_right`
-pub const UPSTREAM: &str = "\u{f061}";
 /// `nf-fa-arrow_up`
 pub const AHEAD: &str = "\u{f062}";
 /// `nf-fa-arrow_down`
 pub const BEHIND: &str = "\u{f063}";
-/// `nf-fa-folder_open`
-pub const FOLDER_OPEN: &str = "\u{f07c}";
 /// `nf-fa-folder`
 pub const FOLDER: &str = "\u{f07b}";
 /// `nf-fa-comments`: the threads on a file.
 pub const THREADS: &str = "\u{f086}";
 /// `nf-fa-caret_right`: a line of the selection.
 pub const SELECTED: &str = "\u{f0da}";
-/// `nf-oct-diff`
-pub const TAB_DIFF: &str = "\u{f4d2}";
-/// `nf-oct-file`
-pub const TAB_FILE: &str = "\u{f4a5}";
-/// `nf-oct-comment_discussion`
-pub const TAB_REVIEWS: &str = "\u{f442}";
 /// `nf-fa-circle_o`: an open thread.
 pub const OPEN: &str = "\u{f10c}";
 /// `nf-fa-check`: a thread the agent handled.
@@ -80,24 +70,8 @@ mod tests {
             })
         };
         for icon in [
-            BRANCH,
-            UPSTREAM,
-            AHEAD,
-            BEHIND,
-            FOLDER_OPEN,
-            FOLDER,
-            THREADS,
-            SELECTED,
-            TAB_DIFF,
-            TAB_FILE,
-            TAB_REVIEWS,
-            OPEN,
-            HANDLED,
-            RESOLVED,
-            OUTDATED,
-            AGENT,
-            FOLDED,
-            UNFOLDED,
+            BRANCH, AHEAD, BEHIND, FOLDER, THREADS, SELECTED, OPEN, HANDLED, RESOLVED, OUTDATED,
+            AGENT, FOLDED, UNFOLDED,
         ] {
             assert!(private(icon), "{icon:?}");
         }

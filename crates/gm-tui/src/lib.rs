@@ -2,21 +2,16 @@
 //! to a coding agent. A third front end of the engine: it dispatches the same commands as the
 //! app, as the person, and reads the same store. It opens no window and starts no GPUI code.
 
-mod app;
 mod color;
-mod diff;
+mod data;
+mod draw;
 mod icons;
-// Temporary: the navigator's core lands before the screens use it; the wiring commit of M0
-// removes this allow (design/roadmap.md, M0).
-#[allow(dead_code)]
 mod nav;
-mod render;
-mod render_diff;
-mod render_reviews;
-mod render_threads;
 mod reviews;
+mod status;
 mod terminal;
 mod threads;
+mod ui;
 
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -30,9 +25,9 @@ use gm_core::watch::{self, Notice, WatchHandle};
 use gm_schema::{Actor, CommandKind, Event, OperationState, RepoStatus};
 use ratatui::crossterm::event::{self, Event as Input};
 
-use crate::app::App;
 use crate::color::Colorer;
 use crate::terminal::Screen;
+use crate::ui::{App, Request};
 
 /// How long the loop waits for a key or a click before it looks at the engine again.
 const TICK: Duration = Duration::from_millis(50);
@@ -149,10 +144,12 @@ fn run(opened: Opened) -> io::Result<()> {
     let mut screen = Screen::take()?;
     let mut app = App::new(status);
     loop {
+        // A prompt's keys light up when its guard opens (D242 (5)).
+        if app.guard_closed(std::time::Instant::now()) {
+            app.redraw();
+        }
         if app.dirty {
-            screen
-                .terminal
-                .draw(|frame| render::draw(frame, &mut app))?;
+            screen.terminal.draw(|frame| draw::draw(frame, &mut app))?;
             app.dirty = false;
         }
         if event::poll(TICK)? {
@@ -196,8 +193,69 @@ fn run(opened: Opened) -> io::Result<()> {
         for job in app.take_color_jobs() {
             colorer.color(job);
         }
+        for request in app.take_requests() {
+            match request {
+                Request::Suspend => {
+                    // Give the terminal back, stop as a shell job does, and take it again on `fg`.
+                    drop(screen);
+                    let _ = std::process::Command::new("kill")
+                        .args(["-TSTP", &std::process::id().to_string()])
+                        .status();
+                    screen = Screen::take()?;
+                    screen.terminal.clear()?;
+                    app.redraw();
+                }
+                Request::Redraw => {
+                    screen.terminal.clear()?;
+                    app.redraw();
+                }
+                Request::Copy(text) => copy(&text)?,
+            }
+        }
         if app.quit {
             return Ok(());
         }
+    }
+}
+
+/// Puts `text` on the clipboard with OSC 52, which terminals and tmux pass on.
+fn copy(text: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut out = io::stdout();
+    write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))?;
+    out.flush()
+}
+
+/// Standard base64, for OSC 52.
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (at, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if at <= chunk.len() {
+                out.push(char::from(
+                    TABLE[usize::try_from((n >> shift) & 63).unwrap_or(0)],
+                ));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod copy_tests {
+    #[test]
+    fn base64_matches_the_standard() {
+        assert_eq!(super::base64(b"@src/a.rs:4-8"), "QHNyYy9hLnJzOjQtOA==");
+        assert_eq!(super::base64(b"ab"), "YWI=");
+        assert_eq!(super::base64(b"abc"), "YWJj");
     }
 }

@@ -3,6 +3,7 @@
 //! it instead of stacking a copy, and the stack is capped.
 
 /// The most screens on the stack, the root included.
+#[cfg(test)]
 pub const MAX_DEPTH: usize = 32;
 
 /// What a screen is known by: its address, as the trail shows it.
@@ -30,12 +31,16 @@ impl<S: Addressed> Stack<S> {
         self.screens.last_mut().expect("the root is never popped")
     }
 
+    // Used by the screens pushed on Status (M3 to M6); by tests until then.
+    #[cfg(test)]
     pub fn depth(&self) -> usize {
         self.screens.len()
     }
 
     /// Opens `screen`: on top, or, when its address is on the stack already, back to that
     /// one (the screens above it are closed). At the cap, the screen above the root goes.
+    // Used by the screens pushed on Status (M3 to M6); by tests until then.
+    #[cfg(test)]
     pub fn open(&mut self, screen: S) {
         let address = screen.address();
         if let Some(at) = self.screens.iter().position(|s| s.address() == address) {
@@ -65,11 +70,6 @@ impl<S: Addressed> Stack<S> {
     /// The addresses from the root to the top, for the trail.
     pub fn trail(&self) -> Vec<String> {
         self.screens.iter().map(Addressed::address).collect()
-    }
-
-    /// Every screen, root first, so engine events reach them all.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut S> {
-        self.screens.iter_mut()
     }
 }
 
