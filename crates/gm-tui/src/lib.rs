@@ -8,7 +8,9 @@ mod diff;
 mod icons;
 mod render;
 mod render_diff;
+mod render_reviews;
 mod render_threads;
+mod reviews;
 mod terminal;
 mod threads;
 

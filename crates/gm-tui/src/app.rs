@@ -23,7 +23,9 @@ use gm_view::compose::{self, ReviewTarget};
 use gm_view::review::{self, Delete};
 
 use crate::diff::{ColorJob, DiffView, side_of};
+use crate::reviews::ReviewsView;
 use crate::threads::{Composer, Folds};
+use gm_view::local_review::{Filter, Version};
 
 /// Narrower than this, the sidebar and the main pane show one at a time (D235 (9)).
 pub const SPLIT_MIN_WIDTH: u16 = 100;
@@ -192,6 +194,13 @@ pub enum Action {
     CommentType(usize),
     SaveComment,
     CancelComment,
+    /// Puts the **Reviews** list's cursor on this entry.
+    ReviewRow(usize),
+    ReviewFilter(Filter),
+    /// Shows the selected thread's text as it was (`Before`) or after the agent (`After`).
+    ReviewVersion(Version),
+    /// Shows the thread in the **Diff** tab, the cursor on its first line.
+    GoToDiff(i64),
 }
 
 /// A button the last draw put on screen.
@@ -400,6 +409,10 @@ pub struct App {
     pub composer: Option<Composer>,
     /// Which threads show unfolded.
     pub folds: Folds,
+    /// The **Reviews** tab.
+    pub reviews: ReviewsView,
+    /// A line of a file to put the diff's cursor on once its diff is read.
+    jump: Option<(String, u32)>,
     /// The **Diff** tab's diff of the selected file.
     pub diff: Option<DiffView>,
     /// Counts the diff views made, so an answer for an older one is known.
@@ -451,6 +464,8 @@ impl App {
             drag_from: None,
             composer: None,
             folds: Folds::default(),
+            reviews: ReviewsView::default(),
+            jump: None,
             commands: Vec::new(),
         };
         app.rebuild();
@@ -532,6 +547,7 @@ impl App {
     /// The engine took `kind` as operation `id`: the model keeps the ids whose failure it
     /// must show.
     pub fn sent(&mut self, id: OperationId, kind: &CommandKind) {
+        self.reviews.sent(id, kind);
         match kind {
             CommandKind::LoadDiff { .. } | CommandKind::LoadRevisionStack { .. } => {
                 self.diff_request = Some(id);
@@ -607,6 +623,32 @@ impl App {
                 self.comments.clone_from(comments);
                 self.rebuild();
                 self.relayout();
+                self.reviews.relist(&self.comments);
+                self.select_review(true);
+            }
+            Event::ReviewChange {
+                id,
+                comment,
+                change,
+                ..
+            } => {
+                self.reviews
+                    .page
+                    .received_change(*id, *comment, change.clone());
+            }
+            Event::ReviewSnapshotText {
+                id, comment, lines, ..
+            } => {
+                self.reviews
+                    .page
+                    .received_before(*id, *comment, lines.clone());
+            }
+            Event::ReviewCurrentText {
+                id, comment, lines, ..
+            } => {
+                self.reviews
+                    .page
+                    .received_after(*id, *comment, lines.clone());
             }
             Event::DiffLoaded { side, diff, .. } => self.diff_loaded(Some(*side), diff),
             Event::RevisionRangeLoaded { id, range } if self.range_request == Some(*id) => {
@@ -656,6 +698,7 @@ impl App {
             self.color_jobs.push(job);
         }
         self.relayout();
+        self.apply_jump();
     }
 
     fn operation_changed(&mut self, id: OperationId, state: OperationState, detail: Option<&str>) {
@@ -785,11 +828,142 @@ impl App {
         }
         if let Some(action) = self.action_of(key) {
             self.act(&action);
+        } else if self.focus == Focus::Sidebar && self.tab == Tab::Reviews {
+            self.review_list_key(key);
         } else if self.focus == Focus::Sidebar {
             self.sidebar_key(key);
         } else if self.tab == Tab::Diff {
             self.diff_key_press(key);
+        } else if self.tab == Tab::Reviews {
+            self.review_thread_key(key);
         }
+    }
+
+    /// Keys in the **Reviews** list.
+    fn review_list_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.reviews.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => self.reviews.move_cursor(-1),
+            KeyCode::Char('g') | KeyCode::Home => self.reviews.move_cursor(isize::MIN),
+            KeyCode::Char('G') | KeyCode::End => self.reviews.move_cursor(isize::MAX),
+            KeyCode::Char('F') => self.reviews.next_filter(&self.comments),
+            KeyCode::Enter => self.focus = Focus::Main,
+            _ => return,
+        }
+        self.select_review(false);
+        self.dirty = true;
+    }
+
+    /// Keys on the selected thread of the **Reviews** tab.
+    fn review_thread_key(&mut self, key: KeyEvent) {
+        let Some(id) = self.reviews.page.selected_id() else {
+            return;
+        };
+        let action = match key.code {
+            KeyCode::Char('b') => Action::ReviewVersion(match self.reviews.page.version() {
+                Version::Before => Version::After,
+                Version::After => Version::Before,
+            }),
+            KeyCode::Char('r') | KeyCode::Enter => Action::Reply(id),
+            KeyCode::Char('R') => Action::Resolve(id),
+            KeyCode::Char('o') => Action::Reopen(id),
+            KeyCode::Char('D') => Action::Delete(id),
+            KeyCode::Char('g') => Action::GoToDiff(id),
+            KeyCode::Char('F') => {
+                self.reviews.next_filter(&self.comments);
+                self.select_review(false);
+                self.dirty = true;
+                return;
+            }
+            _ => return,
+        };
+        self.act(&action);
+        self.dirty = true;
+    }
+
+    /// The actions of the **Reviews** tab.
+    fn review_action(&mut self, action: &Action) {
+        match *action {
+            Action::ReviewRow(index) => {
+                self.focus = Focus::Sidebar;
+                self.reviews.cursor = index;
+                self.reviews.move_cursor(0);
+                self.select_review(false);
+            }
+            Action::ReviewFilter(filter) => {
+                self.reviews.set_filter(filter, &self.comments);
+                self.select_review(false);
+            }
+            Action::ReviewVersion(version) => self.reviews.page.set_version(version),
+            Action::GoToDiff(id) => self.go_to_diff(id),
+            _ => {}
+        }
+    }
+
+    /// Selects the thread at the list's cursor and asks for its texts, as the app's page
+    /// does; `again` asks for them even when it was already selected (after a new listing).
+    fn select_review(&mut self, again: bool) {
+        // As the app's page: the texts are read while the tab shows, and on showing it.
+        if self.tab != Tab::Reviews {
+            return;
+        }
+        let Some(id) = self.reviews.at_cursor() else {
+            return;
+        };
+        let Some(comment) = self.comments.iter().find(|comment| comment.id == id) else {
+            return;
+        };
+        if self.reviews.page.select(comment) || again {
+            self.commands
+                .extend(self.reviews.text_reads(&self.comments));
+        }
+    }
+
+    /// Shows thread `id` in the **Diff** tab: in the first chip that lists its file, with
+    /// the cursor on its first line once the diff is read.
+    fn go_to_diff(&mut self, id: i64) {
+        let Some(comment) = self.comment(id) else {
+            return;
+        };
+        let path = comment.path.clone();
+        let line = comment
+            .location
+            .map_or(comment.anchor.start_line, |location| location.start_line);
+        let Some(context) = Context::ALL
+            .into_iter()
+            .find(|context| self.changed(*context).iter().any(|file| file.path == path))
+        else {
+            self.notice = Some(format!(
+                "{path} has no changes to show; the thread is on line {line}."
+            ));
+            return;
+        };
+        self.tab = Tab::Diff;
+        self.focus = Focus::Main;
+        self.selected[context.index()] = Some(path.clone());
+        self.context = context;
+        self.scroll = 0;
+        self.jump = Some((path, line));
+        self.rebuild();
+        self.apply_jump();
+    }
+
+    /// Puts the diff's cursor on the line a jump waits for, once its diff is there.
+    fn apply_jump(&mut self) {
+        let Some((path, line)) = self.jump.clone() else {
+            return;
+        };
+        let Some(view) = self.diff.as_mut().filter(|view| view.path == path) else {
+            return;
+        };
+        if view.diff.is_none() {
+            return;
+        }
+        if let Some(row) = review::row_of_line(&view.rows, view.diffs(), line) {
+            view.cursor = row;
+            view.follow_cursor = true;
+        }
+        self.jump = None;
     }
 
     /// Keys while the comment box is open: they type, except `Enter` (save), `Alt+Enter` (a
@@ -1089,7 +1263,10 @@ impl App {
             self.notice = None;
         }
         match *action {
-            Action::Tab(tab) => self.tab = tab,
+            Action::Tab(tab) => {
+                self.tab = tab;
+                self.select_review(true);
+            }
             Action::Context(context) => self.set_context(context),
             Action::OtherContext => self.set_context(self.context.next()),
             Action::ToggleFocus => {
@@ -1153,6 +1330,10 @@ impl App {
                     self.composer = None;
                 }
             }
+            Action::ReviewRow(_)
+            | Action::ReviewFilter(_)
+            | Action::ReviewVersion(_)
+            | Action::GoToDiff(_) => self.review_action(action),
             Action::ClearSelection => {
                 if let Some(view) = self.diff.as_mut() {
                     view.anchor = None;
@@ -1203,6 +1384,20 @@ impl App {
                 let Some(list) = self.areas.list().filter(|area| area.contains(at)) else {
                     return;
                 };
+                if self.tab == Tab::Reviews {
+                    let bottom = self
+                        .reviews
+                        .entries
+                        .len()
+                        .saturating_sub(usize::from(list.height));
+                    self.reviews.scroll = if mouse.kind == MouseEventKind::ScrollDown {
+                        (self.reviews.scroll + WHEEL_ROWS).min(bottom)
+                    } else {
+                        self.reviews.scroll.saturating_sub(WHEEL_ROWS)
+                    };
+                    self.dirty = true;
+                    return;
+                }
                 if mouse.kind == MouseEventKind::ScrollDown {
                     let bottom = self.rows.len().saturating_sub(usize::from(list.height));
                     self.scroll = (self.scroll + WHEEL_ROWS).min(bottom);

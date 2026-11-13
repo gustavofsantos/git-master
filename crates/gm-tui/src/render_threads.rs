@@ -33,7 +33,7 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn badge_word(badge: Badge) -> String {
+pub(crate) fn badge_word(badge: Badge) -> String {
     let (icon, word) = match badge {
         Badge::Open => (icons::OPEN, "Open"),
         Badge::Handled => (icons::HANDLED, "Handled"),
@@ -43,7 +43,7 @@ fn badge_word(badge: Badge) -> String {
     format!("{icon} {word}")
 }
 
-fn badge_color(badge: Badge) -> Color {
+pub(crate) fn badge_color(badge: Badge) -> Color {
     match badge {
         Badge::Open => Color::Yellow,
         Badge::Handled => Color::Cyan,
@@ -54,7 +54,7 @@ fn badge_color(badge: Badge) -> Color {
 
 /// The words beside a card's status: who wrote it, its label, kind and severity, whether it
 /// waits for an answer, its decorations.
-fn chip_words(chips: &Chips) -> Vec<String> {
+pub(crate) fn chip_words(chips: &Chips) -> Vec<String> {
     let mut words = Vec::new();
     if chips.agent {
         words.push(format!("{} {AGENT_WRITTEN}", icons::AGENT));

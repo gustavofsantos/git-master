@@ -13,6 +13,7 @@ use crate::app::{
 };
 use crate::icons;
 use crate::render_diff::draw_diff;
+use crate::render_reviews::{draw_review_list, draw_review_thread};
 
 pub const DIM: Style = Style::new().fg(Color::DarkGray);
 pub const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
@@ -170,6 +171,13 @@ fn draw_top(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.tab == Tab::Reviews {
+        if app.areas.main.is_some() {
+            let border = Block::new().borders(Borders::RIGHT).border_style(DIM);
+            frame.render_widget(border, area);
+        }
+        return draw_review_list(frame, app, area);
+    }
     let split = app.areas.main.is_some();
     if split {
         let border = Block::new().borders(Borders::RIGHT).border_style(DIM);
@@ -346,7 +354,7 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let placeholder = match app.tab {
         Tab::Diff => return draw_diff(frame, app, inner),
         Tab::File => "The File tab is not available yet.",
-        Tab::Reviews => "The Reviews tab is not available yet.",
+        Tab::Reviews => return draw_review_thread(frame, app, inner),
     };
     frame.render_widget(Paragraph::new(Line::styled(placeholder, DIM)), inner);
 }
@@ -371,6 +379,9 @@ fn bar_buttons(app: &App) -> Vec<(&'static str, String, Action)> {
         ),
         ("Tab", focus.to_owned(), Action::ToggleFocus),
     ];
+    if app.tab == Tab::Reviews {
+        reviews_buttons(app, &mut buttons);
+    }
     let selecting = app.diff.as_ref().is_some_and(|view| view.anchor.is_some());
     if app.focus == Focus::Main && app.tab == Tab::Diff && selecting {
         match app.context {
@@ -441,6 +452,40 @@ fn draw_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     strip.render(frame, &mut app.hits);
 }
 
+/// The buttons of the **Reviews** tab: the next filter, and on the selected thread what
+/// can be done with it.
+fn reviews_buttons(app: &App, buttons: &mut Vec<(&'static str, String, Action)>) {
+    use gm_view::local_review::{Filter, Version};
+    let next = Filter::ALL
+        .iter()
+        .position(|filter| *filter == app.reviews.page.filter())
+        .map_or(Filter::ALL[0], |at| {
+            Filter::ALL[(at + 1) % Filter::ALL.len()]
+        });
+    buttons.push(("F", next.label().to_owned(), Action::ReviewFilter(next)));
+    let Some(id) = app.reviews.page.selected_id() else {
+        return;
+    };
+    if app.focus != Focus::Main {
+        return;
+    }
+    let other = match app.reviews.page.version() {
+        Version::Before => Version::After,
+        Version::After => Version::Before,
+    };
+    buttons.push(("b", other.label().to_owned(), Action::ReviewVersion(other)));
+    let resolved = app
+        .comment(id)
+        .is_some_and(|comment| comment.status == gm_schema::ReviewStatus::Resolved);
+    if resolved {
+        buttons.push(("o", "reopen".to_owned(), Action::Reopen(id)));
+    } else {
+        buttons.push(("r", "reply".to_owned(), Action::Reply(id)));
+        buttons.push(("R", "resolve".to_owned(), Action::Resolve(id)));
+    }
+    buttons.push(("g", "go to diff".to_owned(), Action::GoToDiff(id)));
+}
+
 /// Every key, as `?` shows them.
 const KEYS: &[(&str, &str)] = &[
     ("1 2 3", "Diff, File or Reviews tab"),
@@ -464,6 +509,9 @@ const KEYS: &[(&str, &str)] = &[
     ("} {", "next or previous thread"),
     ("Enter", "unfold or fold the thread at the cursor"),
     ("r R o D", "reply, resolve, reopen, delete the thread"),
+    ("F", "the next filter, in Reviews"),
+    ("b", "Before or After, in Reviews"),
+    ("g", "the thread in the diff, in Reviews"),
     ("?", "these keys"),
     ("q", "quit"),
 ];
@@ -805,6 +853,106 @@ mod tests {
         assert_eq!(
             app.take_commands(),
             [CommandKind::ResolveReviewComment { id: 4 }]
+        );
+    }
+
+    #[test]
+    fn the_reviews_tab_groups_threads_reads_their_change_and_goes_to_the_diff() {
+        use gm_schema::{
+            CommandKind, Event, OperationId, ReviewChange, ReviewLocation, ReviewReply,
+            ReviewStatus,
+        };
+        let mut app = app();
+        let mut handled = crate::app::tests::comment(7, "src/lib.rs", ReviewStatus::Handled);
+        handled.body = "Return an error here.".to_owned();
+        handled.location = Some(ReviewLocation {
+            start_line: 2,
+            end_line: 3,
+        });
+        handled.snapshot = Some("before".to_owned());
+        handled.after_snapshot = Some("after".to_owned());
+        handled.replies = vec![ReviewReply {
+            id: 8,
+            author: "agent:claude-code".to_owned(),
+            body: "parse returns Result now.".to_owned(),
+            created_at: 5,
+        }];
+        let open = crate::app::tests::comment(9, "README.md", ReviewStatus::Open);
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(3),
+            comments: vec![handled, open],
+        });
+        app.take_commands();
+        let lines = screen(&mut app, 120, 30);
+        let column = |line: &str, text: &str| {
+            u16::try_from(line[..line.find(text).unwrap()].chars().count()).unwrap()
+        };
+        click(&mut app, column(&lines[0], "Reviews"), 0);
+        // The handled thread is first, waiting for the person; its snapshots are read at once.
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::LoadReviewChange { id: 7 }]
+        );
+        app.sent(OperationId(11), &CommandKind::LoadReviewChange { id: 7 });
+        app.apply(&Event::ReviewChange {
+            id: OperationId(11),
+            comment: 7,
+            path: "src/lib.rs".to_owned(),
+            change: Some(ReviewChange {
+                before: vec!["    s.parse().unwrap()".to_owned()],
+                after: vec!["    let n = s.parse()?;".to_owned(), "    Ok(n)".to_owned()],
+                changed: true,
+                before_start_line: 2,
+                after_start_line: 2,
+            }),
+        });
+        let lines = screen(&mut app, 120, 30);
+        assert!(lines[1].contains(" Open 2 "), "{lines:?}");
+        assert!(lines[2].starts_with(" Waiting for you · 1"), "{lines:?}");
+        assert!(
+            lines[3].contains("lib.rs:2–3  parse returns Result"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[4].starts_with(" Waiting for the agent · 1"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("Handled · #7 · src/lib.rs · lines 2–3"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[3].contains("The agent changed +2 -1 in these lines"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[4].contains("    2 -     s.parse().unwrap()"),
+            "{lines:?}"
+        );
+        app.focus = Focus::Main;
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('b'),
+            KeyModifiers::NONE,
+        ));
+        let lines = screen(&mut app, 120, 30);
+        assert!(
+            lines[4].contains("    2 +     let n = s.parse()?;"),
+            "{lines:?}"
+        );
+        let row = lines
+            .iter()
+            .position(|line| line.contains("[go to diff]"))
+            .unwrap();
+        click(
+            &mut app,
+            column(&lines[row], "[go to diff]") + 2,
+            u16::try_from(row).unwrap(),
+        );
+        assert_eq!(app.tab, Tab::Diff);
+        assert_eq!(app.context, Context::Unstaged);
+        assert_eq!(
+            app.selected().map(|file| file.path.as_str()),
+            Some("src/lib.rs")
         );
     }
 
