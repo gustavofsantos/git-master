@@ -14,6 +14,7 @@ use gm_view::review::Entry;
 
 use crate::app::{Action, App, Context, Focus, Hit};
 use crate::diff::{DiffView, LineColors};
+use crate::icons;
 use crate::render::{BOLD, DIM, ON, Strip};
 use crate::render_threads::{card_line, draw_composer, heading_line};
 
@@ -157,7 +158,7 @@ fn header(view: &DiffView, scope: &str) -> Line<'static> {
             Style::new().fg(Color::Green),
         ));
         spans.push(Span::styled(
-            format!(" −{removed}"),
+            format!(" -{removed}"),
             Style::new().fg(Color::Red),
         ));
         let hunks = view.hunks().len();
@@ -245,7 +246,7 @@ fn code_line(
         LineKind::Added => (line.new_no, "+", Style::new().fg(Color::Green), None),
         LineKind::Removed => (
             None,
-            "−",
+            "-",
             Style::new().fg(Color::Red),
             Some(Style::new().fg(Color::Red)),
         ),
@@ -259,7 +260,7 @@ fn code_line(
         // The selection's mark takes the first column of the number.
         let rest: String = number.chars().skip(1).collect();
         vec![
-            Span::styled("▌", Style::new().fg(Color::Blue)),
+            Span::styled(icons::SELECTED, Style::new().fg(Color::Blue)),
             Span::styled(rest, sign_style.add_modifier(Modifier::BOLD)),
         ]
     } else if marked {

@@ -5,6 +5,7 @@
 mod app;
 mod color;
 mod diff;
+mod icons;
 mod render;
 mod render_diff;
 mod render_threads;

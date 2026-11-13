@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::app::{
     Action, App, Context, Focus, Hit, MIN_HEIGHT, MIN_WIDTH, Overlay, Row, Tab, areas,
 };
+use crate::icons;
 use crate::render_diff::draw_diff;
 
 pub const DIM: Style = Style::new().fg(Color::DarkGray);
@@ -115,8 +116,14 @@ fn draw_top(frame: &mut Frame, app: &mut App, area: Rect) {
     strip.text(" gitmaster ", BOLD);
     for tab in Tab::ALL {
         let title = match tab {
-            Tab::Reviews => format!(" {} {} ", tab.title(), app.unresolved()),
-            _ => format!(" {} ", tab.title()),
+            Tab::Reviews => format!(
+                " {} {} {} ",
+                icons::TAB_REVIEWS,
+                tab.title(),
+                app.unresolved()
+            ),
+            Tab::Diff => format!(" {} {} ", icons::TAB_DIFF, tab.title()),
+            Tab::File => format!(" {} {} ", icons::TAB_FILE, tab.title()),
         };
         let style = if tab == app.tab { ON } else { DIM };
         strip
@@ -125,16 +132,26 @@ fn draw_top(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     let branch = &app.status.branch;
     let mut right = vec![(
-        format!("⎇ {}", branch.head.as_deref().unwrap_or("(detached)")),
+        format!(
+            "{} {}",
+            icons::BRANCH,
+            branch.head.as_deref().unwrap_or("(detached)")
+        ),
         Style::new().fg(Color::Blue),
     )];
     if let Some(upstream) = &branch.upstream {
-        right.push((format!(" → {upstream}"), DIM));
+        right.push((format!(" {} {upstream}", icons::UPSTREAM), DIM));
         if branch.ahead > 0 {
-            right.push((format!(" ↑{}", branch.ahead), Style::new().fg(Color::Green)));
+            right.push((
+                format!(" {}{}", icons::AHEAD, branch.ahead),
+                Style::new().fg(Color::Green),
+            ));
         }
         if branch.behind > 0 {
-            right.push((format!(" ↓{}", branch.behind), Style::new().fg(Color::Red)));
+            right.push((
+                format!(" {}{}", icons::BEHIND, branch.behind),
+                Style::new().fg(Color::Red),
+            ));
         }
     }
     right.push((" ".to_owned(), Style::new()));
@@ -238,9 +255,9 @@ fn sidebar_line(row: &Row, width: usize, button: Option<&'static str>) -> Line<'
         Row::Dir { dir, files, folded } => {
             let name = if dir.is_empty() { "./" } else { dir.as_str() };
             let text = if *folded {
-                format!(" ▸ {name} ({files})")
+                format!(" {} {name} ({files})", icons::FOLDER)
             } else {
-                format!(" ▾ {name}")
+                format!(" {} {name}", icons::FOLDER_OPEN)
             };
             Line::styled(fit_end(&text, width), DIM)
         }
@@ -252,13 +269,13 @@ fn sidebar_line(row: &Row, width: usize, button: Option<&'static str>) -> Line<'
                     Style::new().fg(Color::Green),
                 ));
                 tail.push(Span::styled(
-                    format!(" −{deleted}"),
+                    format!(" -{deleted}"),
                     Style::new().fg(Color::Red),
                 ));
             }
             if file.threads > 0 {
                 tail.push(Span::styled(
-                    format!(" ◫{}", file.threads),
+                    format!(" {}{}", icons::THREADS, file.threads),
                     Style::new().fg(Color::Yellow),
                 ));
             }
@@ -277,10 +294,11 @@ fn sidebar_line(row: &Row, width: usize, button: Option<&'static str>) -> Line<'
                 format!("   {} ", file.letter),
                 Style::new().fg(letter_color(file.letter)),
             );
-            let room = width.saturating_sub(letter.width() + tail_width);
+            let icon = Span::raw(format!("{} ", icons::file(&file.name)));
+            let room = width.saturating_sub(letter.width() + icon.width() + tail_width);
             let name = fit_end(&file.name, room);
             let gap = room.saturating_sub(Span::raw(name.as_str()).width());
-            let mut spans = vec![letter, Span::raw(name), Span::raw(" ".repeat(gap))];
+            let mut spans = vec![letter, icon, Span::raw(name), Span::raw(" ".repeat(gap))];
             spans.extend(tail);
             Line::from(spans)
         }
@@ -428,7 +446,7 @@ const KEYS: &[(&str, &str)] = &[
     ("1 2 3", "Diff, File or Reviews tab"),
     ("Tab", "sidebar or main pane"),
     ("t", "Unstaged or Staged"),
-    ("j k ↓ ↑", "move in the sidebar or the diff"),
+    ("j k Down Up", "move in the sidebar or the diff"),
     ("Ctrl+D Ctrl+U", "half a screen down or up"),
     ("g G", "first or last row"),
     ("Enter", "fold a folder, or show a file's diff"),
@@ -543,16 +561,32 @@ mod tests {
         let mut app = app();
         let lines = screen(&mut app, 120, 30);
         assert!(
-            lines[0].starts_with(" gitmaster   Diff   File   Reviews 0"),
+            lines[0].starts_with(&format!(
+                " gitmaster   {} Diff   {} File   {} Reviews 0",
+                icons::TAB_DIFF,
+                icons::TAB_FILE,
+                icons::TAB_REVIEWS
+            )),
             "{lines:?}"
         );
         assert!(
-            lines[0].ends_with("⎇ feature → origin/feature ↑2"),
+            lines[0].ends_with(&format!(
+                "{} feature {} origin/feature {}2",
+                icons::BRANCH,
+                icons::UPSTREAM,
+                icons::AHEAD
+            )),
             "{lines:?}"
         );
         assert!(lines[1].starts_with("  Unstaged 1   Staged 1"), "{lines:?}");
-        assert!(lines[2].starts_with(" ▾ src"), "{lines:?}");
-        assert!(lines[3].starts_with("   M lib.rs"), "{lines:?}");
+        assert!(
+            lines[2].starts_with(&format!(" {} src", icons::FOLDER_OPEN)),
+            "{lines:?}"
+        );
+        assert!(
+            lines[3].starts_with(&format!("   M {} lib.rs", icons::file("lib.rs"))),
+            "{lines:?}"
+        );
         assert!(lines[1].contains("│ src/lib.rs · unstaged"), "{lines:?}");
         assert!(lines[3].contains("│  Reading the diff…"), "{lines:?}");
         assert!(
@@ -644,8 +678,14 @@ mod tests {
             lines[1].ends_with("│ src/lib.rs · 3–4 · 3 lines  [comment] [stage lines] [clear]"),
             "{lines:?}"
         );
-        assert!(lines[3].contains("│ ▌   3"), "{lines:?}");
-        assert!(lines[5].contains("│ ▌   4 +"), "{lines:?}");
+        assert!(
+            lines[3].contains(&format!("│ {}   3", icons::SELECTED)),
+            "{lines:?}"
+        );
+        assert!(
+            lines[5].contains(&format!("│ {}   4 +", icons::SELECTED)),
+            "{lines:?}"
+        );
         let column = u16::try_from(
             lines[1]
                 .find("[stage lines]")
@@ -701,7 +741,7 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("Use ? here.█")),
+            lines.iter().any(|line| line.contains("Use ? here.")),
             "{lines:?}"
         );
         app.on_key(key(KeyCode::Enter));
@@ -746,7 +786,7 @@ mod tests {
         let lines = screen(&mut app, 120, 30);
         let head = lines
             .iter()
-            .position(|line| line.contains("│ Open · lines 3–4"))
+            .position(|line| line.contains(&format!("│ {} Open · lines 3–4", icons::OPEN)))
             .expect("the card's head");
         assert!(lines[head - 1].contains("4 +"), "{lines:?}");
         assert!(
@@ -774,7 +814,10 @@ mod tests {
         let mut app = app();
         app.take_commands();
         let lines = screen(&mut app, 120, 30);
-        assert!(lines[3].starts_with("   M lib.rs"), "{lines:?}");
+        assert!(
+            lines[3].starts_with(&format!("   M {} lib.rs", icons::file("lib.rs"))),
+            "{lines:?}"
+        );
         assert!(lines[3].contains("[stage] │"), "{lines:?}");
         let column = u16::try_from(lines[3].find("[stage]").unwrap()).unwrap();
         click(&mut app, column + 1, 3);
@@ -796,12 +839,12 @@ mod tests {
         app.apply(&diff_event());
         let lines = screen(&mut app, 120, 30);
         assert!(
-            lines[1].ends_with("│ src/lib.rs  +1 −1 · hunk 1/1 · unstaged"),
+            lines[1].ends_with("│ src/lib.rs  +1 -1 · hunk 1/1 · unstaged"),
             "{lines:?}"
         );
         assert!(lines[2].ends_with("│ @@ fn main() {  [stage]"), "{lines:?}");
         assert!(lines[3].ends_with("│     3       let a = 1;"), "{lines:?}");
-        assert!(lines[4].ends_with("│       −     old();"), "{lines:?}");
+        assert!(lines[4].ends_with("│       -     old();"), "{lines:?}");
         assert!(lines[5].ends_with("│     4 +     new();"), "{lines:?}");
         let column = u16::try_from(lines[2].chars().count() - 3).unwrap();
         click(&mut app, column, 2);
@@ -820,7 +863,10 @@ mod tests {
     fn a_narrow_terminal_shows_one_pane() {
         let mut app = app();
         let lines = screen(&mut app, 90, 30);
-        assert!(lines[3].starts_with("   M lib.rs"), "{lines:?}");
+        assert!(
+            lines[3].starts_with(&format!("   M {} lib.rs", icons::file("lib.rs"))),
+            "{lines:?}"
+        );
         assert!(!lines[1].contains("unstaged"), "{lines:?}");
         app.focus = Focus::Main;
         let lines = screen(&mut app, 90, 30);

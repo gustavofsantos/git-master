@@ -43,7 +43,7 @@ GitMaster is for one engineer on one machine. It has no account, and it has no h
 
 ## Self-contained
 
-The only external program GitMaster needs is `git`. Features that would need another program installed, such as a search tool or a language server, are built into the app instead. Text search, for example, uses `git grep`, which is part of Git.
+The only external program GitMaster needs is `git`. Features that would need another program installed, such as a search tool or a language server, are built into the app instead. Text search, for example, uses `git grep`, which is part of Git. The one thing the [terminal companion](../guide/terminal-companion.md) asks of your machine is a Nerd Font in the terminal, for its icons.
 
 ## Quality bar
 

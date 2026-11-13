@@ -18,6 +18,7 @@ use gm_view::review::{
 };
 
 use crate::app::{Action, Hit};
+use crate::icons;
 use crate::render::{BOLD, DIM, ON, Strip};
 use crate::threads::{Composer, Folds, TYPES};
 
@@ -32,13 +33,14 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn badge_word(badge: Badge) -> &'static str {
-    match badge {
-        Badge::Open => "Open",
-        Badge::Handled => "Handled",
-        Badge::Resolved => "Resolved",
-        Badge::Outdated => "Outdated",
-    }
+fn badge_word(badge: Badge) -> String {
+    let (icon, word) = match badge {
+        Badge::Open => (icons::OPEN, "Open"),
+        Badge::Handled => (icons::HANDLED, "Handled"),
+        Badge::Resolved => (icons::RESOLVED, "Resolved"),
+        Badge::Outdated => (icons::OUTDATED, "Outdated"),
+    };
+    format!("{icon} {word}")
 }
 
 fn badge_color(badge: Badge) -> Color {
@@ -55,7 +57,7 @@ fn badge_color(badge: Badge) -> Color {
 fn chip_words(chips: &Chips) -> Vec<String> {
     let mut words = Vec::new();
     if chips.agent {
-        words.push(AGENT_WRITTEN.to_owned());
+        words.push(format!("{} {AGENT_WRITTEN}", icons::AGENT));
     }
     words.extend(chips.label.map(|label| label.as_str().to_owned()));
     words.extend(chips.kind.iter().map(|word| (*word).to_owned()));
@@ -134,7 +136,7 @@ pub fn card_line(
                 area,
                 action: Action::OpenThread(id),
             });
-            strip.text(format!("▸ {summary}"), DIM);
+            strip.text(format!("{} {summary}", icons::FOLDED), DIM);
         }
         Part::Reply {
             agent,
@@ -143,7 +145,10 @@ pub fn card_line(
         } => {
             strip.text(reply_head(author, *created_at, now_secs()), BOLD);
             if *agent {
-                strip.text(format!(" · {AGENT_WRITTEN}"), Style::new().fg(Color::Cyan));
+                strip.text(
+                    format!(" · {} {AGENT_WRITTEN}", icons::AGENT),
+                    Style::new().fg(Color::Cyan),
+                );
             }
         }
         Part::Toggle(toggle) => {
@@ -164,7 +169,11 @@ pub fn heading_line(heading: &Heading, area: Rect, hits: &mut Vec<Hit>) -> Line<
     match heading {
         Heading::Outdated { count, open } => {
             let mut strip = Strip::new(area);
-            let mark = if *open { "▾" } else { "▸" };
+            let mark = if *open {
+                icons::UNFOLDED
+            } else {
+                icons::FOLDED
+            };
             let noun = if *count == 1 { "thread" } else { "threads" };
             strip.button(
                 format!(" {mark} {count} outdated {noun}"),
@@ -183,7 +192,7 @@ pub fn heading_line(heading: &Heading, area: Rect, hits: &mut Vec<Hit>) -> Line<
 fn text_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     if text.is_empty() {
         return vec![Line::from(vec![
-            Span::styled("█", Style::new().fg(Color::Blue)),
+            Span::styled(" ", ON),
             Span::styled(" Write the comment.", DIM),
         ])];
     }
@@ -192,7 +201,7 @@ fn text_lines(text: &str, width: usize) -> Vec<Line<'static>> {
         .map(Line::raw)
         .collect();
     if let Some(last) = lines.last_mut() {
-        last.push_span(Span::styled("█", Style::new().fg(Color::Blue)));
+        last.push_span(Span::styled(" ", ON));
     }
     lines
 }

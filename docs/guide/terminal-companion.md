@@ -26,12 +26,14 @@ tmux split-window -h 'gitmaster tui'
 
 The terminal must be at least 80 columns wide and 24 rows high. A smaller terminal shows only a message that asks for more room.
 
+The terminal must use a Nerd Font: the companion draws its icons, such as the branch, the folders, the file types and the status of a thread, with Nerd Font glyphs, and has no other set. With another font they show as empty boxes.
+
 ## The screen
 
 Every screen has the same frame:
 
 - The **top bar** shows `gitmaster`, the tabs **Diff**, **File** and **Reviews**, and on the right the branch and its upstream. The **Reviews** tab shows how many threads are not resolved.
-- The **sidebar** on the left lists the changed files under their folders: each folder that holds changed files is one row, `./` for the root, listed last. Three chips at its top choose what it lists: the uncommitted changes, as **Unstaged N**, the changes not staged yet, and **Staged N**, the changes ready to commit; and **Branch N**, the changes the branch's commits bring (see [Branch changes](#branch-changes)). Each file shows its status letter, `+a −r` and, as `◫N`, the threads on it that are not resolved. A binary or untracked file shows no counts. Click a folder to fold or unfold it.
+- The **sidebar** on the left lists the changed files under their folders: each folder that holds changed files is one row, `./` for the root, listed last. Three chips at its top choose what it lists: the uncommitted changes, as **Unstaged N**, the changes not staged yet, and **Staged N**, the changes ready to commit; and **Branch N**, the changes the branch's commits bring (see [Branch changes](#branch-changes)). Each file shows its status letter, an icon for its type, `+a -r` and, after a comments icon, how many threads on it are not resolved. A binary or untracked file shows no counts. Click a folder to fold or unfold it.
 - The **main pane** on the right shows the selected tab for the selected file.
 - The **button bar** at the bottom lists the actions that work where you are, each with its key. Every entry is a button: click it or press its key.
 
@@ -63,13 +65,13 @@ These keys work everywhere:
 
 > **Planned.** `f` and `e` are not available yet.
 
-The **Diff** tab shows the diff of the selected file in the chosen context: its unstaged changes under **Unstaged**, its staged changes under **Staged**. Its header shows the path, `+a −r` and which hunk the cursor is in, such as `hunk 1/5`.
+The **Diff** tab shows the diff of the selected file in the chosen context: its unstaged changes under **Unstaged**, its staged changes under **Staged**. Its header shows the path, `+a -r` and which hunk the cursor is in, such as `hunk 1/5`.
 
 Each hunk starts with a header bar that shows the function or section it is in, as Git finds it, and a button: **[stage]** under **Unstaged**, **[unstage]** under **Staged**. Each line shows its number in the file and a `+` or `−` in the gutter, in your terminal's green and red. Code is colored by its language; a removed line is drawn in red, and a very large diff is shown without colors. Click a line to put the cursor on it; the wheel scrolls the diff.
 
 | Key | Action |
 |---|---|
-| `j` / `k`, `↓` / `↑` | Move the cursor down or up a line. |
+| `j` / `k`, `Down` / `Up` | Move the cursor down or up a line. |
 | `J` / `K` | Go to the next or the previous hunk. |
 | `Ctrl+D` / `Ctrl+U` | Move half a screen down or up. |
 | `g` / `G` | Go to the first or the last line. |
@@ -83,7 +85,7 @@ Each hunk starts with a header bar that shows the function or section it is in, 
 
 **Branch** shows what the branch you are on brings to its base, as the app's **Branch** tab does: the changes of its own commits, from the commit where it split from the default branch to its tip. The default branch is the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists. Commits that landed on the default branch after the split are not shown, and uncommitted changes are on **Unstaged** and **Staged**.
 
-The sidebar lists the branch's files with `+a −r`, and the **Diff** tab shows each file's diff, with the branch and its base in the header, such as `feature against main`. The diff is read-only: it has no **[stage]** buttons. You can start a thread on its lines: the companion finds the selected text in the file as it is now, as for a commit's diff in the app.
+The sidebar lists the branch's files with `+a -r`, and the **Diff** tab shows each file's diff, with the branch and its base in the header, such as `feature against main`. The diff is read-only: it has no **[stage]** buttons. You can start a thread on its lines: the companion finds the selected text in the file as it is now, as for a commit's diff in the app.
 
 The list follows the branch: a new commit, a checkout or a rebase reads it again. When there is nothing to compare, the sidebar says why, for example **You are on the default branch.** or **`feature` and `main` have no common ancestor.**
 
@@ -99,7 +101,7 @@ Under **Staged**, the same buttons and `u` unstage. Staging lines works as in th
 
 ## Select lines
 
-Press on a line and drag to the last line, or press `V` and move the cursor. The selected lines are marked with `▌` in the gutter. `o` moves the cursor to the other end of the selection, and `Esc` or `V` clears it.
+Press on a line and drag to the last line, or press `V` and move the cursor. The selected lines are marked with an arrow in the gutter. `o` moves the cursor to the other end of the selection, and `Esc` or `V` clears it.
 
 While lines are selected, the diff's header shows the range, such as `44–48 · 5 lines`, and the buttons that act on it: **[comment]**, **[stage lines]** (or **[unstage lines]** under **Staged**) and **[clear]**. The same selection is used for a thread and for staging. A selection with no added or removed line stages nothing, and the companion says so.
 
@@ -125,7 +127,7 @@ The type is the comment's label: **change** is `issue`, **question** is `questio
 
 Each thread is drawn under the last line it is anchored to, in a box with a colored edge, the same threads the app's diff shows. Its first line shows its status (**Open**, **Handled**, **Resolved** or **Outdated**), its lines, when it was written, its label and the buttons. Below come the comment and the replies, oldest first, each with its author and time. A reply or a thread from the agent is marked **Agent-written**. The lines an open thread covers are marked `┃` in the gutter. When the agent has handled the thread, the box also shows what the agent changed, as GitMaster measured it from its own snapshots: the lines added and removed in the thread's lines, and elsewhere.
 
-A resolved thread folds to one line; click it, or press `Enter` on its line, to unfold it, and **[fold]** folds it again. A thread with more than two replies shows the latest one and a toggle, **[N earlier replies]**, that shows the others. An **Outdated** thread, whose text is no longer found exactly once, is not drawn under a line: it is listed under **▸ N outdated threads** above the diff, which a click unfolds. Threads on lines the diff does not show are listed above the diff too. `}` and `{` go to the next and the previous thread. The box has the buttons for what you can do next:
+A resolved thread folds to one line; click it, or press `Enter` on its line, to unfold it, and **[fold]** folds it again. A thread with more than two replies shows the latest one and a toggle, **[N earlier replies]**, that shows the others. An **Outdated** thread, whose text is no longer found exactly once, is not drawn under a line: it is listed under **N outdated threads** above the diff, which a click unfolds. Threads on lines the diff does not show are listed above the diff too. `}` and `{` go to the next and the previous thread. The box has the buttons for what you can do next:
 
 | Button | Key | Action |
 |---|---|---|
@@ -161,7 +163,7 @@ An **Outdated** thread, whose text is no longer found exactly once, is listed he
 
 > **Planned.** The **File** tab is not available yet.
 
-The **File** tab shows the whole selected file as it is in the working tree, colored by its language. The gutter marks the lines that changed with `┃` and the places where lines were removed with `▾`. A long run of unchanged lines folds to one line, such as `┈┈ 14 unchanged lines (53–66)`; click it or press `z` on it to unfold it. Threads are drawn folded under their lines.
+The **File** tab shows the whole selected file as it is in the working tree, colored by its language. The gutter marks the lines that changed with `┃` and the places where lines were removed with an icon. A long run of unchanged lines folds to one line, such as `┈┈ 14 unchanged lines (53–66)`; click it or press `z` on it to unfold it. Threads are drawn folded under their lines.
 
 Select lines and start a thread here as in the **Diff** tab: any line of the file can carry a thread, changed or not. `f` goes back to the **Diff** tab at the same line, and `e` opens your editor there.
 
