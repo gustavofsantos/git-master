@@ -2382,6 +2382,7 @@ dependencies = [
  "gm-core",
  "gm-schema",
  "proptest",
+ "serde_json",
  "tempfile",
  "unicode-width",
 ]
