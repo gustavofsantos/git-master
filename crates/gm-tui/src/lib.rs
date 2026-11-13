@@ -5,6 +5,7 @@
 mod color;
 mod data;
 mod draw;
+mod help;
 mod icons;
 mod nav;
 mod reviews;

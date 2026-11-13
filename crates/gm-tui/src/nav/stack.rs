@@ -3,7 +3,6 @@
 //! it instead of stacking a copy, and the stack is capped.
 
 /// The most screens on the stack, the root included.
-#[cfg(test)]
 pub const MAX_DEPTH: usize = 32;
 
 /// What a screen is known by: its address, as the trail shows it.
@@ -37,10 +36,17 @@ impl<S: Addressed> Stack<S> {
         self.screens.len()
     }
 
+    /// The screen at the bottom, which is never closed.
+    pub fn root(&self) -> &S {
+        self.screens.first().expect("the root is never popped")
+    }
+
+    pub fn root_mut(&mut self) -> &mut S {
+        self.screens.first_mut().expect("the root is never popped")
+    }
+
     /// Opens `screen`: on top, or, when its address is on the stack already, back to that
     /// one (the screens above it are closed). At the cap, the screen above the root goes.
-    // Used by the screens pushed on Status (M3 to M6); by tests until then.
-    #[cfg(test)]
     pub fn open(&mut self, screen: S) {
         let address = screen.address();
         if let Some(at) = self.screens.iter().position(|s| s.address() == address) {

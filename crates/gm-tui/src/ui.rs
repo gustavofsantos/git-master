@@ -34,22 +34,41 @@ pub const MIN_HEIGHT: u16 = 24;
 /// Rows a turn of the mouse wheel scrolls.
 const WHEEL_ROWS: isize = 3;
 
-/// A screen of the stack. Status is the root; the other screens come with M3 to M6.
+/// What a screen shows: its sections, with the cursor, folds and selection, and how far it
+/// is scrolled.
 #[derive(Debug, Default)]
-pub struct StatusScreen {
+pub struct View {
     pub tree: Tree<Item>,
     pub scroll: usize,
 }
 
+/// A screen of the stack. Status is the root; the other screens come with M3 to M6.
 #[derive(Debug)]
 pub enum Screen {
-    Status(StatusScreen),
+    Status(View),
+    /// Every key (`?`), as a screen of its own so it scrolls and searches.
+    Keys(View),
+}
+
+impl Screen {
+    pub fn view(&self) -> &View {
+        match self {
+            Screen::Status(view) | Screen::Keys(view) => view,
+        }
+    }
+
+    pub fn view_mut(&mut self) -> &mut View {
+        match self {
+            Screen::Status(view) | Screen::Keys(view) => view,
+        }
+    }
 }
 
 impl Addressed for Screen {
     fn address(&self) -> String {
         match self {
             Screen::Status(_) => "status".to_owned(),
+            Screen::Keys(_) => "keys".to_owned(),
         }
     }
 }
@@ -65,8 +84,6 @@ pub enum Yes {
 /// An overlay over the top screen (D241 (1)).
 #[derive(Debug)]
 pub enum Overlay {
-    /// Every key of the screen (`?`).
-    Keys,
     Text {
         composer: Composer,
         guard: Guard,
@@ -83,12 +100,11 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    fn guard(&self) -> Option<&Guard> {
+    fn guard(&self) -> &Guard {
         match self {
-            Overlay::Keys => None,
             Overlay::Text { guard, .. }
             | Overlay::Confirm { guard, .. }
-            | Overlay::Search { guard, .. } => Some(guard),
+            | Overlay::Search { guard, .. } => guard,
         }
     }
 }
@@ -180,7 +196,7 @@ impl App {
                 status,
                 ..Repo::default()
             },
-            stack: Stack::new(Screen::Status(StatusScreen::default())),
+            stack: Stack::new(Screen::Status(View::default())),
             input: defaults::input(),
             registry: defaults::registry(),
             overlays: Vec::new(),
@@ -229,7 +245,7 @@ impl App {
     pub fn guard_closed(&self, now: Instant) -> bool {
         self.overlays
             .last()
-            .and_then(Overlay::guard)
+            .map(Overlay::guard)
             .is_some_and(|guard| now < guard.opens_at())
     }
 
@@ -237,24 +253,34 @@ impl App {
         self.dirty = true;
     }
 
-    pub fn status(&self) -> &StatusScreen {
-        match self.stack.top() {
-            Screen::Status(screen) => screen,
-        }
+    /// What the top screen shows.
+    pub fn view(&self) -> &View {
+        self.stack.top().view()
     }
 
-    pub fn status_mut(&mut self) -> &mut StatusScreen {
-        match self.stack.top_mut() {
-            Screen::Status(screen) => screen,
-        }
+    pub fn view_mut(&mut self) -> &mut View {
+        self.stack.top_mut().view_mut()
     }
 
     fn tree(&self) -> &Tree<Item> {
-        &self.status().tree
+        &self.view().tree
     }
 
     fn tree_mut(&mut self) -> &mut Tree<Item> {
-        &mut self.status_mut().tree
+        &mut self.view_mut().tree
+    }
+
+    /// Status's sections, wherever the stack is: the engine's answers land there.
+    fn status_tree(&self) -> &Tree<Item> {
+        &self.stack.root().view().tree
+    }
+
+    fn status_tree_mut(&mut self) -> &mut Tree<Item> {
+        &mut self.stack.root_mut().view_mut().tree
+    }
+
+    fn on_status(&self) -> bool {
+        matches!(self.stack.top(), Screen::Status(_))
     }
 
     /// The mode the keys are read in (D241 (2)).
@@ -304,7 +330,7 @@ impl App {
                 self.repo.status.clone_from(status);
                 self.ask_for_reads();
                 // Unfolded files may have changed: read them again; their old diff shows meanwhile.
-                for (group, path) in status::unfolded_files(self.tree().toggled()) {
+                for (group, path) in status::unfolded_files(self.status_tree().toggled()) {
                     if group != Group::Branch {
                         self.ask_diff(group, &path);
                     }
@@ -482,8 +508,8 @@ impl App {
             threads: &self.expanded,
         };
         let sections = status::sections(&self.repo, opened);
-        self.tree_mut().set(sections);
-        let missing: Vec<(Group, String)> = status::unfolded_files(self.tree().toggled())
+        self.status_tree_mut().set(sections);
+        let missing: Vec<(Group, String)> = status::unfolded_files(self.status_tree().toggled())
             .into_iter()
             .filter(|key| !self.repo.files.contains_key(key))
             .collect();
@@ -500,7 +526,7 @@ impl App {
                 threads: &self.expanded,
             };
             let sections = status::sections(&self.repo, opened);
-            self.tree_mut().set(sections);
+            self.status_tree_mut().set(sections);
         }
         if let Some(id) = self.reveal {
             let card = self
@@ -510,7 +536,7 @@ impl App {
                 .find(|row| matches!(row.section.item, Item::Card { id: card, .. } if card == id))
                 .map(|row| row.section.id.clone());
             if let Some(card) = card {
-                self.tree_mut().move_to_id(&card);
+                self.status_tree_mut().move_to_id(&card);
                 self.reveal = None;
             }
         }
@@ -562,12 +588,9 @@ impl App {
     }
 
     fn overlay_key(&mut self, key: Key, now: Instant) {
-        let guard = self.overlays.last().and_then(Overlay::guard).copied();
+        let guard = self.overlays.last().map(Overlay::guard).copied();
         let allowed = |answer| guard.is_none_or(|guard: Guard| guard.accepts(answer, now));
         match self.overlays.last_mut() {
-            Some(Overlay::Keys) => {
-                self.overlays.pop();
-            }
             Some(Overlay::Confirm { .. }) => {
                 let answer = match key.code {
                     Code::Char('y' | 'Y') | Code::Enter => Answer::Confirm,
@@ -685,7 +708,7 @@ impl App {
                     let allowed = self
                         .overlays
                         .last()
-                        .and_then(Overlay::guard)
+                        .map(Overlay::guard)
                         .is_none_or(|guard| guard.accepts(answer, now));
                     if allowed {
                         self.answer(answer);
@@ -714,7 +737,7 @@ impl App {
     fn scroll_by(&mut self, by: isize) {
         let total = self.tree().rows().len();
         let rows = self.body_rows;
-        let screen = self.status_mut();
+        let screen = self.view_mut();
         screen.scroll = screen
             .scroll
             .saturating_add_signed(by)
@@ -732,6 +755,13 @@ impl App {
             .is_some_and(|spec| !spec.modes.contains(&self.mode()))
         {
             return false;
+        }
+        // The Keys screen only moves, folds, searches and goes back.
+        if !self.on_status() {
+            let spec = self.registry.get(name);
+            return name.starts_with("cursor.")
+                || matches!(name, "screen.back" | "screen.close")
+                || spec.is_some_and(|s| matches!(s.group, "Fold" | "Search" | "Help"));
         }
         let current = self.tree().current().map(|s| &s.item);
         let group = current
@@ -845,7 +875,12 @@ impl App {
                 self.rebuild();
                 self.tree_mut().move_to_id("group/Branch");
             }
-            "help.keys" => self.overlays.push(Overlay::Keys),
+            "help.keys" => {
+                let mut view = View::default();
+                view.tree
+                    .set(crate::help::sections(&self.registry, &self.input));
+                self.stack.open(Screen::Keys(view));
+            }
             "terminal.suspend" => self.requests.push(Request::Suspend),
             "terminal.redraw" => self.requests.push(Request::Redraw),
             "quit" => self.quit = true,
@@ -1578,5 +1613,57 @@ mod tests {
             app.tree().current().map(|s| &s.item),
             Some(Item::Commit { index: 1 })
         ));
+    }
+
+    #[test]
+    fn the_keys_screen_stacks_on_status_scrolls_and_goes_back() {
+        let now = Instant::now();
+        let mut app = app();
+        app.tree_mut().move_to_id("file/Unstaged/src/lib.rs");
+        let on_status = app.tree().cursor_index();
+        key(&mut app, "?", now);
+        assert_eq!(app.stack.trail(), ["status", "keys"]);
+        assert!(matches!(
+            app.tree().rows().first().map(|r| &r.section.item),
+            Some(Item::KeyGroup { title: "Move", .. })
+        ));
+        // It moves and searches like any screen; Status's actions do not apply on it.
+        key(&mut app, "G", now);
+        assert_eq!(app.tree().cursor_index(), Some(app.tree().rows().len() - 1));
+        key(&mut app, "g g / u n s t a g e <space> w h a t <cr>", now);
+        assert!(matches!(
+            app.tree().current().map(|s| &s.item),
+            Some(Item::Binding { description, .. }) if description.starts_with("Unstage what")
+        ));
+        assert!(!app.applies("stage") && !app.applies("go.threads"));
+        // An answer from the engine still lands on Status underneath.
+        app.apply(&Event::ChangeStatsLoaded {
+            id: OperationId(5),
+            stats: gm_schema::ChangeStats::default(),
+        });
+        assert_eq!(app.stack.trail(), ["status", "keys"]);
+        let groups: Vec<&str> = app
+            .tree()
+            .rows()
+            .iter()
+            .filter_map(|r| match r.section.item {
+                Item::KeyGroup { title, .. } => Some(title),
+                _ => None,
+            })
+            .collect();
+        let mut once = groups.clone();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(groups.len(), once.len(), "each group once: {groups:?}");
+        key(&mut app, "q", now);
+        assert_eq!(app.stack.trail(), ["status"]);
+        assert!(!app.quit);
+        assert_eq!(
+            app.tree().cursor_index(),
+            on_status,
+            "Status as it was left"
+        );
+        key(&mut app, "? <esc>", now);
+        assert_eq!(app.stack.trail(), ["status"]);
     }
 }

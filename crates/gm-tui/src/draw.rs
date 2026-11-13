@@ -139,7 +139,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
     let now = Instant::now();
     match app.overlays.last() {
-        Some(Overlay::Keys) => draw_keys(frame, app, body),
         Some(Overlay::Text { .. }) => draw_text_box(frame, app, body, now),
         Some(Overlay::Confirm { .. }) => draw_question(frame, app, body, now),
         Some(Overlay::Search { .. }) => draw_search(frame, app, size),
@@ -151,11 +150,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let height = usize::from(body.height);
-    let rows = app.status().tree.rows();
-    let cursor = app.status().tree.cursor_index().unwrap_or(0);
-    let selection = app.status().tree.selection();
+    let rows = app.view().tree.rows();
+    let cursor = app.view().tree.cursor_index().unwrap_or(0);
+    let selection = app.view().tree.selection();
     // Keep the cursor on screen.
-    let mut scroll = app.status().scroll.min(rows.len().saturating_sub(height));
+    let mut scroll = app.view().scroll.min(rows.len().saturating_sub(height));
     if cursor < scroll {
         scroll = cursor;
     } else if cursor >= scroll + height {
@@ -185,7 +184,7 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     }
     frame.render_widget(Paragraph::new(lines), body);
     app.hits.extend(hits);
-    app.status_mut().scroll = scroll;
+    app.view_mut().scroll = scroll;
 }
 
 fn fold_icon(row: &Row<'_, Item>) -> &'static str {
@@ -372,6 +371,17 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
         Item::Commits { .. } | Item::Commit { .. } | Item::Stashes { .. } | Item::Stash { .. } => {
             history_line(app, row)
         }
+        Item::KeyGroup { title, count } => Line::from(vec![
+            Span::styled(
+                format!("{} {title}", fold_icon(row)),
+                color(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" ({count})"), DIM),
+        ]),
+        Item::Binding { keys, description } => Line::from(vec![
+            Span::styled(format!("    {keys:<24}"), color(Color::Yellow)),
+            Span::raw(*description),
+        ]),
     }
 }
 
@@ -588,8 +598,8 @@ fn draw_mode_line(frame: &mut Frame, app: &mut App, area: Rect) {
         let style = if depth == top { BOLD } else { DIM };
         strip.click(format!("gitmaster://{address}"), style, Click::Trail(depth));
     }
-    let total = app.status().tree.rows().len();
-    let place = app.status().tree.cursor_index().map_or(0, |at| at + 1);
+    let total = app.view().tree.rows().len();
+    let place = app.view().tree.cursor_index().map_or(0, |at| at + 1);
     let position = format!("{place}/{total} ");
     let used = usize::from(strip.x - area.x);
     let gap = usize::from(area.width).saturating_sub(used + position.len());
@@ -703,34 +713,6 @@ fn draw_menu(frame: &mut Frame, app: &mut App, body: Rect) {
 }
 
 /// Every key of the screen, by group, with what it does.
-fn draw_keys(frame: &mut Frame, app: &mut App, body: Rect) {
-    let map = app.input.map(crate::nav::Mode::Normal);
-    let mut lines = vec![
-        Line::styled(" Every key of this screen · any key closes", DIM),
-        Line::default(),
-    ];
-    let mut group = "";
-    for spec in app.registry.all() {
-        let Some(keys) = map.map(|m| m.keys_of(spec.name)).filter(|k| !k.is_empty()) else {
-            continue;
-        };
-        if spec.group != group {
-            group = spec.group;
-            lines.push(Line::styled(
-                format!(" {group}"),
-                color(Color::Magenta).add_modifier(Modifier::BOLD),
-            ));
-        }
-        let keys: Vec<String> = keys.iter().map(|k| show_sequence(k)).collect();
-        lines.push(Line::from(vec![
-            Span::styled(format!("   {:<22}", keys.join(", ")), color(Color::Yellow)),
-            Span::raw(spec.description),
-        ]));
-    }
-    frame.render_widget(Clear, body);
-    frame.render_widget(Paragraph::new(lines), body);
-}
-
 /// Keys of a prompt, dimmed until its guard accepts them (D242 (5)).
 fn guarded(open: bool) -> Style {
     if open {

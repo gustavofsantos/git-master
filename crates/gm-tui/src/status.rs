@@ -81,6 +81,16 @@ pub enum Item {
     Stash {
         index: usize,
     },
+    /// A group of the Keys screen.
+    KeyGroup {
+        title: &'static str,
+        count: usize,
+    },
+    /// A line of the Keys screen: the keys of an action and what it does.
+    Binding {
+        keys: String,
+        description: &'static str,
+    },
 }
 
 impl Item {
@@ -104,6 +114,8 @@ impl Item {
                 .as_ref()
                 .and_then(|history| history.commits.get(*index))
                 .map_or_default(|commit| format!("{} {}", commit.short, commit.subject)),
+            Item::KeyGroup { title, .. } => (*title).to_owned(),
+            Item::Binding { keys, description } => format!("{keys} {description}"),
             Item::Stash { index } => repo
                 .stashes
                 .get(*index)
