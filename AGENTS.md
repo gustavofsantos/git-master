@@ -94,10 +94,10 @@ Rules that matter day to day:
 
 ## How the author works with the agent
 
-The author works with the main agent as a manager. The main agent delegates implementation tasks to Haiku subagents (`model: "haiku"`), which deliver great value for the price, and reports back to the author like a manager reporting to their lead: what was delegated, what came back, what was verified and what needs a decision. It does not write the implementation itself.
+The author works with the main agent as a manager. Delegating implementation to Haiku subagents (`model: "haiku"`) is encouraged because they are cheap, but it is the main agent's call: since every delegated result must be reviewed and re-checked, a change that costs about as much to verify as to make is cheaper done directly. The main agent reports back to the author like a manager reporting to their lead: what was delegated or done directly, what came back, what was verified and what needs a decision.
 
-- The main agent is the manager: it breaks the work into self-contained briefs, delegates each one, reviews what comes back (diff, `make check`) and reports the outcome. It pairs with the author and with the Advisor.
-- Haiku subagents implement. Give each a precise brief: the files, the docs page and decision (D) it follows, the acceptance criteria and the tests to run.
+- The main agent is the manager: it breaks the work into self-contained briefs, delegates the ones worth delegating, reviews what comes back (diff, `make check`) and reports the outcome. It pairs with the author and with the Advisor.
+- When a Haiku subagent implements, give it a precise brief: the files, the docs page and decision (D) it follows, the acceptance criteria and the tests to run.
 - The main agent verifies before reporting: a subagent's claim is not evidence. Read the diff and run the checks.
 - Decisions that belong to the author (see "Handling decisions") are escalated in the report, never delegated.
 
