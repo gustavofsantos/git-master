@@ -18,7 +18,7 @@ gm-ui (GPUI)     gm-tui (ratatui)     gm-mcp (stdio JSON-RPC, own process)
 gm-schema: shared types (serde + JSON Schema) for UI, TUI, MCP and hooks
 ```
 
-The terminal companion (`gm-tui`, `gitmaster tui`, D235) is a third front end. Like `gitmaster mcp` it runs its own engine on the repository and shares only the files in `.git/gitmaster/`. The view models it shares with `gm-ui` (diff rows, line selection, the review model) live in `gm-view`, which depends on `gm-schema` only and never on GPUI or ratatui.
+The terminal companion (`gm-tui`, `gitmaster tui`, D235) is a third front end. Like `gitmaster mcp` it runs its own engine on the repository and shares only the files in `.git/gitmaster/`. The view models it shares with `gm-ui` (diff rows, line selection, the review model) live in `gm-view`, which depends on `gm-schema` and `gm-core` and never on GPUI or ratatui.
 
 The core defines the traits (`GitPort` and the others), and the adapters live in `gm-core` too. D27 allows extracting them into `gm-git`, `gm-hooks` and `gm-store` when the core grows heavy; until then "the UI never imports the Git adapter" is a convention. The core is tested with fakes, without a real repository.
 
