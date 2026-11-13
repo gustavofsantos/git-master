@@ -30,7 +30,7 @@ The companion uses your terminal's colors, so it matches your terminal theme and
 
 ## Screens
 
-> **Planned.** The companion shows tabs and a sidebar; the screens below are not available yet.
+> **Planned.** Only **Status** is available, so the stack holds one screen. `Enter` on a thread goes to its lines on Status; it does not open a screen or your editor yet.
 
 The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread 12`; click a step to go back to it.
 
@@ -49,7 +49,7 @@ Every screen is made of sections you can fold. `Tab` folds or unfolds the sectio
 
 ## The Status screen
 
-> **Planned.** The Status screen is not available yet.
+> **Planned.** The **Stack** line, **Commits** and **Stashes** are not available yet. The branch's changes against its base show as a **Branch changes** section, folded, until the Diff screen takes them.
 
 Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream or base; **Stack**, when the branch is in a [stack](stacks.md). Then come its sections, each with a count:
 
@@ -62,8 +62,6 @@ Each file shows its status, an icon for its type, `+a -r` and how many threads o
 
 ## Modes
 
-> **Planned.** Modes are not available yet.
-
 What a key does depends on the mode, shown at the left of the bottom line:
 
 | Mode | When |
@@ -73,8 +71,6 @@ What a key does depends on the mode, shown at the left of the bottom line:
 | **INSERT** | You are writing a comment, a reply or a commit message. |
 
 ## The menu
-
-> **Planned.** The menu is not available yet.
 
 Press `Space` to see what you can do where you are. The menu opens at the bottom of the screen, grouped, one key for each action, and lists only what applies to what is under the cursor or selected. Its title says what it acts on, such as `Hunk 2/5 · src/ledger/posting.rs`. Press a key to act, or click the entry. An entry ending in `…` opens a second menu. `Esc` closes it.
 
@@ -86,7 +82,7 @@ Press `?` to see every key of the screen you are on.
 
 ## Keys
 
-> **Planned.** These keys are not available yet; see [Your own keys](#your-own-keys) to change them.
+> **Planned.** The keys cannot be changed yet; see [Your own keys](#your-own-keys).
 
 | Key | Action |
 |---|---|
@@ -109,13 +105,9 @@ Press `?` to see every key of the screen you are on.
 
 ## Stage and unstage
 
-> **Planned.** Staging from the Status screen and its menu is not available yet.
-
 Stage what is under the cursor, at the size you choose: a section, a file, a hunk, or the lines you selected. Open the menu and choose **stage** or **unstage**. Staging lines works as in the app; see [Diff and staging](diff-and-staging.md). A selection over several hunks stages each hunk's selected lines.
 
 ## Review threads
-
-> **Planned.** Threads from the menu, with the text box, are not available yet.
 
 Select lines, or put the cursor on one, open the menu and choose **comment**. A text box opens at the bottom with the screen still visible above. Choose the type: **change**, **question** or **nit**. Write the comment; `Enter` starts a new line, `Ctrl+S` sends it and `Esc` cancels, asking first when the box holds text.
 
@@ -124,8 +116,6 @@ The thread appears under its lines with the status **Open**. The agent reads it 
 On a thread, the menu offers **reply**, **resolve** (or **reopen**) and **delete**, which asks first. Your reply on a handled thread reopens it.
 
 ## Questions wait a second
-
-> **Planned.** The wait is not available yet.
 
 Every question the companion asks you, and the text box, waits one second before it takes an answer that ends it. In that second, `Esc` and the other ways to cancel are ignored; for a question whose yes changes something you cannot take back, such as deleting a thread, the yes is ignored too. Keys pressed in that second are dropped, so a key you meant for the screen behind cannot answer the question by accident. The keys show dimmed until they are taken. `Ctrl+C` still quits at once, and the menu answers your first key without waiting.
 
