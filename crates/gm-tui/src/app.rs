@@ -1,14 +1,23 @@
-//! The model of the terminal companion (D235): what the screen shows and how keys and clicks
-//! change it. Nothing here draws or touches the terminal, so every rule is tested on its own.
-//! Each change the person asks of the repository leaves here as a `CommandKind` for the engine.
+//! The model of the terminal companion (D235, D236): what the screen shows and how keys and
+//! clicks change it. Nothing here draws or touches the terminal, so every rule is tested on
+//! its own. Each change the person asks of the repository leaves here as a `CommandKind`.
+//!
+//! Every button is an `Action`. A key maps to an action, and each draw records the area of
+//! every button it drew with its action (`hits`), so a click runs the same action as the key
+//! (D236 (2)).
 
-use gm_schema::{Change, CommandKind, Event, RepoStatus, StatusEntry};
+use std::collections::{BTreeMap, BTreeSet};
+
+use gm_schema::{
+    Change, ChangeStats, CommandKind, Event, LineCounts, RepoStatus, ReviewAuthorFilter,
+    ReviewComment, ReviewStatus, StatusEntry,
+};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 
-/// Narrower than this, one pane shows at a time (D235 (9)).
+/// Narrower than this, the sidebar and the main pane show one at a time (D235 (9)).
 pub const SPLIT_MIN_WIDTH: u16 = 100;
 /// Smaller than this, only a message shows (D235 (9)).
 pub const MIN_WIDTH: u16 = 80;
@@ -16,142 +25,201 @@ pub const MIN_HEIGHT: u16 = 24;
 /// Rows a turn of the mouse wheel scrolls.
 const WHEEL_ROWS: usize = 3;
 
-/// The two groups of the file list, in the order they are listed.
+/// The tabs of the main pane, in the order the top bar shows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Group {
-    Unstaged,
-    Staged,
+pub enum Tab {
+    Diff,
+    File,
+    Reviews,
 }
 
-impl Group {
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::Diff, Tab::File, Tab::Reviews];
+
     pub fn title(self) -> &'static str {
         match self {
-            Group::Unstaged => "Unstaged",
-            Group::Staged => "Staged",
+            Tab::Diff => "Diff",
+            Tab::File => "File",
+            Tab::Reviews => "Reviews",
+        }
+    }
+
+    pub fn key(self) -> char {
+        match self {
+            Tab::Diff => '1',
+            Tab::File => '2',
+            Tab::Reviews => '3',
         }
     }
 }
 
-/// One file under one group.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileRow {
-    pub group: Group,
-    pub path: String,
-    /// Git's status letter on this side: `M`, `A`, `D`, `R`, `C`, `T`, `?` for an untracked
-    /// file and `U` for a conflicted one.
-    pub letter: char,
+/// What the sidebar lists: the changes not staged yet, or the staged ones (D236 (3)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Context {
+    Unstaged,
+    Staged,
 }
 
-/// A line of the file list.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ListRow {
-    /// A group title with the number of files under it.
-    Header(Group, usize),
-    File(FileRow),
+impl Context {
+    pub const ALL: [Context; 2] = [Context::Unstaged, Context::Staged];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Context::Unstaged => "Unstaged",
+            Context::Staged => "Staged",
+        }
+    }
+
+    pub fn other(self) -> Context {
+        match self {
+            Context::Unstaged => Context::Staged,
+            Context::Staged => Context::Unstaged,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Context::Unstaged => 0,
+            Context::Staged => 1,
+        }
+    }
 }
 
 /// The pane that has the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
-    Files,
-    Diff,
+    Sidebar,
+    Main,
 }
 
-/// Where each part of the screen is, as the last draw placed it. Clicks are read against it.
+/// A changed file as the sidebar lists it in one context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileItem {
+    pub path: String,
+    /// The last part of the path, as the row shows it under its folder.
+    pub name: String,
+    /// Git's status letter on this side: `M`, `A`, `D`, `R`, `C`, `T`, `?` for an untracked
+    /// file and `U` for a conflicted one.
+    pub letter: char,
+    /// Lines added and removed; `None` for a binary or untracked file, or before the counts
+    /// are read.
+    pub counts: Option<(u32, u32)>,
+    /// Threads on the file that are not resolved.
+    pub threads: usize,
+}
+
+/// A line of the sidebar list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    /// A folder with changed files directly in it; `""` is the repository's root.
+    Dir {
+        dir: String,
+        files: usize,
+        folded: bool,
+    },
+    File(FileItem),
+}
+
+/// What a key or a click does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    Tab(Tab),
+    Context(Context),
+    OtherContext,
+    ToggleFocus,
+    Help,
+    CloseHelp,
+    Quit,
+    /// Puts the cursor on this sidebar row; on a folder, also folds or unfolds it.
+    Row(usize),
+}
+
+/// A button the last draw put on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hit {
+    pub area: Rect,
+    pub action: Action,
+}
+
+/// Where each part of the screen is, as the last draw placed it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Areas {
-    /// `None` when the terminal is too small, or when one pane shows and it is the diff.
-    pub files: Option<Rect>,
-    /// `None` when the terminal is too small, or when one pane shows and it is the list.
-    pub diff: Option<Rect>,
-    /// `None` when the terminal is too small.
-    pub status: Option<Rect>,
+    pub top: Option<Rect>,
+    /// The sidebar, chips included; `None` when one pane shows and it is the main pane.
+    pub sidebar: Option<Rect>,
+    /// `None` when one pane shows and it is the sidebar.
+    pub main: Option<Rect>,
+    pub bar: Option<Rect>,
 }
 
-/// The parts of a terminal of `size` for `focus`: the list on the left and the diff on the
-/// right, one of them alone below `SPLIT_MIN_WIDTH`, nothing below the minimum size.
+impl Areas {
+    /// The sidebar's file list: the sidebar under its chips, without its right border.
+    pub fn list(&self) -> Option<Rect> {
+        self.sidebar.map(|area| Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            width: area.width.saturating_sub(1),
+            ..area
+        })
+    }
+}
+
+/// The parts of a terminal of `size` with `focus`: a top bar, the sidebar and the main pane,
+/// a button bar; one of the two panes alone below `SPLIT_MIN_WIDTH`; nothing below the
+/// minimum size.
 pub fn areas(size: Rect, focus: Focus) -> Areas {
     if size.width < MIN_WIDTH || size.height < MIN_HEIGHT {
         return Areas::default();
     }
-    let body = Rect {
-        height: size.height - 1,
-        ..size
-    };
-    let status = Rect {
+    let top = Rect { height: 1, ..size };
+    let bar = Rect {
         y: size.y + size.height - 1,
         height: 1,
         ..size
     };
-    if size.width < SPLIT_MIN_WIDTH {
-        let (files, diff) = match focus {
-            Focus::Files => (Some(body), None),
-            Focus::Diff => (None, Some(body)),
-        };
-        return Areas {
-            files,
-            diff,
-            status: Some(status),
-        };
-    }
-    let list_width = (size.width * 2 / 5).clamp(30, 60);
-    let files = Rect {
-        width: list_width,
-        ..body
+    let body = Rect {
+        y: size.y + 1,
+        height: size.height - 2,
+        ..size
     };
-    let diff = Rect {
-        x: body.x + list_width,
-        width: body.width - list_width,
-        ..body
+    let (sidebar, main) = if size.width < SPLIT_MIN_WIDTH {
+        match focus {
+            Focus::Sidebar => (Some(body), None),
+            Focus::Main => (None, Some(body)),
+        }
+    } else {
+        let width = (size.width / 3).clamp(30, 48);
+        let main = Rect {
+            x: body.x + width,
+            width: body.width - width,
+            ..body
+        };
+        (Some(Rect { width, ..body }), Some(main))
     };
     Areas {
-        files: Some(files),
-        diff: Some(diff),
-        status: Some(status),
+        top: Some(top),
+        sidebar,
+        main,
+        bar: Some(bar),
     }
 }
 
-/// The file list of `status`: the unstaged files, then the staged ones, each group under its
-/// title. A group with no file is left out. A file changed on both sides is in both groups.
-pub fn list_rows(status: &RepoStatus) -> Vec<ListRow> {
-    let mut unstaged = Vec::new();
-    let mut staged = Vec::new();
-    for entry in &status.entries {
-        if let Some(letter) = unstaged_letter(entry) {
-            unstaged.push(file(Group::Unstaged, entry, letter));
-        }
-        if let Some(change) = entry.staged.filter(|_| !entry.conflicted) {
-            staged.push(file(Group::Staged, entry, change_letter(change)));
-        }
-    }
-    let mut rows = Vec::with_capacity(unstaged.len() + staged.len() + 2);
-    for (group, files) in [(Group::Unstaged, unstaged), (Group::Staged, staged)] {
-        if !files.is_empty() {
-            rows.push(ListRow::Header(group, files.len()));
-            rows.extend(files.into_iter().map(ListRow::File));
-        }
-    }
-    rows
-}
-
-fn file(group: Group, entry: &StatusEntry, letter: char) -> FileRow {
-    FileRow {
-        group,
-        path: entry.path.clone(),
-        letter,
-    }
-}
-
-/// The letter of the unstaged side of `entry`, `None` when it has no unstaged change. A
-/// conflicted file is listed only here, as `U`.
-fn unstaged_letter(entry: &StatusEntry) -> Option<char> {
-    if entry.conflicted {
-        Some('U')
-    } else if entry.untracked {
-        Some('?')
-    } else {
-        entry.unstaged.map(change_letter)
-    }
+/// The files of `status` in `context`, with their letters.
+fn files_of(status: &RepoStatus, context: Context) -> Vec<(&StatusEntry, char)> {
+    status
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let letter = match context {
+                Context::Unstaged if entry.conflicted => Some('U'),
+                Context::Unstaged if entry.untracked => Some('?'),
+                Context::Unstaged => entry.unstaged.map(change_letter),
+                Context::Staged if entry.conflicted => None,
+                Context::Staged => entry.staged.map(change_letter),
+            }?;
+            Some((entry, letter))
+        })
+        .collect()
 }
 
 pub fn change_letter(change: Change) -> char {
@@ -165,64 +233,151 @@ pub fn change_letter(change: Change) -> char {
     }
 }
 
+/// The folder of `path` and the name shown under it. An untracked folder, `sub/`, is one
+/// entry named `sub/` in its parent.
+fn split_path(path: &str) -> (&str, &str) {
+    let trimmed = path.strip_suffix('/').unwrap_or(path);
+    match trimmed.rfind('/') {
+        Some(at) => (&path[..at], &path[at + 1..]),
+        None => ("", path),
+    }
+}
+
+/// The sidebar rows: one folder row for each folder with changed files directly in it, in
+/// path order with the root last, each followed by its files unless it is folded.
+pub fn sidebar_rows(
+    status: &RepoStatus,
+    context: Context,
+    counts: &[LineCounts],
+    comments: &[ReviewComment],
+    folded: &BTreeSet<String>,
+) -> Vec<Row> {
+    let mut dirs: BTreeMap<&str, Vec<FileItem>> = BTreeMap::new();
+    for (entry, letter) in files_of(status, context) {
+        let (dir, name) = split_path(&entry.path);
+        let counts = counts
+            .iter()
+            .find(|counts| counts.path == entry.path)
+            .map(|counts| (counts.added, counts.deleted));
+        let threads = comments
+            .iter()
+            .filter(|comment| {
+                comment.path == entry.path && comment.status != ReviewStatus::Resolved
+            })
+            .count();
+        dirs.entry(dir).or_default().push(FileItem {
+            path: entry.path.clone(),
+            name: name.to_owned(),
+            letter,
+            counts,
+            threads,
+        });
+    }
+    let root = dirs.remove("");
+    let mut rows = Vec::new();
+    for (dir, mut files) in dirs.into_iter().chain(root.map(|files| ("", files))) {
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        let is_folded = folded.contains(dir);
+        rows.push(Row::Dir {
+            dir: dir.to_owned(),
+            files: files.len(),
+            folded: is_folded,
+        });
+        if !is_folded {
+            rows.extend(files.into_iter().map(Row::File));
+        }
+    }
+    rows
+}
+
+/// A window drawn over the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    Help,
+}
+
 /// The whole state of the companion.
 #[derive(Debug)]
 pub struct App {
     pub status: RepoStatus,
-    pub rows: Vec<ListRow>,
-    /// Index into `rows` of the selected file; always a `File` row, or 0 with no file.
+    pub stats: ChangeStats,
+    pub comments: Vec<ReviewComment>,
+    pub tab: Tab,
+    pub context: Context,
+    pub focus: Focus,
+    pub rows: Vec<Row>,
+    /// Index into `rows` of the cursor; a file or a folder.
     pub cursor: usize,
     /// The first row of the list on screen.
     pub scroll: usize,
-    /// The next draw brings the cursor on screen. The wheel clears it, so the list scrolls
-    /// away from the cursor until the cursor moves again.
-    follow_cursor: bool,
-    pub focus: Focus,
+    pub overlay: Option<Overlay>,
     /// Where the last draw put each part.
     pub areas: Areas,
-    /// A message for the status bar, such as why watching is off.
+    /// The buttons of the last draw. A click runs the last one that contains it.
+    pub hits: Vec<Hit>,
+    /// A message for the top bar, such as why watching is off.
     pub notice: Option<String>,
     pub quit: bool,
     /// What changed since the last draw.
     pub dirty: bool,
+    /// The next draw brings the cursor on screen. The wheel clears it, so the list scrolls
+    /// away from the cursor until the cursor moves again.
+    follow_cursor: bool,
+    /// The file shown in the main pane, per context.
+    selected: [Option<String>; 2],
+    folded: BTreeSet<String>,
     commands: Vec<CommandKind>,
 }
 
 impl App {
-    /// The companion for the repository whose status is `status`, with its first file
-    /// selected.
+    /// The companion for the repository whose status is `status`, on the **Diff** tab with
+    /// the first unstaged file selected. It asks for the line counts and the threads at once.
     pub fn new(status: RepoStatus) -> Self {
-        let rows = list_rows(&status);
         let mut app = Self {
             status,
-            rows,
+            stats: ChangeStats::default(),
+            comments: Vec::new(),
+            tab: Tab::Diff,
+            context: Context::Unstaged,
+            focus: Focus::Sidebar,
+            rows: Vec::new(),
             cursor: 0,
             scroll: 0,
-            follow_cursor: true,
-            focus: Focus::Files,
+            overlay: None,
             areas: Areas::default(),
+            hits: Vec::new(),
             notice: None,
             quit: false,
             dirty: true,
+            follow_cursor: true,
+            selected: [None, None],
+            folded: BTreeSet::new(),
             commands: Vec::new(),
         };
-        app.cursor = app.first_file().unwrap_or(0);
+        app.rebuild();
+        app.ask_for_reads();
         app
     }
 
-    /// The selected file, if the list has any.
-    pub fn selected(&self) -> Option<&FileRow> {
-        match self.rows.get(self.cursor) {
-            Some(ListRow::File(file)) => Some(file),
+    /// The file the main pane shows, if the context has any.
+    pub fn selected(&self) -> Option<&FileItem> {
+        let path = self.selected[self.context.index()].as_deref()?;
+        self.rows.iter().find_map(|row| match row {
+            Row::File(file) if file.path == path => Some(file),
             _ => None,
-        }
+        })
     }
 
-    /// The number of files listed, a file on both sides counted once per side.
-    pub fn file_count(&self) -> usize {
-        self.rows
+    /// The number of files `context` lists.
+    pub fn file_count(&self, context: Context) -> usize {
+        files_of(&self.status, context).len()
+    }
+
+    /// The threads that are not resolved.
+    pub fn unresolved(&self) -> usize {
+        self.comments
             .iter()
-            .filter(|row| matches!(row, ListRow::File(_)))
+            .filter(|comment| comment.status != ReviewStatus::Resolved)
             .count()
     }
 
@@ -231,27 +386,23 @@ impl App {
         std::mem::take(&mut self.commands)
     }
 
-    /// Takes in what the engine reports. A new status keeps the selected file when it is
-    /// still listed in the same group, and otherwise keeps the cursor near where it was.
+    /// Takes in what the engine reports. A new status asks again for the counts and the
+    /// threads, which may have changed with it.
     pub fn apply(&mut self, event: &Event) {
-        if let Event::StatusLoaded { status, .. } = event {
-            let kept = self.selected().map(|file| (file.group, file.path.clone()));
-            self.status = status.clone();
-            self.rows = list_rows(&self.status);
-            let same = kept.and_then(|(group, path)| {
-                self.rows.iter().position(|row| {
-                    matches!(row, ListRow::File(file) if file.group == group && file.path == path)
-                })
-            });
-            self.cursor = match same {
-                Some(index) => index,
-                None => self.nearest_file(self.cursor).unwrap_or(0),
-            };
-            self.dirty = true;
+        match event {
+            Event::StatusLoaded { status, .. } => {
+                self.status.clone_from(status);
+                self.ask_for_reads();
+            }
+            Event::ChangeStatsLoaded { stats, .. } => self.stats.clone_from(stats),
+            Event::ReviewCommentsListed { comments, .. } => self.comments.clone_from(comments),
+            _ => return,
         }
+        self.rebuild();
+        self.dirty = true;
     }
 
-    /// The terminal window gained or lost the person's attention, or changed size.
+    /// The terminal changed size or came back into view.
     pub fn redraw(&mut self) {
         self.dirty = true;
     }
@@ -265,58 +416,105 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        if let Some(action) = self.action_of(key) {
+            self.act(&action);
+        } else if self.focus == Focus::Sidebar {
+            self.sidebar_key(key);
+        }
+    }
+
+    /// The action of a key that works everywhere.
+    fn action_of(&self, key: KeyEvent) -> Option<Action> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.overlay.is_some() {
+            return Some(match key.code {
+                KeyCode::Char('q') if !ctrl => Action::Quit,
+                KeyCode::Char('c') if ctrl => Action::Quit,
+                _ => Action::CloseHelp,
+            });
+        }
+        Some(match key.code {
+            KeyCode::Char('q') if !ctrl => Action::Quit,
+            KeyCode::Char('c') if ctrl => Action::Quit,
+            KeyCode::Char('?') => Action::Help,
+            KeyCode::Tab | KeyCode::BackTab => Action::ToggleFocus,
+            KeyCode::Char('t') => Action::OtherContext,
+            KeyCode::Char(key) => Action::Tab(Tab::ALL.into_iter().find(|tab| tab.key() == key)?),
+            _ => return None,
+        })
+    }
+
+    fn sidebar_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('q') if !ctrl => self.quit = true,
-            KeyCode::Char('c') if ctrl => self.quit = true,
-            KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
-            KeyCode::Char('j') | KeyCode::Down => self.move_files(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_files(-1),
-            KeyCode::Char('d') if ctrl => self.move_files(self.half_page()),
-            KeyCode::Char('u') if ctrl => self.move_files(-self.half_page()),
-            KeyCode::Char('g') | KeyCode::Home => self.select(self.first_file()),
-            KeyCode::Char('G') | KeyCode::End => self.select(self.last_file()),
+            KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
+            KeyCode::Char('d') if ctrl => self.move_cursor(self.half_page()),
+            KeyCode::Char('u') if ctrl => self.move_cursor(-self.half_page()),
+            KeyCode::Char('g') | KeyCode::Home => self.move_cursor(isize::MIN),
+            KeyCode::Char('G') | KeyCode::End => self.move_cursor(isize::MAX),
+            KeyCode::Enter | KeyCode::Char(' ' | 'l' | 'h') => self.open_at_cursor(key.code),
             _ => return,
         }
-        self.follow_cursor = true;
+        self.dirty = true;
+    }
+
+    /// Runs `action`, from a key or a click.
+    pub fn act(&mut self, action: &Action) {
+        match *action {
+            Action::Tab(tab) => self.tab = tab,
+            Action::Context(context) => self.set_context(context),
+            Action::OtherContext => self.set_context(self.context.other()),
+            Action::ToggleFocus => {
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Main,
+                    Focus::Main => Focus::Sidebar,
+                };
+            }
+            Action::Help => self.overlay = Some(Overlay::Help),
+            Action::CloseHelp => self.overlay = None,
+            Action::Quit => self.quit = true,
+            Action::Row(index) => {
+                self.focus = Focus::Sidebar;
+                self.cursor = index.min(self.rows.len().saturating_sub(1));
+                self.follow_cursor = true;
+                self.open_at_cursor(KeyCode::Enter);
+            }
+        }
         self.dirty = true;
     }
 
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
         let at = Position::new(mouse.column, mouse.row);
-        let Some(files) = self.areas.files.filter(|area| area.contains(at)) else {
-            if self.areas.diff.is_some_and(|area| area.contains(at))
-                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            {
-                self.focus = Focus::Diff;
-                self.dirty = true;
-            }
-            return;
-        };
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.focus = Focus::Files;
-                let index = self.scroll + usize::from(at.y - files.y);
-                if matches!(self.rows.get(index), Some(ListRow::File(_))) {
-                    self.cursor = index;
+                let hit = self.hits.iter().rev().find(|hit| hit.area.contains(at));
+                if let Some(action) = hit.map(|hit| hit.action.clone()) {
+                    self.act(&action);
+                } else if self.areas.main.is_some_and(|area| area.contains(at)) {
+                    self.focus = Focus::Main;
+                    self.dirty = true;
                 }
             }
-            MouseEventKind::ScrollDown => {
-                let last = self.rows.len().saturating_sub(usize::from(files.height));
-                self.scroll = (self.scroll + WHEEL_ROWS).min(last);
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let Some(list) = self.areas.list().filter(|area| area.contains(at)) else {
+                    return;
+                };
+                if mouse.kind == MouseEventKind::ScrollDown {
+                    let bottom = self.rows.len().saturating_sub(usize::from(list.height));
+                    self.scroll = (self.scroll + WHEEL_ROWS).min(bottom);
+                } else {
+                    self.scroll = self.scroll.saturating_sub(WHEEL_ROWS);
+                }
                 self.follow_cursor = false;
+                self.dirty = true;
             }
-            MouseEventKind::ScrollUp => {
-                self.scroll = self.scroll.saturating_sub(WHEEL_ROWS);
-                self.follow_cursor = false;
-            }
-            _ => return,
+            _ => {}
         }
-        self.dirty = true;
     }
 
     /// Moves `scroll` so the cursor is on screen in a list `height` rows high. Called by the
-    /// draw, which knows the height; the wheel moves `scroll` without moving the cursor.
+    /// draw, which knows the height.
     pub fn keep_cursor_visible(&mut self, height: usize) {
         if height == 0 {
             return;
@@ -327,71 +525,117 @@ impl App {
             return;
         }
         if self.cursor < self.scroll {
-            // Keep a group title in view above its first file.
-            self.scroll = self.cursor.saturating_sub(1);
+            self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + height {
             self.scroll = self.cursor + 1 - height;
         }
     }
 
-    fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Files => Focus::Diff,
-            Focus::Diff => Focus::Files,
-        };
+    fn ask_for_reads(&mut self) {
+        self.commands.push(CommandKind::LoadChangeStats);
+        self.commands.push(CommandKind::ListReviewComments {
+            author: ReviewAuthorFilter::Any,
+        });
     }
 
-    fn half_page(&self) -> isize {
-        let height = self.areas.files.map_or(MIN_HEIGHT, |area| area.height);
-        isize::from(i16::try_from(height / 2).unwrap_or(i16::MAX)).max(1)
-    }
-
-    /// Moves the cursor `by` files, past the group titles, and stops at either end.
-    fn move_files(&mut self, by: isize) {
-        let files: Vec<usize> = self.file_indexes().collect();
-        let Some(at) = files.iter().position(|&index| index == self.cursor) else {
-            self.select(files.first().copied());
-            return;
-        };
-        let target = at.saturating_add_signed(by).min(files.len() - 1);
-        self.cursor = files[target];
-    }
-
-    fn select(&mut self, index: Option<usize>) {
-        if let Some(index) = index {
-            self.cursor = index;
+    fn set_context(&mut self, context: Context) {
+        if context != self.context {
+            self.context = context;
+            self.scroll = 0;
+            self.follow_cursor = true;
+            self.rebuild();
         }
     }
 
-    fn file_indexes(&self) -> impl Iterator<Item = usize> + '_ {
-        self.rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| matches!(row, ListRow::File(_)))
-            .map(|(index, _)| index)
+    /// Builds the rows again and puts the cursor back on the selected file, or near where it
+    /// was when that file is gone.
+    fn rebuild(&mut self) {
+        let counts = match self.context {
+            Context::Unstaged => &self.stats.unstaged,
+            Context::Staged => &self.stats.staged,
+        };
+        self.rows = sidebar_rows(
+            &self.status,
+            self.context,
+            counts,
+            &self.comments,
+            &self.folded,
+        );
+        let wanted = self.selected[self.context.index()].clone();
+        let found = wanted.and_then(|path| {
+            self.rows
+                .iter()
+                .position(|row| matches!(row, Row::File(file) if file.path == path))
+        });
+        self.cursor = match found {
+            Some(index) => index,
+            None => self.nearest_file().unwrap_or(0),
+        };
+        self.remember_selection();
     }
 
-    fn first_file(&self) -> Option<usize> {
-        self.file_indexes().next()
+    /// The file row nearest the cursor, looking down first.
+    fn nearest_file(&self) -> Option<usize> {
+        let is_file = |index: &usize| matches!(self.rows[*index], Row::File(_));
+        let from = self.cursor.min(self.rows.len().saturating_sub(1));
+        (from..self.rows.len())
+            .find(is_file)
+            .or_else(|| (0..from).rev().find(is_file))
     }
 
-    fn last_file(&self) -> Option<usize> {
-        self.file_indexes().last()
+    fn remember_selection(&mut self) {
+        if let Some(Row::File(file)) = self.rows.get(self.cursor) {
+            self.selected[self.context.index()] = Some(file.path.clone());
+        }
     }
 
-    /// The file row nearest `index`, looking down first.
-    fn nearest_file(&self, index: usize) -> Option<usize> {
-        let index = index.min(self.rows.len().saturating_sub(1));
-        self.file_indexes()
-            .find(|&at| at >= index)
-            .or_else(|| self.last_file())
+    fn half_page(&self) -> isize {
+        let height = self.areas.list().map_or(MIN_HEIGHT, |area| area.height);
+        isize::from(i16::try_from(height / 2).unwrap_or(i16::MAX)).max(1)
+    }
+
+    fn move_cursor(&mut self, by: isize) {
+        let last = self.rows.len().saturating_sub(1);
+        self.cursor = self.cursor.saturating_add_signed(by).min(last);
+        self.follow_cursor = true;
+        self.remember_selection();
+    }
+
+    /// `Enter`, `Space`, `l` or `h` on the row at the cursor: a folder folds or unfolds (`l`
+    /// only unfolds, `h` only folds); a file goes to the main pane on `Enter`.
+    fn open_at_cursor(&mut self, code: KeyCode) {
+        match self.rows.get(self.cursor) {
+            Some(Row::Dir { dir, folded, .. }) => {
+                let fold = match code {
+                    KeyCode::Char('l') => false,
+                    KeyCode::Char('h') => true,
+                    _ => !folded,
+                };
+                let dir = dir.clone();
+                if fold {
+                    self.folded.insert(dir);
+                } else {
+                    self.folded.remove(&dir);
+                }
+                let at = self.cursor;
+                self.rebuild();
+                self.cursor = at.min(self.rows.len().saturating_sub(1));
+            }
+            Some(Row::File(_)) => {
+                self.remember_selection();
+                if code == KeyCode::Enter && self.areas.main.is_none() {
+                    self.focus = Focus::Main;
+                }
+            }
+            None => {}
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gm_schema::{BranchInfo, OperationId};
+    use gm_schema::{BranchInfo, OperationId, ReviewAnchor};
     use ratatui::crossterm::event::KeyEventState;
 
     fn entry(path: &str, staged: Option<Change>, unstaged: Option<Change>) -> StatusEntry {
@@ -417,7 +661,7 @@ mod tests {
         }
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
+    pub(crate) fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
             code,
             modifiers: KeyModifiers::NONE,
@@ -426,208 +670,257 @@ mod tests {
         }
     }
 
-    fn click(column: u16, row: u16) -> MouseEvent {
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
+    fn comment(id: i64, path: &str, status: ReviewStatus) -> ReviewComment {
+        ReviewComment {
+            id,
+            path: path.to_owned(),
+            body: "body".to_owned(),
+            status,
+            anchor: ReviewAnchor {
+                text: "x".to_owned(),
+                before: Vec::new(),
+                after: Vec::new(),
+                start_line: 1,
+            },
+            created_at: 0,
+            resolved_at: None,
+            snapshot: None,
+            after_snapshot: None,
+            location: None,
+            outdated: false,
+            replies: Vec::new(),
+            author: None,
+            kind: None,
+            severity: None,
+            needs_answer: false,
+            suggested_fix: None,
+            label: None,
+            decorations: Vec::new(),
+            scorecard: None,
+            workspace: None,
         }
     }
 
     fn sample() -> App {
-        let mut untracked = entry("new.txt", None, None);
+        let mut untracked = entry("src/new/", None, None);
         untracked.untracked = true;
         App::new(status(vec![
-            entry("a.rs", None, Some(Change::Modified)),
-            entry("b.rs", Some(Change::Added), Some(Change::Modified)),
-            entry("c.rs", Some(Change::Deleted), None),
+            entry("src/ledger/posting.rs", None, Some(Change::Modified)),
+            entry(
+                "src/ledger/lock.rs",
+                Some(Change::Added),
+                Some(Change::Modified),
+            ),
+            entry("Cargo.toml", None, Some(Change::Modified)),
+            entry("src/api/post.rs", Some(Change::Deleted), None),
             untracked,
         ]))
     }
 
-    fn selected_path(app: &App) -> Option<(Group, &str)> {
-        app.selected().map(|file| (file.group, file.path.as_str()))
-    }
-
-    #[test]
-    fn files_are_grouped_unstaged_first_and_a_file_on_both_sides_is_in_both() {
-        let app = sample();
-        let shown: Vec<String> = app
-            .rows
+    fn shown(app: &App) -> Vec<String> {
+        app.rows
             .iter()
             .map(|row| match row {
-                ListRow::Header(group, count) => format!("# {} {count}", group.title()),
-                ListRow::File(file) => format!("{} {}", file.letter, file.path),
+                Row::Dir { dir, files, folded } => {
+                    format!("{} {dir} {files}", if *folded { '>' } else { 'v' })
+                }
+                Row::File(file) => {
+                    let counts = file
+                        .counts
+                        .map_or_default(|(added, deleted)| format!(" +{added} -{deleted}"));
+                    format!("  {} {}{counts} t{}", file.letter, file.name, file.threads)
+                }
             })
-            .collect();
+            .collect()
+    }
+
+    fn selected_path(app: &App) -> Option<&str> {
+        app.selected().map(|file| file.path.as_str())
+    }
+
+    #[test]
+    fn the_sidebar_groups_files_by_folder_with_the_root_last() {
+        let app = sample();
         assert_eq!(
-            shown,
+            shown(&app),
             [
-                "# Unstaged 3",
-                "M a.rs",
-                "M b.rs",
-                "? new.txt",
-                "# Staged 2",
-                "A b.rs",
-                "D c.rs"
+                "v src 1",
+                "  ? new/ t0",
+                "v src/ledger 2",
+                "  M lock.rs t0",
+                "  M posting.rs t0",
+                "v  1",
+                "  M Cargo.toml t0",
             ]
         );
-        assert_eq!(app.file_count(), 5);
+        assert_eq!(app.file_count(Context::Unstaged), 4);
+        assert_eq!(app.file_count(Context::Staged), 2);
     }
 
     #[test]
-    fn a_conflicted_file_is_listed_once_as_unstaged_u() {
-        let mut conflicted = entry("x.rs", Some(Change::Modified), Some(Change::Modified));
-        conflicted.conflicted = true;
-        let rows = list_rows(&status(vec![conflicted]));
+    fn the_staged_context_lists_the_staged_side() {
+        let mut app = sample();
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.context, Context::Staged);
         assert_eq!(
-            rows,
+            shown(&app),
             [
-                ListRow::Header(Group::Unstaged, 1),
-                ListRow::File(FileRow {
-                    group: Group::Unstaged,
-                    path: "x.rs".to_owned(),
-                    letter: 'U'
-                })
+                "v src/api 1",
+                "  D post.rs t0",
+                "v src/ledger 1",
+                "  A lock.rs t0"
             ]
         );
+        assert_eq!(selected_path(&app), Some("src/api/post.rs"));
     }
 
     #[test]
-    fn a_clean_tree_has_no_rows_and_no_selection() {
-        let app = App::new(status(Vec::new()));
-        assert!(app.rows.is_empty());
-        assert_eq!(app.selected(), None);
-    }
-
-    #[test]
-    fn the_cursor_starts_on_the_first_file_and_skips_group_titles() {
+    fn counts_and_unresolved_threads_join_their_files() {
         let mut app = sample();
-        assert_eq!(selected_path(&app), Some((Group::Unstaged, "a.rs")));
-        for _ in 0..3 {
-            app.on_key(key(KeyCode::Char('j')));
-        }
-        assert_eq!(selected_path(&app), Some((Group::Staged, "b.rs")));
-        app.on_key(key(KeyCode::Char('k')));
-        assert_eq!(selected_path(&app), Some((Group::Unstaged, "new.txt")));
-    }
-
-    #[test]
-    fn the_cursor_stops_at_either_end() {
-        let mut app = sample();
-        app.on_key(key(KeyCode::Up));
-        assert_eq!(selected_path(&app), Some((Group::Unstaged, "a.rs")));
-        app.on_key(key(KeyCode::Char('G')));
-        assert_eq!(selected_path(&app), Some((Group::Staged, "c.rs")));
-        app.on_key(key(KeyCode::Down));
-        assert_eq!(selected_path(&app), Some((Group::Staged, "c.rs")));
-        app.on_key(key(KeyCode::Char('g')));
-        assert_eq!(selected_path(&app), Some((Group::Unstaged, "a.rs")));
-    }
-
-    #[test]
-    fn a_new_status_keeps_the_selected_file_in_its_group() {
-        let mut app = sample();
-        app.on_key(key(KeyCode::Char('G')));
-        // a.rs is gone; c.rs is still staged, now below fewer rows.
-        let mut untracked = entry("new.txt", None, None);
-        untracked.untracked = true;
-        app.apply(&Event::StatusLoaded {
-            id: OperationId(9),
-            status: status(vec![
-                entry("b.rs", Some(Change::Added), Some(Change::Modified)),
-                entry("c.rs", Some(Change::Deleted), None),
-                untracked,
-            ]),
+        app.apply(&Event::ChangeStatsLoaded {
+            id: OperationId(3),
+            stats: ChangeStats {
+                unstaged: vec![LineCounts {
+                    path: "src/ledger/posting.rs".to_owned(),
+                    added: 48,
+                    deleted: 12,
+                }],
+                staged: Vec::new(),
+            },
         });
-        assert_eq!(selected_path(&app), Some((Group::Staged, "c.rs")));
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(4),
+            comments: vec![
+                comment(1, "src/ledger/posting.rs", ReviewStatus::Open),
+                comment(2, "src/ledger/posting.rs", ReviewStatus::Handled),
+                comment(3, "src/ledger/posting.rs", ReviewStatus::Resolved),
+            ],
+        });
+        assert_eq!(shown(&app)[4], "  M posting.rs +48 -12 t2");
+        assert_eq!(app.unresolved(), 2);
     }
 
     #[test]
-    fn when_the_selected_file_leaves_its_group_the_cursor_stays_near() {
+    fn opening_and_each_new_status_ask_for_counts_and_threads() {
         let mut app = sample();
-        app.on_key(key(KeyCode::Down)); // b.rs, unstaged
+        let reads = [
+            CommandKind::LoadChangeStats,
+            CommandKind::ListReviewComments {
+                author: ReviewAuthorFilter::Any,
+            },
+        ];
+        assert_eq!(app.take_commands(), reads);
+        app.apply(&Event::StatusLoaded {
+            id: OperationId(2),
+            status: app.status.clone(),
+        });
+        assert_eq!(app.take_commands(), reads);
+    }
+
+    #[test]
+    fn the_first_file_is_selected_and_a_folder_folds() {
+        let mut app = sample();
+        assert_eq!(selected_path(&app), Some("src/new/"));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Enter)); // on "src/ledger"
+        assert_eq!(shown(&app)[2], "> src/ledger 2");
+        assert_eq!(app.rows.len(), 5);
+        // The folded folder keeps the last file selected.
+        assert_eq!(selected_path(&app), Some("src/new/"));
+        app.on_key(key(KeyCode::Char('l')));
+        assert_eq!(shown(&app)[2], "v src/ledger 2");
+    }
+
+    #[test]
+    fn a_new_status_keeps_the_selected_file() {
+        let mut app = sample();
+        app.on_key(key(KeyCode::Char('G')));
+        assert_eq!(selected_path(&app), Some("Cargo.toml"));
         app.apply(&Event::StatusLoaded {
             id: OperationId(9),
             status: status(vec![
                 entry("a.rs", None, Some(Change::Modified)),
-                entry("b.rs", Some(Change::Modified), None),
+                entry("Cargo.toml", None, Some(Change::Modified)),
             ]),
         });
-        assert_eq!(selected_path(&app), Some((Group::Staged, "b.rs")));
+        assert_eq!(selected_path(&app), Some("Cargo.toml"));
     }
 
     #[test]
-    fn q_and_ctrl_c_quit() {
+    fn when_the_selected_file_leaves_the_context_the_cursor_finds_a_file_nearby() {
         let mut app = sample();
+        app.apply(&Event::StatusLoaded {
+            id: OperationId(9),
+            status: status(vec![entry("Cargo.toml", None, Some(Change::Modified))]),
+        });
+        assert_eq!(selected_path(&app), Some("Cargo.toml"));
+    }
+
+    #[test]
+    fn keys_choose_the_tab_the_focus_help_and_quit() {
+        let mut app = sample();
+        app.on_key(key(KeyCode::Char('3')));
+        assert_eq!(app.tab, Tab::Reviews);
+        app.on_key(key(KeyCode::Char('2')));
+        assert_eq!(app.tab, Tab::File);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Main);
+        app.on_key(key(KeyCode::Char('?')));
+        assert_eq!(app.overlay, Some(Overlay::Help));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.overlay, None);
         app.on_key(key(KeyCode::Char('q')));
         assert!(app.quit);
-        let mut app = sample();
-        app.on_key(KeyEvent {
-            modifiers: KeyModifiers::CONTROL,
-            ..key(KeyCode::Char('c'))
-        });
-        assert!(app.quit);
     }
 
     #[test]
-    fn tab_switches_the_focus() {
+    fn a_click_runs_the_action_of_the_button_under_it() {
         let mut app = sample();
-        app.on_key(key(KeyCode::Tab));
-        assert_eq!(app.focus, Focus::Diff);
-        app.on_key(key(KeyCode::Tab));
-        assert_eq!(app.focus, Focus::Files);
+        app.areas = areas(Rect::new(0, 0, 120, 40), Focus::Sidebar);
+        app.hits = vec![
+            Hit {
+                area: Rect::new(10, 0, 6, 1),
+                action: Action::Tab(Tab::Reviews),
+            },
+            Hit {
+                area: Rect::new(0, 5, 30, 1),
+                action: Action::Row(6),
+            },
+        ];
+        let click = |column, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click(12, 0));
+        assert_eq!(app.tab, Tab::Reviews);
+        app.on_mouse(click(3, 5));
+        assert_eq!(selected_path(&app), Some("Cargo.toml"));
+        assert_eq!(app.focus, Focus::Sidebar);
     }
 
     #[test]
-    fn the_terminal_is_split_from_100_columns_and_too_small_below_80_by_24() {
-        let wide = areas(Rect::new(0, 0, 120, 40), Focus::Files);
-        assert_eq!(wide.files, Some(Rect::new(0, 0, 48, 39)));
-        assert_eq!(wide.diff, Some(Rect::new(48, 0, 72, 39)));
-        assert_eq!(wide.status, Some(Rect::new(0, 39, 120, 1)));
+    fn the_screen_splits_from_100_columns_and_is_too_small_below_80_by_24() {
+        let wide = areas(Rect::new(0, 0, 120, 40), Focus::Sidebar);
+        assert_eq!(wide.top, Some(Rect::new(0, 0, 120, 1)));
+        assert_eq!(wide.sidebar, Some(Rect::new(0, 1, 40, 38)));
+        assert_eq!(wide.main, Some(Rect::new(40, 1, 80, 38)));
+        assert_eq!(wide.bar, Some(Rect::new(0, 39, 120, 1)));
+        assert_eq!(wide.list(), Some(Rect::new(0, 2, 39, 37)));
 
-        let narrow = areas(Rect::new(0, 0, 90, 30), Focus::Diff);
-        assert_eq!(narrow.files, None);
-        assert_eq!(narrow.diff, Some(Rect::new(0, 0, 90, 29)));
+        let narrow = areas(Rect::new(0, 0, 90, 30), Focus::Main);
+        assert_eq!(narrow.sidebar, None);
+        assert_eq!(narrow.main, Some(Rect::new(0, 1, 90, 28)));
 
         assert_eq!(
-            areas(Rect::new(0, 0, 79, 40), Focus::Files),
+            areas(Rect::new(0, 0, 79, 40), Focus::Sidebar),
             Areas::default()
         );
         assert_eq!(
-            areas(Rect::new(0, 0, 120, 23), Focus::Files),
+            areas(Rect::new(0, 0, 120, 23), Focus::Sidebar),
             Areas::default()
         );
-    }
-
-    #[test]
-    fn a_click_on_a_file_selects_it_and_a_click_on_a_title_does_not() {
-        let mut app = sample();
-        app.areas = areas(Rect::new(0, 0, 120, 40), Focus::Files);
-        app.on_mouse(click(5, 6)); // row 6: "D c.rs"
-        assert_eq!(selected_path(&app), Some((Group::Staged, "c.rs")));
-        app.on_mouse(click(5, 4)); // row 4: the Staged title
-        assert_eq!(selected_path(&app), Some((Group::Staged, "c.rs")));
-        app.on_mouse(click(60, 4)); // the diff
-        assert_eq!(app.focus, Focus::Diff);
-        app.on_mouse(click(5, 1));
-        assert_eq!(app.focus, Focus::Files);
-        assert_eq!(selected_path(&app), Some((Group::Unstaged, "a.rs")));
-    }
-
-    #[test]
-    fn the_cursor_is_kept_on_screen() {
-        let entries = (0..50)
-            .map(|n| entry(&format!("f{n:02}.rs"), None, Some(Change::Modified)))
-            .collect();
-        let mut app = App::new(status(entries));
-        app.on_key(key(KeyCode::Char('G')));
-        app.keep_cursor_visible(10);
-        assert_eq!(app.scroll, 41);
-        app.on_key(key(KeyCode::Char('g')));
-        app.keep_cursor_visible(10);
-        assert_eq!(app.scroll, 0);
     }
 
     #[test]
@@ -636,18 +929,19 @@ mod tests {
             .map(|n| entry(&format!("f{n:02}.rs"), None, Some(Change::Modified)))
             .collect();
         let mut app = App::new(status(entries));
-        app.areas = areas(Rect::new(0, 0, 120, 40), Focus::Files);
+        app.areas = areas(Rect::new(0, 0, 120, 40), Focus::Sidebar);
         let wheel = MouseEvent {
             kind: MouseEventKind::ScrollDown,
-            ..click(5, 5)
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
         };
         app.on_mouse(wheel);
         app.on_mouse(wheel);
-        app.keep_cursor_visible(39);
+        app.keep_cursor_visible(37);
         assert_eq!(app.scroll, 6);
-        assert_eq!(app.cursor, 1);
         app.on_key(key(KeyCode::Down));
-        app.keep_cursor_visible(39);
-        assert_eq!(app.scroll, 1);
+        app.keep_cursor_visible(37);
+        assert_eq!(app.scroll, 2);
     }
 }
