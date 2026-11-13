@@ -4,8 +4,9 @@
 //! `gm_view::review::notes`, as the app's diff lays them out.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
-use gm_schema::{Change, ReviewStatus, StatusEntry};
+use gm_schema::{Change, ReviewStatus, StackState, StatusEntry};
 use gm_view::diff_rows::{self, Row as DiffRow};
 use gm_view::local_review::Filter;
 use gm_view::review::{self, Entry, Heading, Opened, Part};
@@ -64,6 +65,22 @@ pub enum Item {
     Thread {
         id: i64,
     },
+    /// The branch's own commits; `more` when there are more than were read.
+    Commits {
+        count: usize,
+        more: bool,
+    },
+    /// A commit of the branch, by its index in `Repo::commits`.
+    Commit {
+        index: usize,
+    },
+    Stashes {
+        count: usize,
+    },
+    /// A stash, by its index in `Repo::stashes`.
+    Stash {
+        index: usize,
+    },
 }
 
 impl Item {
@@ -82,6 +99,15 @@ impl Item {
                 line_of(repo, *group, path, *row).map_or_default(|line| line.text.clone())
             }
             Item::Thread { id } => repo.comment(*id).map_or_default(|c| c.body.clone()),
+            Item::Commit { index } => repo
+                .commits
+                .as_ref()
+                .and_then(|history| history.commits.get(*index))
+                .map_or_default(|commit| format!("{} {}", commit.short, commit.subject)),
+            Item::Stash { index } => repo
+                .stashes
+                .get(*index)
+                .map_or_default(|stash| format!("stash@{{{}}} {}", stash.index, stash.message)),
             _ => String::new(),
         }
     }
@@ -286,7 +312,66 @@ fn file_children(
     top
 }
 
-/// The lines about the branch: its head, its upstream and its base.
+/// The branches from the root of HEAD's stack to HEAD, and what is due on HEAD's branch;
+/// `None` when the branch is in no stack.
+fn stack_line(repo: &Repo) -> Option<String> {
+    let head = repo.status.branch.head.as_deref()?;
+    let stack = repo
+        .stacks
+        .stacks
+        .iter()
+        .find(|stack| stack.branches.iter().any(|branch| branch.name == head))?;
+    let find = |name: &str| stack.branches.iter().find(|branch| branch.name == name);
+    let here = find(head)?;
+    let mut chain = vec![here.name.as_str()];
+    let mut at = here;
+    // A recorded parent loop is not a stack (StackSnapshot), so the walk ends; the depth
+    // bounds it all the same.
+    while let Some(parent) = at.parent.as_deref().and_then(find) {
+        if chain.len() > stack.branches.len() {
+            break;
+        }
+        chain.push(parent.name.as_str());
+        at = parent;
+    }
+    chain.reverse();
+    let mut text = format!("{} {}", icons::BRANCH, chain.join(" › "));
+    if here.parent.is_some() {
+        let _ = write!(
+            text,
+            "  {}{} {}{}",
+            icons::AHEAD,
+            here.ahead,
+            icons::BEHIND,
+            here.behind
+        );
+    }
+    let due = match here.state {
+        StackState::Root | StackState::Current => None,
+        StackState::Stale => Some("restack due"),
+        StackState::DivergedBase => Some("its base moved"),
+        StackState::ParentGone => Some("its parent is gone"),
+        StackState::ParentMerged => Some("its parent is merged"),
+    };
+    if let Some(due) = due {
+        let _ = write!(text, "  · {due}");
+    }
+    let above = stack
+        .branches
+        .iter()
+        .filter(|branch| branch.parent.as_deref() == Some(head))
+        .count();
+    if above > 0 {
+        let _ = write!(
+            text,
+            "  · {above} {} on it",
+            if above == 1 { "branch" } else { "branches" }
+        );
+    }
+    Some(text)
+}
+
+/// The lines about the branch: its head, its upstream, its stack and its base.
 fn headers(repo: &Repo) -> Vec<Section<Item>> {
     let branch = &repo.status.branch;
     let mut out = vec![Section::leaf(
@@ -320,6 +405,15 @@ fn headers(repo: &Repo) -> Vec<Section<Item>> {
             },
         ));
     }
+    if let Some(text) = stack_line(repo) {
+        out.push(Section::leaf(
+            "stack",
+            Item::Header {
+                label: "Stack:",
+                text,
+            },
+        ));
+    }
     let base = match (&repo.range, &repo.range_error) {
         (Some(range), _) => format!("{} {}", icons::BRANCH, range.from_name),
         (None, Some(reason)) => reason
@@ -346,54 +440,11 @@ fn headers(repo: &Repo) -> Vec<Section<Item>> {
 pub fn sections(repo: &Repo, opened: Opened<'_>) -> Vec<Section<Item>> {
     let mut out = headers(repo);
     let mut any = false;
-    for group in [
-        Group::Untracked,
-        Group::Unstaged,
-        Group::Staged,
-        Group::Branch,
-    ] {
-        let files = files_of(repo, group);
-        if files.is_empty() {
-            continue;
+    for group in [Group::Untracked, Group::Unstaged, Group::Staged] {
+        if let Some(section) = group_section(repo, group, opened) {
+            any = true;
+            out.push(section);
         }
-        any = true;
-        let children = files
-            .into_iter()
-            .map(|(path, letter, counts)| {
-                let threads = repo
-                    .comments
-                    .iter()
-                    .filter(|c| c.path == path && c.status != ReviewStatus::Resolved)
-                    .count();
-                let file = repo.files.get(&(group, path.clone()));
-                Section::with(
-                    format!("file/{group:?}/{path}"),
-                    Item::File {
-                        group,
-                        path: path.clone(),
-                        letter,
-                        counts,
-                        threads,
-                    },
-                    file_children(repo, group, &path, file, opened),
-                )
-                .folded()
-            })
-            .collect::<Vec<_>>();
-        let section = Section::with(
-            format!("group/{group:?}"),
-            Item::Group {
-                group,
-                count: children.len(),
-            },
-            children,
-        );
-        // The branch's changes are long and read-only: they start folded.
-        out.push(if group == Group::Branch {
-            section.folded()
-        } else {
-            section
-        });
     }
     if !any {
         out.push(Section::leaf(
@@ -401,9 +452,87 @@ pub fn sections(repo: &Repo, opened: Opened<'_>) -> Vec<Section<Item>> {
             Item::Note("Nothing to commit: the working tree is clean.".to_owned()),
         ));
     }
-
     out.extend(threads(repo));
+    out.extend(commits(repo));
+    // The branch's changes are long and read-only: they start folded.
+    out.extend(group_section(repo, Group::Branch, opened).map(Section::folded));
+    out.extend(stashes(repo));
     out
+}
+
+/// A group of files and what unfolds under them; `None` when it has no file.
+fn group_section(repo: &Repo, group: Group, opened: Opened<'_>) -> Option<Section<Item>> {
+    let files = files_of(repo, group);
+    if files.is_empty() {
+        return None;
+    }
+    let children = files
+        .into_iter()
+        .map(|(path, letter, counts)| {
+            let threads = repo
+                .comments
+                .iter()
+                .filter(|c| c.path == path && c.status != ReviewStatus::Resolved)
+                .count();
+            let file = repo.files.get(&(group, path.clone()));
+            Section::with(
+                format!("file/{group:?}/{path}"),
+                Item::File {
+                    group,
+                    path: path.clone(),
+                    letter,
+                    counts,
+                    threads,
+                },
+                file_children(repo, group, &path, file, opened),
+            )
+            .folded()
+        })
+        .collect::<Vec<_>>();
+    Some(Section::with(
+        format!("group/{group:?}"),
+        Item::Group {
+            group,
+            count: children.len(),
+        },
+        children,
+    ))
+}
+
+/// The commits on the branch that are not on its base.
+fn commits(repo: &Repo) -> Option<Section<Item>> {
+    let history = repo.commits.as_ref()?;
+    if history.commits.is_empty() {
+        return None;
+    }
+    let children = (0..history.commits.len())
+        .map(|index| Section::leaf(format!("commit/{index}"), Item::Commit { index }))
+        .collect::<Vec<_>>();
+    Some(Section::with(
+        "commits",
+        Item::Commits {
+            count: children.len(),
+            more: history.more,
+        },
+        children,
+    ))
+}
+
+/// The stashes, newest first.
+fn stashes(repo: &Repo) -> Option<Section<Item>> {
+    if repo.stashes.is_empty() {
+        return None;
+    }
+    let children = (0..repo.stashes.len())
+        .map(|index| Section::leaf(format!("stash/{index}"), Item::Stash { index }))
+        .collect();
+    Some(Section::with(
+        "stashes",
+        Item::Stashes {
+            count: repo.stashes.len(),
+        },
+        children,
+    ))
 }
 
 /// The open review threads, under who acts next.

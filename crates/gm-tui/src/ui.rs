@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::Instant;
 
 use gm_schema::{
-    CommandKind, Event, LineKind, OperationId, OperationState, RepoStatus, ReviewAuthorFilter,
-    ReviewStatus, StageTarget,
+    CommandKind, Event, HistoryScope, LineKind, OperationId, OperationState, RepoStatus,
+    ReviewAuthorFilter, ReviewStatus, StageTarget,
 };
 use gm_view::compose::{self, ReviewTarget};
 use gm_view::diff_rows::Row as DiffRow;
@@ -127,6 +127,8 @@ enum Pending {
     Diff(Group, String),
     Range,
     Stack,
+    /// The branch's own commits.
+    Commits,
     Write(&'static str),
     Text,
 }
@@ -275,6 +277,7 @@ impl App {
             },
             CommandKind::LoadBranchChange { .. } => Pending::Range,
             CommandKind::LoadRevisionStack { .. } => Pending::Stack,
+            CommandKind::LoadHistory { .. } => Pending::Commits,
             CommandKind::Stage { .. } => Pending::Write("Staging"),
             CommandKind::Unstage { .. } => Pending::Write("Unstaging"),
             CommandKind::ResolveReviewComment { .. } => Pending::Write("Resolving"),
@@ -323,7 +326,21 @@ impl App {
                 self.repo
                     .files
                     .retain(|(group, _), _| *group != Group::Branch);
+                // The branch's own commits: those of the range, as `git log base..tip`.
+                self.commands.push(CommandKind::LoadHistory {
+                    scope: HistoryScope::Ref {
+                        name: format!("{}..{}", range.base, range.tip),
+                    },
+                });
             }
+            Event::HistoryLoaded { id, history }
+                if self.in_flight.get(id) == Some(&Pending::Commits) =>
+            {
+                self.in_flight.remove(id);
+                self.repo.commits = Some(history.clone());
+            }
+            Event::StashesListed { stashes, .. } => self.repo.stashes.clone_from(stashes),
+            Event::StacksLoaded { stacks, .. } => self.repo.stacks.clone_from(stacks),
             Event::RevisionStackLoaded { id, diffs }
                 if self.in_flight.get(id) == Some(&Pending::Stack) =>
             {
@@ -364,7 +381,7 @@ impl App {
         if !failed
             && matches!(
                 self.in_flight.get(&id),
-                Some(Pending::Diff(..) | Pending::Range | Pending::Stack)
+                Some(Pending::Diff(..) | Pending::Range | Pending::Stack | Pending::Commits)
             )
         {
             return;
@@ -377,7 +394,9 @@ impl App {
             Some(Pending::Range) => {
                 self.repo.range = None;
                 self.repo.range_error = Some(reason);
+                self.repo.commits = None;
             }
+            Some(Pending::Commits) => self.repo.commits = None,
             Some(Pending::Stack) => {
                 for ((group, _), file) in &mut self.repo.files {
                     if *group == Group::Branch && file.diff.is_none() {
@@ -408,6 +427,8 @@ impl App {
         self.commands.push(CommandKind::ListReviewComments {
             author: ReviewAuthorFilter::Any,
         });
+        // A stash changes the working tree, so its list moves with the status.
+        self.commands.push(CommandKind::ListStashes);
         // The branch's changes move only with HEAD (D237 (3)).
         let head = (
             self.repo.status.branch.head.clone(),
@@ -417,6 +438,7 @@ impl App {
             self.range_head = Some(head);
             self.commands
                 .push(CommandKind::LoadBranchChange { base: None });
+            self.commands.push(CommandKind::LoadStacks);
         }
     }
 
@@ -1427,5 +1449,134 @@ mod tests {
         assert!(
             matches!(app.tree().current().map(|s| &s.item), Some(Item::File { path, .. }) if path == "README.md")
         );
+    }
+
+    /// A stack main › api › feature, with feature due a restack.
+    fn stacks_event() -> Event {
+        use gm_schema::{Stack, StackBranch, StackSnapshot, StackState};
+        let branch = |name: &str, parent: Option<&str>, depth, state| StackBranch {
+            name: name.to_owned(),
+            parent: parent.map(str::to_owned),
+            depth,
+            state,
+            ahead: 2,
+            behind: 1,
+            restack: 0,
+            commits: Vec::new(),
+            base: None,
+            parent_tip: None,
+        };
+        Event::StacksLoaded {
+            id: OperationId(4),
+            stacks: StackSnapshot {
+                stacks: vec![Stack {
+                    branches: vec![
+                        branch("main", None, 0, StackState::Root),
+                        branch("api", Some("main"), 1, StackState::Current),
+                        branch("feature", Some("api"), 2, StackState::Stale),
+                    ],
+                }],
+                looped: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn status_shows_the_stack_the_branchs_commits_and_the_stashes() {
+        use gm_schema::{CommitSummary, History, RevisionRange, StashEntry};
+        let mut app = App::new(app().repo.status.clone());
+        let asked = app.take_commands();
+        assert!(asked.contains(&CommandKind::ListStashes), "{asked:?}");
+        assert!(asked.contains(&CommandKind::LoadStacks), "{asked:?}");
+        app.sent(
+            OperationId(1),
+            &CommandKind::LoadBranchChange { base: None },
+        );
+        app.apply(&Event::RevisionRangeLoaded {
+            id: OperationId(1),
+            range: RevisionRange {
+                from_name: "api".to_owned(),
+                base: "b0".to_owned(),
+                tip: "t9".to_owned(),
+                ..RevisionRange::default()
+            },
+        });
+        let asked = app.take_commands();
+        assert_eq!(
+            asked,
+            [CommandKind::LoadHistory {
+                scope: HistoryScope::Ref {
+                    name: "b0..t9".to_owned()
+                }
+            }]
+        );
+        app.sent(OperationId(2), &asked[0]);
+        // The read reports Done before its answer: the answer still lands.
+        app.apply(&Event::OperationChanged {
+            id: OperationId(2),
+            state: OperationState::Done,
+            detail: None,
+            actor: gm_schema::Actor::Human,
+        });
+        let commit = |short: &str, subject: &str| CommitSummary {
+            oid: short.to_owned(),
+            parents: Vec::new(),
+            short: short.to_owned(),
+            subject: subject.to_owned(),
+            refs: Vec::new(),
+            author_time: 0,
+        };
+        app.apply(&Event::HistoryLoaded {
+            id: OperationId(2),
+            history: History {
+                commits: vec![commit("t9", "Add the ui"), commit("t8", "Start")],
+                unborn: false,
+                more: false,
+            },
+        });
+        app.apply(&Event::StashesListed {
+            id: OperationId(3),
+            stashes: vec![StashEntry {
+                index: 0,
+                oid: "s0".to_owned(),
+                message: "On feature: try".to_owned(),
+                branch: Some("feature".to_owned()),
+                time: 0,
+            }],
+        });
+        app.apply(&stacks_event());
+        let rows = shown(&app);
+        let texts: Vec<String> = app
+            .tree()
+            .rows()
+            .iter()
+            .map(|row| row.section.item.text(&app.repo))
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("main › api › feature") && t.contains("restack due")),
+            "{texts:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.starts_with("Commits { count: 2")),
+            "{rows:?}"
+        );
+        assert!(texts.contains(&"t9 Add the ui".to_owned()), "{texts:?}");
+        assert!(
+            rows.iter().any(|r| r.starts_with("Stashes { count: 1")),
+            "{rows:?}"
+        );
+        assert!(
+            texts.contains(&"stash@{0} On feature: try".to_owned()),
+            "{texts:?}"
+        );
+        // `/` finds a commit.
+        app.tree_mut().move_to(0);
+        key(&mut app, "/ S t a r t <cr>", Instant::now());
+        assert!(matches!(
+            app.tree().current().map(|s| &s.item),
+            Some(Item::Commit { index: 1 })
+        ));
     }
 }

@@ -213,6 +213,18 @@ fn one_ref_reads_a_branch_even_when_a_tag_has_its_name() {
 }
 
 #[test]
+fn one_ref_reads_a_range_as_git_does() {
+    let mut repo = Repo::stack();
+    // The companion lists a branch's own commits as `base..tip` (D243).
+    assert_eq!(
+        repo.subjects(HistoryScope::Ref {
+            name: "v1..side".into()
+        }),
+        sorted(&["m2", "s1"])
+    );
+}
+
+#[test]
 fn one_ref_refuses_a_name_read_as_an_option() {
     let mut repo = Repo::stack();
     repo.next += 1;

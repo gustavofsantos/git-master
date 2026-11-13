@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use gm_schema::{
-    ChangeStats, DiffSide, FileDiff, HighlightSpan, LineKind, RepoStatus, ReviewComment,
-    RevisionRange, SyntaxRole,
+    ChangeStats, DiffSide, FileDiff, HighlightSpan, History, LineKind, RepoStatus, ReviewComment,
+    RevisionRange, StackSnapshot, StashEntry, SyntaxRole,
 };
 use gm_view::diff_rows::{self, Diffs, Row, Side};
 
@@ -121,6 +121,10 @@ pub struct Repo {
     pub range_error: Option<String>,
     /// The diffs read, by group and path.
     pub files: HashMap<(Group, String), FileData>,
+    /// The branch's own commits, `base..tip` of `range`, newest first.
+    pub commits: Option<History>,
+    pub stashes: Vec<StashEntry>,
+    pub stacks: StackSnapshot,
 }
 
 impl Repo {

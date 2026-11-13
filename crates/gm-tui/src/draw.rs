@@ -16,6 +16,7 @@ use gm_schema::{DiffLine, LineKind, SyntaxRole};
 use gm_view::compose;
 use gm_view::diff_rows::Row as DiffRow;
 use gm_view::review::{self, Badge, Heading, Part, made_label, range_label, reply_head};
+use gm_view::time::relative_time;
 
 use crate::data::{Group, LineColors};
 use crate::icons;
@@ -245,6 +246,52 @@ fn diff_line(app: &App, group: Group, path: &str, index: usize, width: usize) ->
     code_line(line, file.colors.get(&(hunk_index, line_index)), width)
 }
 
+/// A row of the Commits and Stashes sections.
+fn history_line(app: &App, row: &Row<'_, Item>) -> Line<'static> {
+    let repo = &app.repo;
+    match &row.section.item {
+        Item::Commits { count, more } => Line::from(vec![
+            Span::styled(
+                format!("{} Commits", fold_icon(row)),
+                color(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" ({count}{})", if *more { "+" } else { "" }), DIM),
+        ]),
+        Item::Commit { index } => repo
+            .commits
+            .as_ref()
+            .and_then(|history| history.commits.get(*index))
+            .map_or_default(|commit| {
+                Line::from(vec![
+                    Span::styled(format!("    {} ", commit.short), color(Color::Yellow)),
+                    Span::raw(commit.subject.clone()),
+                    Span::styled(
+                        format!("  {}", relative_time(now_secs(), commit.author_time)),
+                        DIM,
+                    ),
+                ])
+            }),
+        Item::Stashes { count } => Line::from(vec![
+            Span::styled(
+                format!("{} Stashes", fold_icon(row)),
+                color(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" ({count})"), DIM),
+        ]),
+        Item::Stash { index } => repo.stashes.get(*index).map_or_default(|stash| {
+            Line::from(vec![
+                Span::styled(
+                    format!("    stash@{{{}}} ", stash.index),
+                    color(Color::Yellow),
+                ),
+                Span::raw(stash.message.clone()),
+                Span::styled(format!("  {}", relative_time(now_secs(), stash.time)), DIM),
+            ])
+        }),
+        _ => Line::default(),
+    }
+}
+
 fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
     let repo = &app.repo;
     match &row.section.item {
@@ -261,7 +308,7 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             Span::styled(format!(" ({count})"), DIM),
         ]),
         Item::File { .. } => file_line(row),
-        Item::Note(text) => Line::styled(format!("      {text}"), DIM),
+        Item::Note(text) => Line::styled(format!("{}{text}", " ".repeat(row.depth * 2 + 2)), DIM),
         Item::Hunk { group, path, hunk } => {
             let header = repo
                 .files
@@ -322,6 +369,9 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             Span::styled(format!(" ({count})"), DIM),
         ]),
         Item::Thread { id } => thread_line(app, *id, width),
+        Item::Commits { .. } | Item::Commit { .. } | Item::Stashes { .. } | Item::Stash { .. } => {
+            history_line(app, row)
+        }
     }
 }
 
