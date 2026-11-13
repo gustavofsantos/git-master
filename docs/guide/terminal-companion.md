@@ -31,7 +31,7 @@ The terminal must be at least 80 columns wide and 24 rows high. A smaller termin
 Every screen has the same frame:
 
 - The **top bar** shows `gitmaster`, the tabs **Diff**, **File** and **Reviews**, and on the right the branch and its upstream. The **Reviews** tab shows how many threads are not resolved.
-- The **sidebar** on the left lists the changed files under their folders: each folder that holds changed files is one row, `./` for the root, listed last. Two chips at its top choose what it lists: **Unstaged N**, the changes not staged yet, and **Staged N**, the changes ready to commit. Each file shows its status letter, `+a −r` and, as `◫N`, the threads on it that are not resolved. A binary or untracked file shows no counts. Click a folder to fold or unfold it.
+- The **sidebar** on the left lists the changed files under their folders: each folder that holds changed files is one row, `./` for the root, listed last. Three chips at its top choose what it lists: the uncommitted changes, as **Unstaged N**, the changes not staged yet, and **Staged N**, the changes ready to commit; and **Branch N**, the changes the branch's commits bring (see [Branch changes](#branch-changes)). Each file shows its status letter, `+a −r` and, as `◫N`, the threads on it that are not resolved. A binary or untracked file shows no counts. Click a folder to fold or unfold it.
 - The **main pane** on the right shows the selected tab for the selected file.
 - The **button bar** at the bottom lists the actions that work where you are, each with its key. Every entry is a button: click it or press its key.
 
@@ -55,7 +55,7 @@ These keys work everywhere:
 |---|---|
 | `1`, `2`, `3` | Show the **Diff**, **File** or **Reviews** tab. |
 | `Tab` | Switch between the sidebar and the main pane. |
-| `t` | Switch the sidebar between **Unstaged** and **Staged**. |
+| `t` | Switch the sidebar to the next of **Unstaged**, **Staged** and **Branch**. |
 | `?` | Show every key. |
 | `q` | Quit. |
 
@@ -78,6 +78,14 @@ Each hunk starts with a header bar that shows the function or section it is in, 
 | `e` | Open the file in your editor at the line under the cursor. |
 
 `e` opens the editor named by `$VISUAL` or `$EDITOR` in the companion's terminal. The companion comes back when the editor exits.
+
+## Branch changes
+
+**Branch** shows what the branch you are on brings to its base, as the app's **Branch** tab does: the changes of its own commits, from the commit where it split from the default branch to its tip. The default branch is the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists. Commits that landed on the default branch after the split are not shown, and uncommitted changes are on **Unstaged** and **Staged**.
+
+The sidebar lists the branch's files with `+a −r`, and the **Diff** tab shows each file's diff, with the branch and its base in the header, such as `feature against main`. The diff is read-only: it has no **[stage]** buttons. You can start a thread on its lines: the companion finds the selected text in the file as it is now, as for a commit's diff in the app.
+
+The list follows the branch: a new commit, a checkout or a rebase reads it again. When there is nothing to compare, the sidebar says why, for example **You are on the default branch.** or **`feature` and `main` have no common ancestor.**
 
 ## Stage and unstage
 
