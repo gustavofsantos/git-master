@@ -20,14 +20,14 @@ A screen fills the terminal. It has an address, shown in the mode line, and keep
 |---|---|---|
 | Status | `status` | the root: always at the bottom, never closed |
 | Threads | `threads` | the menu, anywhere |
-| Review thread | `thread 12` | a thread in Status or Threads |
+| Review thread | `thread/12` | a thread in Status or Threads |
 | Diff | `diff unstaged`, `diff main..HEAD`, `diff a41f9c2` | the diff menu |
 | File | `file src/ledger/posting.rs` | a file |
 | Blame | `blame src/ledger/posting.rs` | a line |
 | Origin | `origin src/ledger/posting.rs:41-53` | blame, or selected lines |
 | Agent thread | `agent 9` | blame, origin, a review thread |
 
-The screens form a **stack**. Opening one pushes it; **back** (`Esc` by default) pops to the screen below, exactly as it was left. Opening an address already on the stack goes back to that screen instead of stacking a copy, so the stack has no loops; it is capped at 32. The mode line shows the stack as a trail, `status › threads › thread 12`, and each step of the trail is clickable.
+The screens form a **stack**. Opening one pushes it; **back** (`Esc` by default) pops to the screen below, exactly as it was left. Opening an address already on the stack goes back to that screen instead of stacking a copy, so the stack has no loops; it is capped at 32. The mode line shows the stack as a trail, `status › threads › thread/12`, and each step of the trail is clickable.
 
 ## Overlays
 

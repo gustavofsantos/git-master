@@ -30,9 +30,9 @@ The companion uses your terminal's colors, so it matches your terminal theme and
 
 ## Screens
 
-> **Planned.** Only **Status** and **Keys** are available. `Enter` on a thread goes to its lines on Status; it does not open a screen or your editor yet.
+> **Planned.** Only **Status**, **Threads**, **Thread** and **Keys** are available. `Enter` does not open your editor yet.
 
-The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread 12`; click a step to go back to it.
+The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread/12`; click a step to go back to it.
 
 | Screen | Shows |
 |---|---|
@@ -124,11 +124,9 @@ Every question the companion asks you, and the text box, waits one second before
 
 ## The Threads and Thread screens
 
-> **Planned.** The Threads and Thread screens are not available yet.
+Open **Threads** from the menu anywhere (`Space t`). It lists the review threads in three sections: **Waiting for you** (threads the agent handled, and threads whose last word is the agent's), **Waiting for the agent** (threads whose last word is yours) and **Resolved**, the latest activity first. The line at the top says which filter is on and how many threads it keeps. `Space f` narrows the list as the app's **Review** page does: `o` **Open**, `r` **Resolved**, `u` **Outdated**, `n` **Needs answer**, `a` **Agent**, `A` **All**. `Enter` on a thread opens it.
 
-**Threads** lists the review threads in three sections: **Waiting for you** (threads the agent handled, and threads whose last word is the agent's), **Waiting for the agent** (threads whose last word is yours) and **Resolved**, the latest activity first. A filter in the menu narrows the list as the app's **Review** page does: **Open**, **Resolved**, **Outdated**, **Needs answer**, **Agent**, **All**.
-
-**Thread** shows one thread: its lines as they were when you commented (**Before**) and when the agent handled it (**After**), with the changed lines marked; what the agent changed in those lines, as GitMaster measured it from its own snapshots; and the comment and its replies. From the menu: reply, resolve, reopen, delete, and show it in its diff.
+**Thread** opens with `Enter` on a thread anywhere: in Threads, in **Review threads** on Status, or on a thread under its lines. It shows the thread's lines as they were when you commented (**Before**) and when the agent handled it (**After**; the file as it is now until then), with the changed lines marked `-` and `+`; what the agent changed in those lines, as GitMaster measured it from its own snapshots; and the comment and its replies. It refreshes by itself when the agent answers. From the menu, wherever the cursor is: reply, resolve, reopen, delete, and **show in diff** (`Space g`, or `Enter`), which goes back to Status with the thread under its lines.
 
 ## Diff, File, Blame and Origin
 
