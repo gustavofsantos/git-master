@@ -222,6 +222,7 @@ fn person_comment(ws: &Path, path: &str, text: &str, body: &str) {
     let events = human(
         2,
         CommandKind::AddReviewCommentByText {
+            label: None,
             path: path.into(),
             text: text.into(),
             body: body.into(),

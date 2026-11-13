@@ -270,6 +270,7 @@ fn agent_note(path: &str, anchor: &str, body: &str) -> CommandKind {
 
 fn human_text(path: &str, text: &str, body: &str) -> CommandKind {
     CommandKind::AddReviewCommentByText {
+        label: None,
         path: path.to_owned(),
         text: text.to_owned(),
         body: body.to_owned(),

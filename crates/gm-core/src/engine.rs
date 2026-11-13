@@ -4922,13 +4922,20 @@ impl Engine {
                 start_line,
                 end_line,
                 body,
+                label,
             } => {
                 only_a_human(actor, "comment on the code")?;
-                self.add_review_comment(id, path, *start_line, *end_line, body)
+                let lines = (*start_line, *end_line);
+                self.add_review_comment(id, path, lines, body, *label)
             }
-            CommandKind::AddReviewCommentByText { path, text, body } => {
+            CommandKind::AddReviewCommentByText {
+                path,
+                text,
+                body,
+                label,
+            } => {
                 only_a_human(actor, "comment on the code")?;
-                self.add_review_comment_by_text(id, path, text, body)
+                self.add_review_comment_by_text(id, path, text, body, *label)
             }
             CommandKind::EditReviewComment { id: comment, body } => {
                 only_a_human(actor, "edit a review comment")?;
@@ -5050,16 +5057,18 @@ impl Engine {
         &mut self,
         id: OperationId,
         path: &str,
-        start_line: u32,
-        end_line: u32,
+        (start_line, end_line): (u32, u32),
         body: &str,
+        label: Option<gm_schema::CommentLabel>,
     ) -> Result<Vec<Event>, String> {
         let body = review_body(body)?;
         let root = self.open_root()?;
         let text = review_session::read_text(&root, path)?;
         let anchor = review::anchor_for(&text, start_line, end_line)?;
         let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let comment = store.add(path, body, &anchor, now_ms()).map_err(|e| e.0)?;
+        let comment = store
+            .add_with_label(path, body, &anchor, label, now_ms())
+            .map_err(|e| e.0)?;
         snapshot_before(self.git.as_ref(), store, &root, comment, path)?;
         self.review_listed(id, &root)
     }
@@ -5263,11 +5272,13 @@ impl Engine {
         path: &str,
         text: &str,
         body: &str,
+        label: Option<gm_schema::CommentLabel>,
     ) -> Result<Vec<Event>, String> {
         let root = self.open_root()?;
         let file = review_session::read_text(&root, path)?;
         let place = review::lines_of_text(&file, text)?;
-        self.add_review_comment(id, path, place.start_line, place.end_line, body)
+        let lines = (place.start_line, place.end_line);
+        self.add_review_comment(id, path, lines, body, label)
     }
 
     fn edit_review_comment(

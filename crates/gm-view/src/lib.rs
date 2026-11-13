@@ -3,6 +3,7 @@
 //! here depends on GPUI or ratatui, so every rule is tested without a window or a
 //! terminal.
 
+pub mod compose;
 pub mod diff_rows;
 pub mod review;
 pub mod time;

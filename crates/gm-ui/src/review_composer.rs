@@ -13,8 +13,7 @@ use gpui::{
 use crate::FocusNext;
 use crate::action_registry::{CommentSpot, Effect, shortcut_text};
 use crate::diff_pane::PaneSpot;
-use crate::diff_rows::Side;
-use crate::review::{self, range_label};
+use crate::review;
 use crate::text_area::{TextArea, TextAreaEvent};
 use crate::theme;
 use crate::view::{Screen, StatusView};
@@ -27,133 +26,8 @@ const WIDTH: f32 = 560.;
 /// The dialog hangs this far below the top of the window.
 const TOP: f32 = 96.;
 
-/// What the dialog writes: a new comment on the lines of `path`, or the body of
-/// comment `id`, whose lines are shown with it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ReviewTarget {
-    New {
-        path: String,
-        start_line: u32,
-        end_line: u32,
-    },
-    /// A new comment on text picked in a surface that is not the working tree
-    /// (D141): the engine looks for the text in the file now.
-    NewByText { path: String, text: String },
-    Edit {
-        id: i64,
-        path: String,
-        start_line: u32,
-        end_line: u32,
-    },
-    /// A reply on the thread of comment `id`, whose lines are shown with it (D198).
-    Reply {
-        id: i64,
-        path: String,
-        start_line: u32,
-        end_line: u32,
-    },
-}
-
-impl ReviewTarget {
-    fn path(&self) -> &str {
-        match self {
-            ReviewTarget::New { path, .. }
-            | ReviewTarget::NewByText { path, .. }
-            | ReviewTarget::Edit { path, .. }
-            | ReviewTarget::Reply { path, .. } => path,
-        }
-    }
-
-    /// The lines the dialog names: the target's own, or for picked text one to its length.
-    fn lines(&self) -> (u32, u32) {
-        match self {
-            ReviewTarget::NewByText { text, .. } => (
-                1,
-                u32::try_from(text.lines().count().max(1)).unwrap_or(u32::MAX),
-            ),
-            ReviewTarget::New {
-                start_line,
-                end_line,
-                ..
-            }
-            | ReviewTarget::Edit {
-                start_line,
-                end_line,
-                ..
-            }
-            | ReviewTarget::Reply {
-                start_line,
-                end_line,
-                ..
-            } => (*start_line, *end_line),
-        }
-    }
-}
-
-/// The body a comment carries: trimmed, and none when it is blank.
-#[must_use]
-pub(crate) fn body_of(text: &str) -> Option<String> {
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_owned())
-}
-
-/// Whether Comment or Save may be pressed: no write is in flight and the body is not blank.
-#[must_use]
-pub(crate) fn may_save(pending: bool, text: &str) -> bool {
-    !pending && body_of(text).is_some()
-}
-
-/// The command the dialog sends for its target, with `Actor::Human`. None when the
-/// body is blank.
-#[must_use]
-pub(crate) fn command(target: &ReviewTarget, text: &str) -> Option<CommandKind> {
-    let body = body_of(text)?;
-    Some(match target {
-        ReviewTarget::New {
-            path,
-            start_line,
-            end_line,
-        } => CommandKind::AddReviewComment {
-            path: path.clone(),
-            start_line: *start_line,
-            end_line: *end_line,
-            body,
-        },
-        ReviewTarget::NewByText { path, text } => CommandKind::AddReviewCommentByText {
-            path: path.clone(),
-            text: text.clone(),
-            body,
-        },
-        ReviewTarget::Edit { id, .. } => CommandKind::EditReviewComment { id: *id, body },
-        ReviewTarget::Reply { id, .. } => CommandKind::ReplyToReviewComment { id: *id, body },
-    })
-}
-
-/// The dialog's title: what the comment is about.
-#[must_use]
-pub(crate) fn title(target: &ReviewTarget) -> String {
-    let (start, end) = target.lines();
-    let range = match target {
-        ReviewTarget::NewByText { .. } if end > 1 => format!("{end} selected lines"),
-        ReviewTarget::NewByText { .. } => "the selected line".to_owned(),
-        _ => range_label(start, end),
-    };
-    match target {
-        ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => format!("Comment on {range}"),
-        ReviewTarget::Edit { .. } => format!("Edit comment on {range}"),
-        ReviewTarget::Reply { .. } => format!("Reply on {range}"),
-    }
-}
-
-/// The label of the button that writes the comment.
-#[must_use]
-pub(crate) fn save_label(target: &ReviewTarget) -> &'static str {
-    match target {
-        ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => "Comment",
-        ReviewTarget::Edit { .. } => "Save",
-        ReviewTarget::Reply { .. } => "Reply",
-    }
-}
+// The composer's rules live in `gm_view::compose`, shared with the terminal companion (D235 (3)).
+pub(crate) use gm_view::compose::{ReviewTarget, command, may_save, save_label, title};
 
 /// Registers the save key. Call once at startup.
 pub fn bind_keys(cx: &mut App) {
@@ -398,7 +272,7 @@ impl StatusView {
             return;
         }
         dialog.error = None;
-        let Some(kind) = command(&dialog.target, &text) else {
+        let Some(kind) = command(&dialog.target, &text, None) else {
             return;
         };
         let id = self.engine.dispatch(Actor::Human, kind);
@@ -606,16 +480,7 @@ impl StatusView {
         if !spot.covered.has_line {
             return CommentSpot::Nothing;
         }
-        match (spot.side, spot.covered.working) {
-            // The unstaged new side is the working tree: its numbers are the file's.
-            (Side::Unstaged, working) => CommentSpot::Lines { path, working },
-            (Side::Staged, None) => CommentSpot::Lines {
-                path,
-                working: None,
-            },
-            (Side::Staged, Some(_)) if spot.picked.contiguous => CommentSpot::Text { path },
-            (Side::Staged, Some(_)) => CommentSpot::Split,
-        }
+        gm_view::compose::diff_spot(spot.side, spot.covered, &spot.picked, path)
     }
 
     /// The text picked in the diff, for a comment found by its text (D141).
@@ -731,8 +596,10 @@ fn stacked_spot<'a>(spot: &PaneSpot<'a>) -> CommentSpot<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff_rows::Side;
     use crate::review::ReviewWrite;
     use gm_schema::OperationState;
+    use gm_view::compose::body_of;
 
     fn new_target() -> ReviewTarget {
         ReviewTarget::New {
@@ -789,8 +656,9 @@ mod tests {
             text: "one\ntwo".into(),
         };
         assert_eq!(
-            command(&target, " check "),
+            command(&target, " check ", None),
             Some(CommandKind::AddReviewCommentByText {
+                label: None,
                 path: "src/a.rs".into(),
                 text: "one\ntwo".into(),
                 body: "check".into(),
@@ -810,15 +678,16 @@ mod tests {
     #[test]
     fn a_new_comment_sends_the_lines_and_the_trimmed_body_as_the_human() {
         assert_eq!(
-            command(&new_target(), "  check this \n"),
+            command(&new_target(), "  check this \n", None),
             Some(CommandKind::AddReviewComment {
+                label: None,
                 path: "src/a.rs".into(),
                 start_line: 12,
                 end_line: 15,
                 body: "check this".into(),
             })
         );
-        assert_eq!(command(&new_target(), " "), None);
+        assert_eq!(command(&new_target(), " ", None), None);
     }
 
     #[test]
@@ -830,7 +699,7 @@ mod tests {
             end_line: 1,
         };
         assert_eq!(
-            command(&edit, "better"),
+            command(&edit, "better", None),
             Some(CommandKind::EditReviewComment {
                 id: 7,
                 body: "better".into(),

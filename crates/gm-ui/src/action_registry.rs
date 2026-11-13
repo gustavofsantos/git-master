@@ -359,26 +359,9 @@ pub struct WorkflowCtx<'a> {
     pub page: PageState<'a>,
 }
 
-/// Where the lines picked to comment on are, for a review comment (B4c, D141).
-/// Built by the window from the diff pane or the Code viewer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CommentSpot<'a> {
-    /// Nothing is picked: no file is shown, or the cursor is on a hunk header.
-    #[default]
-    Nothing,
-    /// Lines of `path` that the working tree has at these numbers: the unstaged
-    /// diff's new side and the Code viewer. `working` is the lowest and highest
-    /// line, `None` when all are removed lines.
-    Lines {
-        path: &'a str,
-        working: Option<(u32, u32)>,
-    },
-    /// Lines of `path` on a surface that is not the working tree (the staged side,
-    /// a commit, a stash): the engine finds the text in the file now.
-    Text { path: &'a str },
-    /// The pick runs over more than one hunk, so its text is not one run of lines.
-    Split,
-}
+/// Where the lines picked to comment on are (B4c, D141); shared with the terminal
+/// companion in `gm_view::compose` (D235 (3)).
+pub use gm_view::compose::CommentSpot;
 
 /// What the window knows of the review comments, for the rules (B4c).
 #[derive(Clone, Copy, Debug, Default)]
@@ -3553,12 +3536,7 @@ fn worktree_lock_effect(action: Action, path: &str) -> Effect {
 /// working tree has, or whose text the engine can look for in the file.
 fn comment_rule(ctx: &Context<'_>) -> Result<(), Reason> {
     idle(ctx)?;
-    match ctx.review.spot {
-        CommentSpot::Nothing => Err("Select lines to comment on first."),
-        CommentSpot::Lines { working: None, .. } => Err("Those lines are not in the working tree."),
-        CommentSpot::Split => Err("Select lines of one hunk to comment on."),
-        CommentSpot::Lines { .. } | CommentSpot::Text { .. } => Ok(()),
-    }
+    gm_view::compose::spot_refusal(ctx.review.spot)
 }
 
 /// What Comment on Selection opens: the composer for the working-tree lines, or

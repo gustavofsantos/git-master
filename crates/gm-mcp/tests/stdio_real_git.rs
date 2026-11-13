@@ -86,6 +86,7 @@ fn comment(dir: &Path, line: u32, body: &str) {
     engine.handle(
         OperationId(2),
         &human(CommandKind::AddReviewComment {
+            label: None,
             path: "f.txt".into(),
             start_line: line,
             end_line: line,

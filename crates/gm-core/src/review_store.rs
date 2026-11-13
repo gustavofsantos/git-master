@@ -308,16 +308,29 @@ impl ReviewStore {
         anchor: &ReviewAnchor,
         now: i64,
     ) -> Result<i64, StoreError> {
+        self.add_with_label(path, body, anchor, None, now)
+    }
+
+    /// `add`, with the label the person chose (D236 (7)).
+    pub fn add_with_label(
+        &self,
+        path: &str,
+        body: &str,
+        anchor: &ReviewAnchor,
+        label: Option<CommentLabel>,
+        now: i64,
+    ) -> Result<i64, StoreError> {
         let anchor_json = to_json(anchor)?;
         self.conn.execute(
-            "INSERT INTO comments (path, body, status, anchor_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO comments (path, body, status, anchor_json, created_at, label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 path,
                 body,
                 status_text(ReviewStatus::Open),
                 anchor_json,
-                now
+                now,
+                label.map(CommentLabel::as_str),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())

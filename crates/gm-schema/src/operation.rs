@@ -653,6 +653,10 @@ pub enum CommandKind {
         start_line: u32,
         end_line: u32,
         body: String,
+        /// The conventional-comment label the person chose, such as `issue` (D236 (7));
+        /// `None` for none. A person's comment has no kind, whatever its label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<CommentLabel>,
     },
     /// Comments on `text`, lines joined with `\n`, found in `path` in the working
     /// tree (D141). For a surface that does not show the working tree (the staged
@@ -663,6 +667,10 @@ pub enum CommandKind {
         path: String,
         text: String,
         body: String,
+        /// The conventional-comment label the person chose, such as `issue` (D236 (7));
+        /// `None` for none. A person's comment has no kind, whatever its label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<CommentLabel>,
     },
     /// Lists the review comments, with where each anchor is in the file now. `author`
     /// picks the threads by who started them (D200): by default the person's own, and the
@@ -1975,6 +1983,7 @@ mod tests {
     #[test]
     fn review_commands_wire_format_is_tagged() {
         let add = serde_json::to_value(CommandKind::AddReviewComment {
+            label: None,
             path: "src/a.rs".into(),
             start_line: 3,
             end_line: 4,

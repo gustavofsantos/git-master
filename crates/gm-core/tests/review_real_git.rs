@@ -82,6 +82,7 @@ fn agent(kind: CommandKind) -> Command {
 
 fn add(path: &str, start_line: u32, end_line: u32, body: &str) -> CommandKind {
     CommandKind::AddReviewComment {
+        label: None,
         path: path.to_owned(),
         start_line,
         end_line,
@@ -1214,6 +1215,7 @@ fn reading_the_change_is_not_recorded() {
 
 fn add_by_text(path: &str, text: &str) -> CommandKind {
     CommandKind::AddReviewCommentByText {
+        label: None,
         path: path.to_owned(),
         text: text.to_owned(),
         body: "by text".to_owned(),
@@ -2051,4 +2053,26 @@ fn an_agent_thread_is_a_logged_write() {
     let before = engine.log().len();
     list_as(&mut engine, ReviewAuthorFilter::Any);
     assert_eq!(engine.log().len(), before, "a listing leaves no entry");
+}
+
+/// A person's comment carries the label they chose (D236 (7)); it stays a person's comment,
+/// with no kind, and the label is listed with it, as an agent reads it over MCP.
+#[test]
+fn a_persons_comment_keeps_its_label_and_has_no_kind() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    let labelled = CommandKind::AddReviewComment {
+        label: Some(gm_schema::CommentLabel::Nitpick),
+        path: "f.txt".to_owned(),
+        start_line: 1,
+        end_line: 1,
+        body: "Rename this.".to_owned(),
+    };
+    let events = engine.handle(OperationId(2), &human(labelled));
+    assert!(done(&events), "{}", failure(&events));
+    let comment = only(&mut engine);
+    assert_eq!(comment.label, Some(gm_schema::CommentLabel::Nitpick));
+    assert_eq!(comment.kind, None);
+    assert_eq!(comment.author, None);
 }
