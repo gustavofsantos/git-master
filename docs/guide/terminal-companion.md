@@ -30,8 +30,6 @@ The companion uses your terminal's colors, so it matches your terminal theme and
 
 ## Screens
 
-> **Planned.** **Agent thread** is not available yet.
-
 The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread/12`; click a step to go back to it.
 
 | Screen | Shows |
@@ -144,11 +142,9 @@ Open **Threads** from the menu anywhere (`Space t`). It lists the review threads
 
 **Origin** (`Space w` on a line or a selection, on Status, Diff, File or Blame) answers how those lines got where they are: each commit that last changed some of them, and under it the agent threads tied to it, with their edits and the requests and answers around each edit. Every thread and edit states how strongly it is tied to the code (a blob match, a line match, a hunk overlap, a commit made during the thread, a link you made), as the app's [**Show Why This Code Is Here…**](threads.md#understand-why-code-is-the-way-it-is) does, in the same words. `Enter` on a commit opens it on the **Diff** screen.
 
-> **Planned.** Origin does not yet show the review thread a change answered, nor the tests the agent ran; `Enter` on an agent thread does not open it yet.
+> **Planned.** Origin does not yet show the review thread a change answered, nor the tests the agent ran.
 
-> **Planned.** The screen below is not available yet.
-
-**Agent thread** shows a captured agent session by sections: the **Request**, the **Decisions** (questions the agent asked you and your answers), the **Changes** to each file, the **Runs** of commands and how they ended, the **Files read**, and the **Timeline**.
+**Agent thread** (`Enter` on an agent thread, one of its edits or a linked thread on **Origin**) shows a captured agent session, read as the app's **Threads** page reads it, by sections: the **Request**, the **Decisions** (questions the agent asked you and your answers), the **Changes** to each file with their patches, the **Runs** of commands, how they ended, how long they took and their output, the **Files read**, and the **Timeline** of turns, folded, with every message and tool call in order. `g f` and `g b` on a changed file open it on **File** and **Blame**. The thread's text is shown as plain text, a line per row; long outputs and patches show their first 40 lines, and a session of more than 5,000 entries shows its first 5,000.
 
 ## Your own keys
 
