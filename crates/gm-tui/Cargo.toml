@@ -1,0 +1,21 @@
+[package]
+name = "gm-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gm-schema.workspace = true
+gm-core.workspace = true
+async-channel.workspace = true
+# The crossterm backend only (D235); crossterm itself is used through `ratatui::crossterm`,
+# so its version always matches the one ratatui draws with.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+
+[dev-dependencies]
+tempfile.workspace = true

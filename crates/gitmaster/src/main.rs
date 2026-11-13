@@ -4,9 +4,10 @@
 //! `gitmaster mcp` is the MCP server over stdio (D135). `gitmaster thread …` (the hook and the
 //! redaction test), `gitmaster harness list`, `gitmaster worktree …` (list, find and create
 //! worktrees from the shell) and `gitmaster workspace …` (create, list and remove workspaces, each
-//! a folder of worktrees of your clones) are one-shot too (docs/reference/cli.md). To open a folder
-//! named `thread`, `harness`, `worktree`, `workspace` or `mcp`, write `./thread`, `./harness`,
-//! `./worktree`, `./workspace` or `./mcp`.
+//! a folder of worktrees of your clones) are one-shot too (docs/reference/cli.md). `gitmaster tui`
+//! runs the terminal companion until the person quits (D235). To open a folder named `thread`,
+//! `harness`, `worktree`, `workspace`, `mcp` or `tui`, write `./thread`, `./harness`,
+//! `./worktree`, `./workspace`, `./mcp` or `./tui`.
 
 mod shell_env;
 
@@ -42,6 +43,11 @@ fn main() {
     if first.as_deref() == Some("workflow") {
         let words: Vec<String> = args.collect();
         std::process::exit(workflow_command(&words));
+    }
+    if first.as_deref() == Some("tui") {
+        // The terminal companion (D235): no window, no GPUI.
+        let words: Vec<String> = args.collect();
+        std::process::exit(gm_tui::command(&words));
     }
     if first.as_deref() == Some("mcp") {
         let words: Vec<String> = args.collect();
