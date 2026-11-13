@@ -20,8 +20,8 @@ use crate::scorecard::{
 use crate::stack::StackSnapshot;
 use crate::stash::StashEntry;
 use crate::status::{
-    BranchEntry, BranchFailure, MergedBranch, PruneCandidate, RepoStatus, WorktreeEntry,
-    WorktreeInspection,
+    BranchEntry, BranchFailure, ChangeStats, MergedBranch, PruneCandidate, RepoStatus,
+    WorktreeEntry, WorktreeInspection,
 };
 use crate::submodule::SubmoduleDetail;
 use crate::syntax::HighlightSpan;
@@ -84,6 +84,10 @@ pub enum CommandKind {
         path: String,
         side: DiffSide,
     },
+    /// Reads the lines each file adds and removes on both sides of the working tree
+    /// (`git diff --numstat`, D236 (8)). Answers `ChangeStatsLoaded`. A read: never recorded
+    /// (D28).
+    LoadChangeStats,
     Stage {
         target: StageTarget,
     },
@@ -1241,6 +1245,11 @@ pub enum Event {
         id: OperationId,
         side: DiffSide,
         diff: FileDiff,
+    },
+    /// Answers `LoadChangeStats`.
+    ChangeStatsLoaded {
+        id: OperationId,
+        stats: ChangeStats,
     },
     Committed {
         id: OperationId,

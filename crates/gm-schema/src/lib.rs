@@ -70,8 +70,8 @@ pub use scorecard::{
 pub use stack::{OWN_COMMITS_LIMIT, Stack, StackBranch, StackSnapshot, StackState};
 pub use stash::StashEntry;
 pub use status::{
-    Blocker, BranchEntry, BranchFailure, BranchInfo, Change, MergedBranch, PruneCandidate,
-    RepoStatus, StatusEntry, SubmoduleChange, WorktreeEntry, WorktreeInspection,
+    Blocker, BranchEntry, BranchFailure, BranchInfo, Change, ChangeStats, LineCounts, MergedBranch,
+    PruneCandidate, RepoStatus, StatusEntry, SubmoduleChange, WorktreeEntry, WorktreeInspection,
 };
 pub use submodule::{SUBMODULE_COMMIT_LIMIT, SubmoduleCommit, SubmoduleDetail};
 pub use syntax::{HighlightSpan, SyntaxRole};

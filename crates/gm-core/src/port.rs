@@ -3,9 +3,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use gm_schema::{
-    BranchEntry, CommitDetail, CommitFile, ConflictFileRead, ConflictOperation, DiffSide, FileDiff,
-    GrepResult, HunkId, MergedBranch, PruneCandidate, RangeMode, ReflogEntry, RepoStatus,
-    RevisionRange, StageTarget, StashEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
+    BranchEntry, ChangeStats, CommitDetail, CommitFile, ConflictFileRead, ConflictOperation,
+    DiffSide, FileDiff, GrepResult, HunkId, MergedBranch, PruneCandidate, RangeMode, ReflogEntry,
+    RepoStatus, RevisionRange, StageTarget, StashEntry, SubmoduleDetail, WorktreeEntry,
+    WorktreeMode,
 };
 
 use crate::blame::BlameLine;
@@ -195,6 +196,13 @@ pub trait GitPort: Send {
     /// Diff of one path. An untracked path diffs as all-added.
     fn diff(&self, _root: &Path, _path: &str, _side: DiffSide) -> Result<FileDiff, GitError> {
         Err(GitError("diff is not supported by this adapter".into()))
+    }
+
+    /// `git diff --numstat` of both sides of the working tree (D236 (8)).
+    fn change_stats(&self, _root: &Path) -> Result<ChangeStats, GitError> {
+        Err(GitError(
+            "change stats are not supported by this adapter".into(),
+        ))
     }
 
     /// Moves `target` into the index. A stale hunk id is an error, never a

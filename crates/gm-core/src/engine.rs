@@ -2666,15 +2666,8 @@ impl Engine {
             CommandKind::OpenRepo { path } => self.open_repo(id, path),
             CommandKind::RefreshStatus => self.refresh_status(id),
             CommandKind::ListWorktrees => self.list_worktrees(id),
-            CommandKind::LoadDiff { path, side } => {
-                let root = self.open_root()?;
-                let diff = self.git.diff(&root, path, *side).map_err(|e| e.0)?;
-                Ok(vec![Event::DiffLoaded {
-                    id,
-                    side: *side,
-                    diff,
-                }])
-            }
+            CommandKind::LoadDiff { path, side } => self.load_diff(id, path, *side),
+            CommandKind::LoadChangeStats => self.load_change_stats(id),
             CommandKind::Stage { target } => {
                 let root = self.open_root()?;
                 self.git.stage(&root, target).map_err(|e| e.0)?;
@@ -4360,6 +4353,24 @@ impl Engine {
     }
 
     /// Opens the repository at `path`. The history walk of the old one ends.
+    fn load_diff(
+        &self,
+        id: OperationId,
+        path: &str,
+        side: gm_schema::DiffSide,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let diff = self.git.diff(&root, path, side).map_err(|e| e.0)?;
+        Ok(vec![Event::DiffLoaded { id, side, diff }])
+    }
+
+    /// `LoadChangeStats` (D236 (8)): a read, so nothing is recorded.
+    fn load_change_stats(&self, id: OperationId) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let stats = self.git.change_stats(&root).map_err(|e| e.0)?;
+        Ok(vec![Event::ChangeStatsLoaded { id, stats }])
+    }
+
     fn open_repo(&mut self, id: OperationId, path: &str) -> Result<Vec<Event>, String> {
         let root = self.git.resolve_root(path.as_ref()).map_err(|e| e.0)?;
         let status = self.git.status(&root).map_err(|e| e.0)?;

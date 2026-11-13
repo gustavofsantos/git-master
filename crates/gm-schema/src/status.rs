@@ -68,6 +68,25 @@ pub struct SubmoduleChange {
     pub untracked: bool,
 }
 
+/// The lines one file adds and removes on one side of the working tree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LineCounts {
+    /// The path in the working tree; the new path of a rename.
+    pub path: String,
+    pub added: u32,
+    pub deleted: u32,
+}
+
+/// `git diff --numstat` of both sides of the working tree (D236 (8)). A binary file and an
+/// untracked file have no entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ChangeStats {
+    /// The working tree against the index.
+    pub unstaged: Vec<LineCounts>,
+    /// The index against HEAD.
+    pub staged: Vec<LineCounts>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RepoStatus {
     /// Absolute path of the working tree root.

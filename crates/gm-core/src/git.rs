@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Oid, Repository};
 use gm_schema::{
-    BranchEntry, BranchInfo, Change, CommitFile, ConflictFileRead, ConflictOperation, DiffSide,
-    FileDiff, Hunk, HunkId, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate, RangeMode,
-    RecordedResolution, ReflogEntry, RepoStatus, RevisionRange, StageTarget, StashEntry,
+    BranchEntry, BranchInfo, Change, ChangeStats, CommitFile, ConflictFileRead, ConflictOperation,
+    DiffSide, FileDiff, Hunk, HunkId, LineCounts, MergedBranch, OWN_COMMITS_LIMIT, PruneCandidate,
+    RangeMode, RecordedResolution, ReflogEntry, RepoStatus, RevisionRange, StageTarget, StashEntry,
     StatusEntry, SubmoduleDetail, WorktreeEntry, WorktreeMode,
 };
 
@@ -992,6 +992,21 @@ impl GitPort for SubprocessGit {
         let mut diff = parse_unified(path, &raw)?;
         diff.old_path = None;
         Ok(diff)
+    }
+
+    fn change_stats(&self, root: &Path) -> Result<ChangeStats, GitError> {
+        let numstat = |cached: bool| -> Result<Vec<LineCounts>, GitError> {
+            let mut command = self.git(root);
+            command.args(["diff", "--numstat", "-z", "--no-ext-diff", "--no-color"]);
+            if cached {
+                command.args(["--cached", "-M"]);
+            }
+            Ok(parse_numstat(&Self::run(command)?))
+        };
+        Ok(ChangeStats {
+            unstaged: numstat(false)?,
+            staged: numstat(true)?,
+        })
     }
 
     fn stage(&self, root: &Path, target: &StageTarget) -> Result<(), GitError> {
@@ -4129,6 +4144,42 @@ fn change(code: u8) -> Option<Change> {
 }
 
 /// Parses `git status --porcelain=v2 -z --branch`. `root` is left empty.
+/// Parses `git diff --numstat -z`. A file is `added TAB deleted TAB path NUL`; a rename or
+/// copy is `added TAB deleted TAB NUL old NUL new NUL`. A binary file (`-` counts) is left
+/// out.
+pub fn parse_numstat(raw: &[u8]) -> Vec<LineCounts> {
+    let mut fields = raw
+        .split(|&byte| byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut counts = Vec::new();
+    while let Some(field) = fields.next() {
+        let text = String::from_utf8_lossy(field);
+        let mut parts = text.splitn(3, '\t');
+        let (Some(added), Some(deleted)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let path = match parts.next() {
+            Some(path) if !path.is_empty() => path.to_owned(),
+            // A rename: the old path, then the new one, each its own field.
+            _ => {
+                let _old = fields.next();
+                match fields.next() {
+                    Some(new) => String::from_utf8_lossy(new).into_owned(),
+                    None => break,
+                }
+            }
+        };
+        if let (Ok(added), Ok(deleted)) = (added.parse(), deleted.parse()) {
+            counts.push(LineCounts {
+                path,
+                added,
+                deleted,
+            });
+        }
+    }
+    counts
+}
+
 pub fn parse_status(raw: &[u8]) -> Result<RepoStatus, GitError> {
     let mut status = RepoStatus::default();
     let mut records = raw.split(|b| *b == 0).filter(|r| !r.is_empty());
