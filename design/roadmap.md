@@ -662,7 +662,7 @@ Requested by the author on 2026-10-29. Decisions D119 to D129 and open questions
 6. **T5, Threads page.** List, filters, search, detail by turn, edit cards with **Open Diff** and **View File**, empty and paused states.
 7. **T6, curate and link.** Rename, note, star, tags, delete, export, manual and observed links, derived edit state, **Show Threads** on a file and a commit.
 8. **T7, redaction settings.** Patterns, path rules, test field, per-repository pause, **Scrub Threads**.
-9. **T8, observed turn changes (optional).** Per-turn working-tree snapshot for edits no tool event covers; ships only if a release-build measurement fits the bar.
+9. **T8, observed turn changes (required since D249).** Per-turn working-tree snapshot, the record of what a turn changed however the files were written; starts with the release-build measurement, and if it misses the bar the author chooses how it degrades (Q51).
 10. **T9, MCP read tools (with slice 7).** `threads_search`, `thread_get`, `thread_read`, the skill in the plugin and the policy switch.
 
 **Done when:** a Claude Code session in a repository appears as a thread within a second of each event, with its prompts, replies, tool calls and edits; no string matching a built-in or user pattern exists anywhere in `threads.db`, the spool or the log; the hook never fails or noticeably slows the agent; the user finds a past decision by searching, opens the agent's edit as a diff and links the thread to a commit; deleting a thread removes its text from the file; the working tree is never written. T0 to T7 (T3 as T3a and T3b) each have their own done-when in `design/threads.md`.

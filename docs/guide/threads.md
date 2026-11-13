@@ -87,11 +87,17 @@ A sub-agent stopping ends the turn of the sub-agent only. It does not end the tu
 
 The text a sub-agent wrote is agent text. It is untrusted like any other agent text, and the MCP tools mark it so. Deleting a thread also deletes its sub-agent threads.
 
-### Changes that are not edits
+### Changes during a turn
 
-Only the agent's file-editing tools produce edits. A change made by a shell command, a formatter or a code generator appears as the command and its output, not as an edit.
+A turn lists every file that changed while it ran, however the change was made: with the agent's editing tool, a shell command such as `sed`, a script the agent wrote, a formatter or a code generator. GitMaster takes a snapshot of the working tree when you send a prompt and another when the agent stops. What differs between the two is the turn's **Changes during this turn**, shown at the end of the turn with the number of files and the lines added and removed. Select a file to open its diff.
 
-> **Planned.** A list of the changes that happened during a turn, including those made by shell commands, is not available in the app yet.
+The snapshots hold tracked and untracked files and leave out ignored files. They are kept in the repository's `.git` folder and deleted with the thread. Taking them never changes the working tree, your staged changes or `HEAD`.
+
+The list holds what changed in the worktree during the turn, not only what the agent wrote. If you edit a file in the same worktree while the agent works, your change is in the list too. Run an agent in its own [worktree](worktrees.md) to keep its changes apart from yours and from other agents'.
+
+The edits of the editing tools stay inside the turn, each with its tool call, and say which call wrote what. A change made by a shell command appears in the list and next to the command and its output. If the second snapshot could not be taken, for example because the agent was stopped, the turn says **Changes not measured**.
+
+> **Planned.** Turns do not list their changes yet. Only the agent's file-editing tools produce edits, and a change made by a shell command, a formatter or a code generator appears only as the command and its output.
 
 ## Search threads
 

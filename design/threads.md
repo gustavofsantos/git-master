@@ -222,7 +222,7 @@ For `Edit`, `MultiEdit`, `Write` and `NotebookEdit`:
 
 The blob ids are what lets the window say, deterministically, whether an edit is still in the tree: the post blob equals the file's blob in the working tree, in `HEAD`, or neither (D126). No guessing about "similar" content.
 
-Changes the agent makes through other tools (a shell command, a formatter, a code generator) have no `Edit` event. They are not in v1's edit list; the thread shows the shell command and its output. **T8** covers them with a turn-level working-tree snapshot, only if the cost is measured acceptable (see the risks).
+Changes the agent makes through other tools (a shell command, a formatter, a code generator) have no `Edit` event. They are not in v1's edit list; the thread shows the shell command and its output. **T8** covers them with a turn-level working-tree snapshot, which D249 makes the record of what a turn changed (see the risks for its cost).
 
 ## Redaction (D121)
 
@@ -505,9 +505,11 @@ The **Threads** section of the settings dialog, or, until slice 9, a **Threads S
 
 Done when: an invalid pattern shows inline and pauses capture with the visible reason; scrub reports the count; settings persist in `settings.json` only.
 
-### T8: observed turn changes (optional, gated)
+### T8: observed turn changes (required, D249)
 
-A working-tree snapshot at `UserPromptSubmit` and at `Stop` through the temporary index, and the diff between them as "Changes during this turn", for edits no tool event covers. Starts with the release-build measurement; ships only if it fits the bar.
+A working-tree snapshot at `UserPromptSubmit` and at `Stop` through the temporary index, and the diff between them as "Changes during this turn". Since D249 this diff is the record of what the turn changed, however the files were written; the per-tool edits stay as detail inside it. The private index is kept per worktree between turns; both trees are kept under a private ref per turn and deleted with the thread. A missed `after` snapshot marks the turn "changes not measured" and is never filled from a later snapshot. Starts with the release-build measurement; if it misses the bar, the author chooses how it degrades (Q51).
+
+Done when: a turn in which the agent changes one file with its editing tool, one with `sed -i` and creates one with a script it wrote lists all three under "Changes during this turn" (real Git test); a file the person changes in the same worktree during the turn is listed too; ignored files are not; the real index, `HEAD` and the working tree are byte-identical before and after both snapshots; deleting the thread removes its refs; a killed `Stop` hook leaves the turn marked "changes not measured".
 
 ### T9: MCP read tools (with slice 7)
 
