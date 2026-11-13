@@ -1,11 +1,11 @@
 ---
 title: Terminal companion
-description: Run GitMaster in a terminal next to your coding agent to read the changes, stage them and review them in threads, with buttons you click or keys you press.
+description: Run GitMaster in a terminal next to your coding agent: one status screen of foldable sections, a menu that shows what you can do where you are, and keys you can remap.
 status: partial
 order: 115
 ---
 
-The terminal companion is GitMaster in a terminal. It runs in a terminal pane next to a coding agent such as Claude Code, for example in a tmux window split in two. You read what the agent changed, stage what you accept and start a review thread on the lines you want changed. The agent reads your threads through the [MCP server](../agents/mcp-server.md) and works through them in its own pane, and the companion shows its answers as they arrive.
+The terminal companion is GitMaster in a terminal. It runs in a pane next to a coding agent such as Claude Code, for example in a tmux window split in two. You read what the agent changed, stage what you accept, start a review thread on the lines you want changed, and follow how the code got where it is. The agent reads your threads through the [MCP server](../agents/mcp-server.md) and works through them in its own pane, and the companion shows its answers as they arrive.
 
 The companion uses the same engine and the same store as the app. A thread you start in the terminal is listed on the app's **Review** page, and the other way around. It writes nothing into your working tree.
 
@@ -16,9 +16,7 @@ gitmaster tui                 # the repository that contains the current directo
 gitmaster tui ~/src/project   # the repository at this path
 ```
 
-The companion opens no window and needs no display, so it works over SSH and inside tmux, screen or any terminal emulator. It takes the whole terminal, or the whole tmux pane, until you press `q`. On exit the terminal is restored as it was.
-
-A typical tmux layout keeps the agent on one side and the companion on the other:
+The companion opens no window and needs no display, so it works over SSH and inside tmux, screen or any terminal emulator. It takes the whole terminal, or the whole tmux pane, until you quit. On exit the terminal is restored as it was.
 
 ```sh
 tmux split-window -h 'gitmaster tui'
@@ -28,157 +26,131 @@ The terminal must be at least 80 columns wide and 24 rows high. A smaller termin
 
 The terminal must use a Nerd Font: the companion draws its icons, such as the branch, the folders, the file types and the status of a thread, with Nerd Font glyphs, and has no other set. With another font they show as empty boxes.
 
-## The screen
+The companion uses your terminal's colors, so it matches your terminal theme and your tmux theme. It keeps itself up to date: when a file changes, when the agent stages something or when the agent answers a thread, the screen refreshes by itself.
 
-Every screen has the same frame:
+## Screens
 
-- The **top bar** shows `gitmaster`, the tabs **Diff**, **File** and **Reviews**, and on the right the branch and its upstream. The **Reviews** tab shows how many threads are not resolved.
-- The **sidebar** on the left lists the changed files under their folders: each folder that holds changed files is one row, `./` for the root, listed last. Three chips at its top choose what it lists: the uncommitted changes, as **Unstaged N**, the changes not staged yet, and **Staged N**, the changes ready to commit; and **Branch N**, the changes the branch's commits bring (see [Branch changes](#branch-changes)). Each file shows its status letter, an icon for its type, `+a -r` and, after a comments icon, how many threads on it are not resolved. A binary or untracked file shows no counts. Click a folder to fold or unfold it.
-- The **main pane** on the right shows the selected tab for the selected file.
-- The **button bar** at the bottom lists the actions that work where you are, each with its key. Every entry is a button: click it or press its key.
+> **Planned.** The companion shows tabs and a sidebar; the screens below are not available yet.
 
-In the sidebar, `j` and `k` (or the arrows) move, `Ctrl+D` and `Ctrl+U` move half a screen, `g` and `G` go to the first and the last row, `Enter` or `Space` folds or unfolds a folder, and `l` and `h` unfold and fold it.
+The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread 12`; click a step to go back to it.
 
-When the terminal is narrower than 100 columns, the sidebar and the main pane show one at a time. `Tab` switches between them.
+| Screen | Shows |
+|---|---|
+| **Status** | The repository at a glance, in sections. |
+| **Threads** | The review threads, by who acts next. |
+| **Thread** | One review thread: its lines, its messages, what the agent changed. |
+| **Diff** | The changes of the branch against its base, or of a commit. |
+| **File** | A whole file, with its changes marked. |
+| **Blame** | Who last changed each line of a file, a person or an agent's thread. |
+| **Origin** | How some lines got where they are, change by change. |
+| **Agent thread** | An agent's session, by its request, decisions, changes and runs. |
 
-The companion uses your terminal's colors, so it matches your terminal theme and your tmux theme.
+Every screen is made of sections you can fold. `Tab` folds or unfolds the section at the cursor; a click on a section's title does the same. `Enter` opens what is at the cursor: a thread, a commit, a file at that line in your editor.
 
-The companion keeps itself up to date. When a file changes, when the agent stages something or when the agent answers a thread, the screen refreshes by itself.
+## The Status screen
 
-## Buttons and keys
+> **Planned.** The Status screen is not available yet.
 
-Everything the companion does is a button you can click, and every button has a key. Buttons look like `[stage]`. The tabs, the chips, the folders, the files, the hunk headers, the threads and the entries of the button bar are buttons too. In tmux, clicks reach the companion when the mouse is on (`set -g mouse on`).
+Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream or base; **Stack**, when the branch is in a [stack](stacks.md). Then come its sections, each with a count:
 
-The wheel scrolls the pane under the pointer. While the companion has the mouse, your terminal's own text selection needs a modifier: hold `Shift` while you drag in most terminal emulators. Inside tmux, use tmux's copy mode.
+- **Untracked files**, **Unstaged changes** and **Staged changes**. A file unfolds into its hunks, with line numbers, `+` and `-` in your terminal's green and red, and code colored by its language. Review threads are drawn under the lines they are about.
+- **Review threads**, by who acts next: waiting for you, waiting for the agent.
+- **Commits** on the branch that are not on its base.
+- **Stashes**.
 
-These keys work everywhere:
+Each file shows its status, an icon for its type, `+a -r` and how many threads on it are not resolved.
+
+## Modes
+
+> **Planned.** Modes are not available yet.
+
+What a key does depends on the mode, shown at the left of the bottom line:
+
+| Mode | When |
+|---|---|
+| **NORMAL** | Moving and acting. |
+| **VISUAL** | Lines are selected: an action applies to them. |
+| **INSERT** | You are writing a comment, a reply or a commit message. |
+
+## The menu
+
+> **Planned.** The menu is not available yet.
+
+Press `Space` to see what you can do where you are. The menu opens at the bottom of the screen, grouped, one key for each action, and lists only what applies to what is under the cursor or selected. Its title says what it acts on, such as `Hunk 2/5 · src/ledger/posting.rs`. Press a key to act, or click the entry. An entry ending in `…` opens a second menu. `Esc` closes it.
+
+Most menus close after one action. A menu for something you repeat, such as staging hunk after hunk or moving from thread to thread, stays open while you work and says so; `Esc` closes it.
+
+You do not have to wait for the menu: `Space s` stages at once.
+
+Press `?` to see every key of the screen you are on.
+
+## Keys
+
+> **Planned.** These keys are not available yet; see [Your own keys](#your-own-keys) to change them.
 
 | Key | Action |
 |---|---|
-| `1`, `2`, `3` | Show the **Diff**, **File** or **Reviews** tab. |
-| `Tab` | Switch between the sidebar and the main pane. |
-| `t` | Switch the sidebar to the next of **Unstaged**, **Staged** and **Branch**. |
-| `?` | Show every key. |
-| `q` | Quit. |
-
-## Read the changes
-
-> **Planned.** `f` and `e` are not available yet.
-
-The **Diff** tab shows the diff of the selected file in the chosen context: its unstaged changes under **Unstaged**, its staged changes under **Staged**. Its header shows the path, `+a -r` and which hunk the cursor is in, such as `hunk 1/5`.
-
-Each hunk starts with a header bar that shows the function or section it is in, as Git finds it, and a button: **[stage]** under **Unstaged**, **[unstage]** under **Staged**. Each line shows its number in the file and a `+` or `−` in the gutter, in your terminal's green and red. Code is colored by its language; a removed line is drawn in red, and a very large diff is shown without colors. Click a line to put the cursor on it; the wheel scrolls the diff.
-
-| Key | Action |
-|---|---|
-| `j` / `k`, `Down` / `Up` | Move the cursor down or up a line. |
-| `J` / `K` | Go to the next or the previous hunk. |
-| `Ctrl+D` / `Ctrl+U` | Move half a screen down or up. |
-| `g` / `G` | Go to the first or the last line. |
-| `}` / `{` | Go to the next or the previous thread. |
-| `f` | Show the whole file on the **File** tab, at the same line. |
-| `e` | Open the file in your editor at the line under the cursor. |
-
-`e` opens the editor named by `$VISUAL` or `$EDITOR` in the companion's terminal. The companion comes back when the editor exits.
-
-## Branch changes
-
-**Branch** shows what the branch you are on brings to its base, as the app's **Branch** tab does: the changes of its own commits, from the commit where it split from the default branch to its tip. The default branch is the branch of `origin/HEAD`, else the first of `main`, `master`, `trunk` and `develop` that exists. Commits that landed on the default branch after the split are not shown, and uncommitted changes are on **Unstaged** and **Staged**.
-
-The sidebar lists the branch's files with `+a -r`, and the **Diff** tab shows each file's diff, with the branch and its base in the header, such as `feature against main`. The diff is read-only: it has no **[stage]** buttons. You can start a thread on its lines: the companion finds the selected text in the file as it is now, as for a commit's diff in the app.
-
-The list follows the branch: a new commit, a checkout or a rebase reads it again. When there is nothing to compare, the sidebar says why, for example **You are on the default branch.** or **`feature` and `main` have no common ancestor.**
+| `↓` `↑`, `j` `k` | Move down or up. |
+| `PgDn` `PgUp`, `Ctrl+D` `Ctrl+U` | Move half a screen. |
+| `Home` `End`, `g g` `G` | Go to the top or the bottom. |
+| `Shift+↓` `Shift+↑`, `V`, a drag | Select lines (VISUAL). |
+| `Tab` | Fold or unfold the section at the cursor. |
+| `Enter` | Open what is at the cursor. |
+| `Esc` | Close the menu, clear the selection, or go back one screen. |
+| `Space` | Open the menu. |
+| `?` | Every key of this screen. |
+| `Ctrl+C` | Quit. |
 
 ## Stage and unstage
 
-Stage what you accept, at the size you choose:
+> **Planned.** Staging from the Status screen and its menu is not available yet.
 
-- A file: the selected file's row in the sidebar shows **[stage]**; click it, or press `s` in the sidebar. An untracked folder stages all its files.
-- A hunk: click **[stage]** on its header, or press `s` with the cursor in it and nothing selected.
-- Lines: select them (see below), then click **[stage lines]** or press `s`.
+Stage what is under the cursor, at the size you choose: a section, a file, a hunk, or the lines you selected. Open the menu and choose **stage** or **unstage**. Staging lines works as in the app; see [Diff and staging](diff-and-staging.md). A selection over several hunks stages each hunk's selected lines.
 
-Under **Staged**, the same buttons and `u` unstage. Staging lines works as in the app; see [Diff and staging](diff-and-staging.md). A selection can span several hunks: each hunk stages its own selected lines.
+## Review threads
 
-## Select lines
+> **Planned.** Threads from the menu, with the text box, are not available yet.
 
-Press on a line and drag to the last line, or press `V` and move the cursor. The selected lines are marked with an arrow in the gutter. `o` moves the cursor to the other end of the selection, and `Esc` or `V` clears it.
+Select lines, or put the cursor on one, open the menu and choose **comment**. A text box opens at the bottom with the screen still visible above. Choose the type: **change**, **question** or **nit**. Write the comment; `Enter` starts a new line, `Ctrl+S` sends it and `Esc` cancels, asking first when the box holds text.
 
-While lines are selected, the diff's header shows the range, such as `44–48 · 5 lines`, and the buttons that act on it: **[comment]**, **[stage lines]** (or **[unstage lines]** under **Staged**) and **[clear]**. The same selection is used for a thread and for staging. A selection with no added or removed line stages nothing, and the companion says so.
+The thread appears under its lines with the status **Open**. The agent reads it the next time it lists the review comments over MCP. The rules are those of [Local review](../agents/local-review.md): under **Unstaged** the lines are the file's own; elsewhere the companion finds the selected text in the file as it is now, exactly once, or says why not; removed lines cannot carry a thread.
 
-## Start a thread
+On a thread, the menu offers **reply**, **resolve** (or **reopen**) and **delete**, which asks first. Your reply on a handled thread reopens it.
 
-1. Select the lines, or put the cursor on one line.
-2. Click **[comment]** or press `c`. A box opens under the selection. Its title names the lines, such as `Comment on lines 2–3`.
-3. Choose the type with the chips **change**, **question** or **nit**: click one, or press `Tab` to move between them.
-4. Write the comment, or paste it. Press `Enter` or click **[comment]** in the box to start the thread; `Alt+Enter` starts a new line. `Esc` or **[cancel]** closes the box; when it holds text, the first `Esc` asks and the second discards it. If the engine refuses the comment, the box stays open and says why.
+**copy reference** puts `@path:lines` of the selection on the clipboard, to paste into your agent's prompt.
 
-The thread appears under its lines with the status **Open**. Your agent reads it the next time it lists the review comments over MCP. The rules are those of [Local review](../agents/local-review.md):
+## The Threads and Thread screens
 
-- Under **Unstaged**, the lines are the file's own, so the thread is anchored at once.
-- Under **Staged**, the companion looks for the selected text in the file as it is now. If it appears exactly once, the thread is anchored there; otherwise the companion says so and writes nothing.
-- Under **Staged**, the selection must be one run of lines: a selection over two hunks is refused.
-- Removed lines are not in the working tree. A selection of only removed lines cannot start a thread.
+> **Planned.** The Threads and Thread screens are not available yet.
 
-The type is the comment's label: **change** is `issue`, **question** is `question`, **nit** is `nitpick`. The agent reads it with the comment, and the thread shows it.
+**Threads** lists the review threads in three sections: **Waiting for you** (threads the agent handled, and threads whose last word is the agent's), **Waiting for the agent** (threads whose last word is yours) and **Resolved**, the latest activity first. A filter in the menu narrows the list as the app's **Review** page does: **Open**, **Resolved**, **Outdated**, **Needs answer**, **Agent**, **All**.
 
-## Threads in the code
+**Thread** shows one thread: its lines as they were when you commented (**Before**) and when the agent handled it (**After**), with the changed lines marked; what the agent changed in those lines, as GitMaster measured it from its own snapshots; and the comment and its replies. From the menu: reply, resolve, reopen, delete, and show it in its diff.
 
-> **Planned.** The change the agent made is not shown in the box yet; the **Reviews** tab shows it.
+## Diff, File, Blame and Origin
 
-Each thread is drawn under the last line it is anchored to, in a box with a colored edge, the same threads the app's diff shows. Its first line shows its status (**Open**, **Handled**, **Resolved** or **Outdated**), its lines, when it was written, its label and the buttons. Below come the comment and the replies, oldest first, each with its author and time. A reply or a thread from the agent is marked **Agent-written**. The lines an open thread covers are marked `┃` in the gutter. When the agent has handled the thread, the box also shows what the agent changed, as GitMaster measured it from its own snapshots: the lines added and removed in the thread's lines, and elsewhere.
+> **Planned.** These screens are not available yet.
 
-A resolved thread folds to one line; click it, or press `Enter` on its line, to unfold it, and **[fold]** folds it again. A thread with more than two replies shows the latest one and a toggle, **[N earlier replies]**, that shows the others. An **Outdated** thread, whose text is no longer found exactly once, is not drawn under a line: it is listed under **N outdated threads** above the diff, which a click unfolds. Threads on lines the diff does not show are listed above the diff too. `}` and `{` go to the next and the previous thread. The box has the buttons for what you can do next:
+**Diff** shows the changes of the branch against its base (from the point it split from the default branch to its tip) or of one commit. It is read-only, and you can start a thread on its lines.
 
-| Button | Key | Action |
-|---|---|---|
-| **[reply]** | `r` | Write a reply. Your reply on a handled thread reopens it. |
-| **[resolve]** | `R` | Resolve the thread. On a note the agent left, the button reads **[dismiss]**. |
-| **[reopen]** | `o` | Send a resolved thread back to the agent. |
-| **[delete]** | `D` | Delete the thread: the first press asks, and a second within three seconds deletes it. |
+**File** shows a whole file as it is in the working tree, colored, with changed lines marked and long unchanged runs folded.
 
-## The Reviews tab
+**Blame** shows, for each line, the change that last touched it and who made it: a person, or an agent and the thread it ran in, or **not committed** for your working tree. The section of a line tells its origin: the commit, the agent thread and its request.
 
-The **Reviews** tab lists the threads of the repository in the sidebar, and shows the selected one in the main pane. It is the app's **Review** page in the terminal: the same filters, the same texts and the same measured change.
+**Origin** answers how some lines got where they are, newest first: for each change, the request that led to it, the review thread it answered, the change itself, and the evidence, such as the tests the agent ran. Every result states how strongly it is tied to the code, as the app's [**Show Why This Code Is Here…**](threads.md#understand-why-code-is-the-way-it-is) does.
 
-The chips at the top of the list filter it, each with its count: **All**, **Open** (not resolved, the default), **Resolved**, **Outdated**, **Needs answer** (questions the agent asked that you have not answered) and **Agent** (threads the agent started). Click a chip, or press `F` for the next one. Under the filter, the list is grouped by who acts next, the latest activity first in each group:
+**Agent thread** shows a captured agent session by sections: the **Request**, the **Decisions** (questions the agent asked you and your answers), the **Changes** to each file, the **Runs** of commands and how they ended, the **Files read**, and the **Timeline**.
 
-- **Waiting for you**: threads the agent handled, and threads whose last word is the agent's, such as its own notes and its questions.
-- **Waiting for the agent**: threads whose last word is yours, such as a new comment or your reply.
-- **Resolved**.
+## Your own keys
 
-Each entry shows the thread's status, its file and lines, and the start of its last message. Select one with the mouse, or with `j` and `k`, to see it on the right:
+> **Planned.** A key map of your own is not available yet.
 
-- Its status, number, file, lines and label.
-- **Before** and **After**: the commented lines as they were when you commented, and as they were when the agent marked the thread handled (or as they are now, before it does). The lines that changed between the two are marked. Click either, or press `b`.
-- For a handled thread, what the agent changed in those lines, as GitMaster measured it from its own snapshots, such as `+3 -2`, whatever the agent's own account says.
-- The comment and its replies, oldest first, each with its author and time.
-- **[reply]**, **[resolve]** (or **[reopen]**), **[delete]** and **[go to diff]**.
-
-| Key | Action |
-|---|---|
-| `j` / `k` | Select the next or the previous thread, in the list. |
-| `F` | Show the next filter. |
-| `Enter` | In the list, go to the selected thread; on the thread, reply to it. |
-| `b` | Show **Before** or **After**. |
-| `r` | Reply. Your reply on a handled thread reopens it. |
-| `R` | Resolve the thread. |
-| `o` | Reopen a resolved thread. |
-| `D` | Delete the thread: the first press asks, a second within three seconds deletes it. |
-| `g` | Show the thread in the **Diff** tab, with the cursor on its first line. |
-
-An **Outdated** thread, whose text is no longer found exactly once, is listed here like any other. **[go to diff]** opens its file in the first of **Unstaged**, **Staged** and **Branch** that lists it.
-
-## The File tab
-
-> **Planned.** The **File** tab is not available yet.
-
-The **File** tab shows the whole selected file as it is in the working tree, colored by its language. The gutter marks the lines that changed with `┃` and the places where lines were removed with an icon. A long run of unchanged lines folds to one line, such as `┈┈ 14 unchanged lines (53–66)`; click it or press `z` on it to unfold it. Threads are drawn folded under their lines.
-
-Select lines and start a thread here as in the **Diff** tab: any line of the file can carry a thread, changed or not. `f` goes back to the **Diff** tab at the same line, and `e` opens your editor there.
+Every action has a name, and every key is a binding of a name, so you can make the keys yours: rebind any action, in any mode, and choose the prefix that opens the menu, such as `,` or `g` in place of `Space`. Two keys cannot be taken away: `Ctrl+C` always quits, and `Esc` always closes the menu. A binding that names an unknown action, or a key bound twice, is reported when the companion starts, and the default is kept for it.
 
 ## See also
 
 - [Local review](../agents/local-review.md): the review loop, thread states and replies.
+- [Threads](threads.md): agent sessions and why code is the way it is.
 - [Diff and staging](diff-and-staging.md): staging hunks and lines in the app.
 - [MCP server](../agents/mcp-server.md): connecting your agent.
 - [Command line](../reference/cli.md): every `gitmaster` subcommand.
