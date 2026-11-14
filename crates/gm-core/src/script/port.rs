@@ -207,4 +207,31 @@ pub trait ScriptEngine: Send + Sync {
     /// Runs `execute(ctx, input)` on the calling thread, in a new VM. Never panics on a script
     /// error: every end is a `RunEnd`.
     fn run(&self, request: &RunRequest<'_>, host: &mut dyn CtxHost) -> RunEnd;
+
+    /// Reads an extension (design/extensions.md): `M.meta` as JSON and the names of the functions
+    /// in `M.slots`, sorted, without calling any of them. The globals of `prelude` are defined.
+    fn read_extension(
+        &self,
+        chunk: &str,
+        source: &str,
+        prelude: &str,
+    ) -> Result<ExtensionShape, Vec<ScriptDiagnostic>>;
+
+    /// Runs `M.slots[slot](ctx, input)` of an extension, as `run` runs `execute`, with the
+    /// globals of `prelude` defined.
+    fn run_slot(
+        &self,
+        request: &RunRequest<'_>,
+        slot: &str,
+        prelude: &str,
+        host: &mut dyn CtxHost,
+    ) -> RunEnd;
+}
+
+/// What `read_extension` finds in a module.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionShape {
+    pub meta: Value,
+    /// The keys of `M.slots` whose values are functions, sorted.
+    pub slots: Vec<String>,
 }

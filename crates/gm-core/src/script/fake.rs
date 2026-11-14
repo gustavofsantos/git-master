@@ -118,4 +118,26 @@ where
     ) -> super::port::RunEnd {
         (self.0)(host)
     }
+
+    fn read_extension(
+        &self,
+        _chunk: &str,
+        _source: &str,
+        _prelude: &str,
+    ) -> Result<super::port::ExtensionShape, Vec<super::port::ScriptDiagnostic>> {
+        Ok(super::port::ExtensionShape {
+            meta: Value::Null,
+            slots: Vec::new(),
+        })
+    }
+
+    fn run_slot(
+        &self,
+        _request: &super::port::RunRequest<'_>,
+        _slot: &str,
+        _prelude: &str,
+        host: &mut dyn CtxHost,
+    ) -> super::port::RunEnd {
+        (self.0)(host)
+    }
 }

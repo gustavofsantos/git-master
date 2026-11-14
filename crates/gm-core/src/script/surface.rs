@@ -87,6 +87,12 @@ impl CtxSurface {
         Self { functions }
     }
 
+    /// A surface of exactly these functions, such as the read-only `ctx` of an extension.
+    #[must_use]
+    pub fn from_functions(functions: Vec<CtxFn>) -> Self {
+        Self { functions }
+    }
+
     fn function(spec: &ActionSpec) -> CtxFn {
         CtxFn {
             path: spec.name,

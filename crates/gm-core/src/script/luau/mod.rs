@@ -9,11 +9,12 @@ mod sandbox;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use mlua::{Error as LuaError, Function, Lua, Table, Value};
+use mlua::{Error as LuaError, Lua, Table, Value};
 use serde_json::Value as Json;
 
 use super::port::{
-    BudgetKind, Budgets, CtxHost, Failure, RunEnd, RunRequest, ScriptDiagnostic, ScriptEngine,
+    BudgetKind, Budgets, CtxHost, ExtensionShape, Failure, RunEnd, RunRequest, ScriptDiagnostic,
+    ScriptEngine,
 };
 use sandbox::Run;
 
@@ -31,8 +32,8 @@ impl LuauEngine {
 impl ScriptEngine for LuauEngine {
     fn check(&self, chunk: &str, source: &str) -> Result<(), Vec<ScriptDiagnostic>> {
         let run = fresh_run();
-        let (_lua, module) =
-            load(&run, chunk, source).map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
+        let (_lua, module) = load(&run, chunk, source, None)
+            .map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
         match module.get::<Value>("execute") {
             Ok(Value::Function(_)) => Ok(()),
             _ => Err(vec![ScriptDiagnostic {
@@ -44,8 +45,8 @@ impl ScriptEngine for LuauEngine {
 
     fn read_meta(&self, chunk: &str, source: &str) -> Result<Json, Vec<ScriptDiagnostic>> {
         let run = fresh_run();
-        let (_lua, module) =
-            load(&run, chunk, source).map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
+        let (_lua, module) = load(&run, chunk, source, None)
+            .map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
         let meta = module
             .get::<Value>("meta")
             .map_err(|error| vec![Problem::Lua(error).diagnostic(chunk, &run)])?;
@@ -61,8 +62,8 @@ impl ScriptEngine for LuauEngine {
 
     fn read_data(&self, chunk: &str, source: &str) -> Result<Json, Vec<ScriptDiagnostic>> {
         let run = fresh_run();
-        let (_lua, table) =
-            load(&run, chunk, source).map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
+        let (_lua, table) = load(&run, chunk, source, None)
+            .map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
         convert::to_json(&Value::Table(table)).map_err(|e| {
             vec![ScriptDiagnostic {
                 line: 0,
@@ -73,8 +74,74 @@ impl ScriptEngine for LuauEngine {
 
     fn run(&self, request: &RunRequest<'_>, host: &mut dyn CtxHost) -> RunEnd {
         let run = Arc::new(Run::new(request.budgets, Arc::clone(&request.cancel)));
-        execute(request, host, &run)
+        execute(request, host, &run, Entry::Execute, None)
     }
+
+    fn read_extension(
+        &self,
+        chunk: &str,
+        source: &str,
+        prelude: &str,
+    ) -> Result<ExtensionShape, Vec<ScriptDiagnostic>> {
+        let run = fresh_run();
+        let (_lua, module) = load(&run, chunk, source, Some(prelude))
+            .map_err(|problem| vec![problem.diagnostic(chunk, &run)])?;
+        let line_zero = |message: String| vec![ScriptDiagnostic { line: 0, message }];
+        let meta = match module.get::<Value>("meta") {
+            Ok(Value::Nil) => return Err(line_zero("M.meta is missing".to_owned())),
+            Ok(meta @ Value::Table(_)) => {
+                convert::to_json(&meta).map_err(|e| line_zero(format!("M.meta cannot hold {e}")))?
+            }
+            Ok(_) => return Err(line_zero("M.meta must be a table".to_owned())),
+            Err(error) => return Err(vec![Problem::Lua(error).diagnostic(chunk, &run)]),
+        };
+        let slots = match module.get::<Value>("slots") {
+            Ok(Value::Table(slots)) => slots,
+            Ok(Value::Nil) => return Err(line_zero("M.slots is missing".to_owned())),
+            Ok(_) => return Err(line_zero("M.slots must be a table".to_owned())),
+            Err(error) => return Err(vec![Problem::Lua(error).diagnostic(chunk, &run)]),
+        };
+        let mut names = Vec::new();
+        let mut problems = Vec::new();
+        for pair in slots.pairs::<Value, Value>() {
+            let (key, value) = pair.map_err(|e| vec![Problem::Lua(e).diagnostic(chunk, &run)])?;
+            let Value::String(key) = key else {
+                problems.push("the keys of M.slots must be slot names".to_owned());
+                continue;
+            };
+            let key = key.to_string_lossy();
+            match value {
+                Value::Function(_) => names.push(key),
+                _ => problems.push(format!("slots.{key} must be a function")),
+            }
+        }
+        if !problems.is_empty() {
+            problems.sort();
+            return Err(problems.into_iter().flat_map(line_zero).collect());
+        }
+        names.sort();
+        Ok(ExtensionShape { meta, slots: names })
+    }
+
+    fn run_slot(
+        &self,
+        request: &RunRequest<'_>,
+        slot: &str,
+        prelude: &str,
+        host: &mut dyn CtxHost,
+    ) -> RunEnd {
+        let run = Arc::new(Run::new(request.budgets, Arc::clone(&request.cancel)));
+        execute(request, host, &run, Entry::Slot(slot), Some(prelude))
+    }
+}
+
+/// The function a run calls.
+#[derive(Clone, Copy)]
+enum Entry<'a> {
+    /// A workflow's `M.execute`.
+    Execute,
+    /// An extension's `M.slots[name]`.
+    Slot(&'a str),
 }
 
 /// A run that nobody can cancel: `check` and `read_meta`.
@@ -114,8 +181,13 @@ impl Problem {
 
 /// Compiles the chunk and runs its top level in a fresh VM with no `ctx`. Returns the VM and the
 /// table the chunk returned.
-fn load(run: &Arc<Run>, chunk: &str, source: &str) -> Result<(Lua, Table), Problem> {
-    let lua = sandbox::new_vm(run).map_err(Problem::Lua)?;
+fn load(
+    run: &Arc<Run>,
+    chunk: &str,
+    source: &str,
+    prelude: Option<&str>,
+) -> Result<(Lua, Table), Problem> {
+    let lua = sandbox::new_vm(run, prelude).map_err(Problem::Lua)?;
     // The `=` makes the name literal: errors read `chunk:LINE:`, not `[string "chunk"]:LINE:`.
     let function = lua
         .load(source)
@@ -129,18 +201,33 @@ fn load(run: &Arc<Run>, chunk: &str, source: &str) -> Result<(Lua, Table), Probl
     }
 }
 
-/// Runs `M.execute(ctx, input)` in a fresh VM and says how it ended.
-fn execute(request: &RunRequest<'_>, host: &mut dyn CtxHost, run: &Arc<Run>) -> RunEnd {
-    let (lua, module) = match load(run, request.chunk, request.source) {
+/// Runs the entry function, `M.execute(ctx, input)` or a slot's, in a fresh VM and says how it
+/// ended.
+fn execute(
+    request: &RunRequest<'_>,
+    host: &mut dyn CtxHost,
+    run: &Arc<Run>,
+    entry: Entry<'_>,
+    prelude: Option<&str>,
+) -> RunEnd {
+    let (lua, module) = match load(run, request.chunk, request.source, prelude) {
         Ok(loaded) => loaded,
         Err(Problem::Lua(error)) => return failed(run, &error),
         Err(Problem::Shape(message)) => return RunEnd::Failed(Failure::Script(message)),
     };
-    let execute: Function = match module.get::<Value>("execute") {
-        Ok(Value::Function(function)) => function,
-        _ => {
-            return RunEnd::Failed(Failure::Script("M.execute must be a function".to_owned()));
-        }
+    let function = match entry {
+        Entry::Execute => module.get::<Value>("execute"),
+        Entry::Slot(name) => match module.get::<Value>("slots") {
+            Ok(Value::Table(slots)) => slots.get::<Value>(name),
+            other => other,
+        },
+    };
+    let Ok(Value::Function(execute)) = function else {
+        let message = match entry {
+            Entry::Execute => "M.execute must be a function".to_owned(),
+            Entry::Slot(name) => format!("M.slots.{name} must be a function"),
+        };
+        return RunEnd::Failed(Failure::Script(message));
     };
     let bridge = ctx::Bridge::new(run, host, request.surface);
     let end = lua.scope(|scope| {

@@ -240,8 +240,10 @@ impl Run {
     }
 }
 
-/// A fresh sandboxed VM for one run, with the hook and the wrappers installed.
-pub(super) fn new_vm(run: &Arc<Run>) -> LuaResult<Lua> {
+/// A fresh sandboxed VM for one run, with the hook and the wrappers installed. `prelude`, when
+/// given, is Lua run before the environment is frozen: the globals it defines (the `ui` helpers
+/// of extensions) become part of the read-only environment.
+pub(super) fn new_vm(run: &Arc<Run>, prelude: Option<&str>) -> LuaResult<Lua> {
     let lua = Lua::new();
     let globals = lua.globals();
 
@@ -289,6 +291,9 @@ pub(super) fn new_vm(run: &Arc<Run>) -> LuaResult<Lua> {
     }
     let hook = Arc::clone(run);
     lua.set_interrupt(move |lua| hook.on_interrupt(lua));
+    if let Some(prelude) = prelude {
+        lua.load(prelude).set_name("=prelude").exec()?;
+    }
     freeze(&lua)?;
     Ok(lua)
 }
