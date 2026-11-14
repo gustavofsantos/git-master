@@ -28,6 +28,10 @@ The terminal must use a Nerd Font: the companion draws its icons, such as the br
 
 The companion uses your terminal's colors, so it matches your terminal theme and your tmux theme. At start it asks the terminal for its palette and blends those colors into soft backgrounds: the line under the cursor, the selected lines, and added and removed lines tinted with your terminal's green and red. Through tmux this works as it does in the terminal itself. A terminal that does not answer, or that does not set `COLORTERM` to `truecolor` or `24bit`, gets no backgrounds: the line under the cursor is shown reversed. Set `NO_COLOR` to anything to turn colors off. It keeps itself up to date: when a file changes, when the agent stages something or when the agent answers a thread, the screen refreshes by itself.
 
+Code is colored by its language wherever the companion shows it: the hunks on Status and Diff, removed lines as well as added ones, the File and Blame screens, a thread's **Before** and **After** lines, and the patches on an **Agent thread**. Without the soft backgrounds, removed lines stay in your terminal's red. The language comes from the file's name, as in the app's [file viewer](code-navigation.md); a file of another language, a diff of more than 20,000 lines, or a file that takes more than two seconds to color is shown plain.
+
+> **Planned.** Removed lines, Blame without the File screen, a thread's Before and After lines and Agent thread patches are not colored yet, and a diff of several files colors only one of them.
+
 ## Screens
 
 The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread/12`; click a step to go back to it.
