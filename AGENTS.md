@@ -41,7 +41,7 @@ The full principles (determinism, human approves and agent proposes, Git is the 
 | Principles, trust model, non-goals | `docs/concepts/principles.md`, `docs/concepts/trust-and-safety.md` |
 | Why a choice was made; what is decided, proposed or open | `design/decisions.md` (D = decision, Q = open question) |
 | What to build next, what is done, known gaps | `design/roadmap.md` (orders the work; per-feature status is also in the `status` of each page in `docs/`) |
-| How it is built | `design/architecture.md`, plus `design/code-navigation.md`, `design/workflow-scripts.md`, `design/stacks-restack.md`, `design/screens.md`, `design/hooks-transitional.md` |
+| How it is built | `design/architecture.md`, plus `design/code-navigation.md`, `design/workflow-scripts.md`, `design/extensions.md`, `design/stacks-restack.md`, `design/screens.md`, `design/hooks-transitional.md` |
 | Visual identity | `design/visual-identity.md`, icons in `assets/icons/` |
 | Toolchain pitfalls and GPUI practice | `design/lessons.md` |
 | Measurements behind decisions | Spike findings were removed from the tree after their analysis closed; they are in git history (`git show 7932c61:spikes/<name>/FINDINGS.md`) and the numbers that matter are quoted in `design/decisions.md` |

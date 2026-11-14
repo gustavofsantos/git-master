@@ -2,7 +2,7 @@
 
 The order of the work. Status marks: **(done)** in the code and verified; **(to do)** not started; no mark = future slice. The order prioritizes reaching something the author uses daily and that already shows a differentiator. The documentation in docs/ is the desired state; this file orders the work toward it, and `make docs-status` lists what the docs still mark as planned.
 
-Last updated: 2026-11-13 (slice T, terminal companion, planned, D235; before that, 2026-11-11: slice 6h, code health, planned, D225; before that, 2026-11-10: slice S5 of 8s done, D221; before that, slice S4 of 8s done, D220; before that, slice 8s S1 to S3 done; slice 8r is replaced by slice 8s, D219; before that, 2026-11-07: M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
+Last updated: 2026-11-14 (slice X, extensions, proposed, D253; before that, 2026-11-13: slice T, terminal companion, planned, D235; before that, 2026-11-11: slice 6h, code health, planned, D225; before that, 2026-11-10: slice S5 of 8s done, D221; before that, slice S4 of 8s done, D220; before that, slice 8s S1 to S3 done; slice 8r is replaced by slice 8s, D219; before that, 2026-11-07: M1 to M3 of slice 6m done, path unification done (D197), review reply threads (D198) and sub-agent threads (D199) recorded; before that, slices 6s, 6m and 8r planned, D187 to D190; before that, N5 removed, D163; before that, next slices ordered: 5f restack conflicts, WF3, N5; before that, slice 6t, threads, planned and refined; before that, slice 3c, N4 syntax highlighting built; before that, slice 1f, move a file: M5 to M7 built, M4 not done). Initial proposal, to be iterated on.
 
 ## Order criteria
 
@@ -978,6 +978,19 @@ Re-cut on 2026-11-13 after the author used T1 to T7 and asked for a Magit-like c
 16. **M7, smoke (to do):** `scripts/tui-smoke.sh` drives the companion inside a private tmux server.
 
 **Done when:** in tmux, with the mouse, a person stages a line range, comments on another, an agent over MCP handles the comment and the companion shows it **Handled** without a key press; the page's `Planned` marker is removed; `make check` passes.
+
+## Slice X: extensions (proposed 2026-11-14; D253, Q52 to Q55)
+
+Requested by the author on 2026-11-14: extend the user interface with Lua scripts that claim a slot of a view and fill it with a typed document both front ends draw, starting with the commit view and the pull request of a commit. Engineering proposal in `design/extensions.md`; nothing is built and no page in `docs/` exists yet.
+
+1. **X0, docs and decisions (to do):** the author answers Q52 to Q55 and confirms D253 (2); `docs/guide/extensions.md` and `docs/reference/extension-api.md` with `status: planned`.
+2. **X1, engine:** the document types in `gm-schema`, the loader, the read-only `ctx` and `ui` helpers on the workflow sandbox, `RenderSlot`/`SlotRendered` with settle delay, cancellation and cache, trust kind `extension`, `gitmaster extension check` and `render`.
+3. **X2, the commit slot in the window.**
+4. **X3, the commit slot in the terminal companion.**
+5. **X4, the extensions screen and the review dialog, in both front ends.**
+6. **X5, generated API docs and types in `.api/`.**
+
+**Done when:** with a `github-pr.lua` in the extensions folder, reviewed once, selecting a commit in History and opening it in the companion both show its pull request without delaying the native details; moving through the list with the keyboard starts no run per row; an edit to the file stops it running until it is reviewed again.
 
 ## Slice 9: premium polish
 

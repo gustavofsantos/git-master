@@ -14,6 +14,7 @@ The product is specified in [`docs/`](../docs/README.md): the official documenta
 | [`stacks-restack.md`](stacks-restack.md) | Stack model and the restack algorithm. |
 | [`code-navigation.md`](code-navigation.md) | Engineering design for Quick Open, the viewer and text search: engines, ranking, risks (symbols removed, D163). |
 | [`workflow-scripts.md`](workflow-scripts.md) | Engineering design for script workflows: sandbox, budgets, journal, approvals, tooling. |
+| [`extensions.md`](extensions.md) | Engineering design for extensions (proposed): Lua scripts that claim slots of a view and fill them with a typed document both front ends draw. |
 | [`threads.md`](threads.md) | Engineering design for threads: capture, redaction, storage, provenance, labels, memories and a deferred sharing design. |
 | [`reviewers.md`](reviewers.md) | Engineering design for review workflows and scorecards. |
 | [`agent-skills.md`](agent-skills.md) | Engineering design for the plugin's skills and sub-agents. |
