@@ -137,6 +137,8 @@ pub struct Repo {
     pub file: Option<FileText>,
     /// The file the Blame screen shows, and who last changed each of its lines.
     pub blame: Option<(String, Vec<BlameEntry>)>,
+    /// The colors of the blamed lines, by index (D251 (4)).
+    pub blame_colors: HashMap<usize, LineColors>,
     /// The question the Origin screen asks and its answer, as the app's panel keeps them.
     pub origin: ProvenancePanel,
 }
@@ -225,6 +227,8 @@ pub enum ColorTarget {
         path: String,
         old: bool,
     },
+    /// The lines the Blame screen shows.
+    Blame,
 }
 
 /// A text to color, what it colors, and where each of its lines starts.
@@ -293,6 +297,15 @@ pub fn diff_color_jobs(group: Group, diff: &FileDiff) -> Vec<ColorJob> {
             job.finish()
         })
         .collect()
+}
+
+/// The text to color for the Blame screen's lines: the file as blamed, line by line.
+pub fn blame_color_job(path: &str, lines: &[BlameEntry]) -> Option<ColorJob> {
+    let mut job = ColorJob::new(ColorTarget::Blame, path);
+    for (index, line) in lines.iter().enumerate() {
+        job.push(Some((index, 0)), &line.text);
+    }
+    job.finish()
 }
 
 /// The spans of a whole text cut at each line, as ranges of the line's own text.

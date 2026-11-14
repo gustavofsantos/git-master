@@ -480,16 +480,10 @@ fn blame_row(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             Line::from(spans)
         }
         Item::BlameLine { index } => {
-            let Some((path, line)) = lines.and_then(|(p, l)| Some((p, l.get(*index)?))) else {
+            let Some(line) = lines.and_then(|(_, l)| l.get(*index)) else {
                 return Line::default();
             };
-            // The File screen's colors, when it read the same file.
-            let colors = app
-                .repo
-                .file
-                .as_ref()
-                .filter(|file| &file.path == path && file.lines.get(*index) == Some(&line.text))
-                .and_then(|file| file.colors.get(index));
+            let colors = app.repo.blame_colors.get(index);
             let mut spans = vec![Span::styled(format!("    {:>6}  ", line.line), DIM)];
             spans.extend(code_spans(
                 &line.text,
@@ -821,7 +815,7 @@ fn code_spans(
     spans
 }
 
-fn role_style(role: SyntaxRole) -> Style {
+pub(crate) fn role_style(role: SyntaxRole) -> Style {
     match role {
         SyntaxRole::Comment => color(Color::DarkGray).add_modifier(Modifier::ITALIC),
         SyntaxRole::String => color(Color::Green),

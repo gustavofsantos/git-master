@@ -19,7 +19,9 @@ use ratatui::layout::{Position, Rect};
 
 use crate::agent_screen::AgentPage;
 use crate::blame_screens;
-use crate::data::{ColorJob, ColorTarget, FileText, Group, Repo, diff_color_jobs, split_colors};
+use crate::data::{
+    ColorJob, ColorTarget, FileText, Group, Repo, blame_color_job, diff_color_jobs, split_colors,
+};
 use crate::diff_screen::{self, DiffKind};
 use crate::nav::Mode;
 use crate::nav::action::{Behavior, Registry};
@@ -444,6 +446,20 @@ impl App {
                     self.dirty = true;
                 }
             }
+            ColorTarget::Blame => {
+                let current = self
+                    .repo
+                    .blame
+                    .as_ref()
+                    .and_then(|(path, lines)| blame_color_job(path, lines));
+                if current.as_ref() == Some(job) {
+                    self.repo.blame_colors = split_colors(job, spans)
+                        .into_iter()
+                        .map(|((index, _), colors)| (index, colors))
+                        .collect();
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -579,6 +595,16 @@ impl App {
                 if self.in_flight.get(id) == Some(&Pending::Blame) =>
             {
                 self.in_flight.remove(id);
+                let same = self
+                    .repo
+                    .blame
+                    .as_ref()
+                    .is_some_and(|(of, old)| of == path && old == lines);
+                if !same {
+                    // A new text: its old colors would sit on the wrong lines.
+                    self.repo.blame_colors.clear();
+                    self.color_jobs.extend(blame_color_job(path, lines));
+                }
                 self.repo.blame = Some((path.clone(), lines.clone()));
             }
             Event::ThreadRead { id, detail } => {
@@ -1942,6 +1968,39 @@ mod tests {
         }]
     }
 
+    /// Colors `job` with the real highlighter, as the coloring thread does.
+    fn highlighted(job: &ColorJob) -> Vec<gm_schema::HighlightSpan> {
+        let language = gm_core::syntax::language_for_path(&job.path).unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        gm_core::syntax::highlight(language, &job.text, &stop).unwrap()
+    }
+
+    /// The foreground of the first character of `needle` on the drawn screen.
+    fn drawn_fg(app: &mut App, needle: &str) -> ratatui::style::Color {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::draw::draw(frame, app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (width, height) = (buffer.area.width, buffer.area.height);
+        for y in 0..height {
+            for x in 0..width {
+                let rest: String = (x..width).map(|x| buffer[(x, y)].symbol()).collect();
+                if rest.starts_with(needle) {
+                    return buffer[(x, y)].fg;
+                }
+            }
+        }
+        panic!("{needle} is not on the screen");
+    }
+
+    fn keyword_fg() -> ratatui::style::Color {
+        crate::draw::role_style(gm_schema::SyntaxRole::Keyword)
+            .fg
+            .unwrap_or(ratatui::style::Color::Reset)
+    }
+
     #[test]
     fn every_file_of_a_diff_is_colored_on_both_sides_and_a_late_answer_is_dropped() {
         let mut app = app();
@@ -2714,6 +2773,14 @@ mod tests {
             })
             .collect();
         assert_eq!(runs, [(0, 2), (3, 3), (4, 4)]);
+        // The blamed lines are colored on their own, with no File screen read (D251 (4)).
+        let jobs = app.take_color_jobs();
+        let [job] = jobs.as_slice() else {
+            panic!("one blame job: {jobs:?}");
+        };
+        assert_eq!(job.target, ColorTarget::Blame);
+        app.colored(job, &highlighted(job));
+        assert_eq!(drawn_fg(&mut app, "fn main"), keyword_fg());
         assert!(matches!(
             app.tree().current().map(|s| &s.item),
             Some(Item::BlameLine { index: 3 })
