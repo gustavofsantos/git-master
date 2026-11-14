@@ -275,6 +275,20 @@ impl Parser {
     }
 
     fn block(&mut self, value: &Value, path: &str, depth: usize) -> Result<Block, DocError> {
+        // A string or an inline node where a block goes stands as a paragraph of its own.
+        let inline_type = match value {
+            Value::String(_) => true,
+            Value::Object(map) => matches!(
+                map.get("type").and_then(Value::as_str),
+                Some("span" | "badge" | "code" | "link")
+            ),
+            _ => false,
+        };
+        if inline_type {
+            return Ok(Block::Text {
+                inlines: vec![self.inline(value, path)?],
+            });
+        }
         self.count(path)?;
         let Value::Object(_) = value else {
             return Err(error(
@@ -344,10 +358,6 @@ impl Parser {
                     .collect::<Result<_, _>>()?;
                 Ok(Block::List { items })
             }
-            "span" | "badge" | "code" | "link" => Err(error(
-                path,
-                format!("{node_type} is an inline node; put it in a field, a text or a list"),
-            )),
             other => Err(error(
                 &join(path, "type"),
                 format!("unknown node type {other:?}; block nodes: section, field, text, list"),
@@ -554,6 +564,35 @@ mod tests {
     }
 
     #[test]
+    fn an_inline_where_a_block_goes_is_a_paragraph() {
+        let doc = parse(&json!({ "type": "section", "title": "t", "children": [
+            "plain",
+            { "type": "link", "text": "open", "target": { "commit": "HEAD" } },
+        ]}))
+        .unwrap();
+        let Block::Section { children, .. } = &doc.blocks[0] else {
+            panic!("a section");
+        };
+        assert_eq!(
+            children,
+            &vec![
+                Block::Text {
+                    inlines: vec![Inline::Span {
+                        text: "plain".into(),
+                        tone: Tone::Default
+                    }]
+                },
+                Block::Text {
+                    inlines: vec![Inline::Link {
+                        text: "open".into(),
+                        target: LinkTarget::Commit("HEAD".into())
+                    }],
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn the_message_says_where_and_what() {
         let value = json!([{ "type": "section", "title": "x", "children": [
             { "type": "field", "label": "a", "value": "b" },
@@ -564,8 +603,8 @@ mod tests {
             "[1].children[2].value: expected text or an inline node, found a number"
         );
         assert_eq!(
-            parse(&json!({ "type": "badge", "text": "x" })).unwrap_err(),
-            "[1]: badge is an inline node; put it in a field, a text or a list"
+            parse(&json!({ "type": "section", "title": "t", "children": [{ "type": "text", "inlines": { "type": "field" } }] })).unwrap_err(),
+            "[1].children[1].inlines: field is a block node and cannot stand in a line"
         );
         assert_eq!(
             parse(&json!({ "type": "field", "label": "x", "value": { "type": "span", "text": "y", "tone": "red" } })).unwrap_err(),
