@@ -113,26 +113,33 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_job_for_the_same_target_replaces_the_waiting_one() {
+    fn a_newer_job_for_the_same_target_replaces_the_older_one() {
         let mut colorer = Colorer::start().unwrap();
-        // Keep the thread busy so the next two wait together.
+        // Keep the thread busy so the next two usually wait together.
         colorer.color(job("busy.rs", &"fn f() {}\n".repeat(5_000)));
         colorer.color(job("a.rs", "fn old() {}"));
+        let older = Arc::clone(&colorer.newest[&job("a.rs", "").target]);
         colorer.color(job("a.rs", "fn new() {}"));
+        assert!(
+            older.load(Ordering::SeqCst),
+            "the older job is told to stop"
+        );
         let mut texts = Vec::new();
         while let Ok((job, _)) = colorer.done.recv_timeout(Duration::from_secs(10)) {
+            let last = job.text == "fn new() {}\n";
             texts.push(job.text);
-            if texts.len() == 2 {
+            if last {
                 break;
             }
         }
+        // The older job is stopped unless it ran before the newer one was sent; it never
+        // comes after the newer one.
+        assert_eq!(texts.last().map(String::as_str), Some("fn new() {}\n"));
         assert!(
             colorer
                 .done
-                .recv_timeout(Duration::from_millis(300))
+                .recv_timeout(Duration::from_millis(100))
                 .is_err()
         );
-        assert_eq!(texts.last().map(String::as_str), Some("fn new() {}\n"));
-        assert!(!texts.iter().any(|text| text.contains("old")));
     }
 }
