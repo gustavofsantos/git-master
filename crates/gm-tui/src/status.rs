@@ -13,7 +13,7 @@ use gm_view::provenance_view::Row;
 use gm_view::review::{self, Entry, Heading, Opened, Part};
 
 use crate::agent_screen::AgentRow;
-use crate::data::{FileData, Group, Repo};
+use crate::data::{FileData, Group, LineColors, Repo};
 use crate::icons;
 use crate::nav::sections::Section;
 use crate::reviews::{self, Turn};
@@ -105,6 +105,8 @@ pub enum Item {
         number: u32,
         text: String,
         marked: bool,
+        /// The colors of its code (D251 (1)).
+        colors: LineColors,
     },
     /// The comment and its replies, on the Thread screen.
     Messages {

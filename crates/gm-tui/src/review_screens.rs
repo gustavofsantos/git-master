@@ -8,7 +8,11 @@ use gm_schema::{CommandKind, Event, OperationId, ReviewComment, ReviewStatus};
 use gm_view::local_review::{self, Filter, LocalReview, Version, counts, reads_change};
 use gm_view::review::{self, Entry};
 
-use crate::data::Repo;
+use std::collections::HashMap;
+
+use gm_schema::HighlightSpan;
+
+use crate::data::{ColorJob, ColorTarget, LineColors, Repo, split_colors};
 use crate::nav::sections::Section;
 use crate::status::{Item, thread_groups};
 
@@ -47,6 +51,18 @@ pub struct ThreadPage {
     pub page: LocalReview,
     /// The Before read sent, waiting for its After read, so both are expected together.
     before_read: Option<OperationId>,
+    /// The colors of each text, Before then After, with the lines they were taken for.
+    colors: [Option<TextColors>; 2],
+    /// The text last sent to color, Before then After.
+    asked: [String; 2],
+}
+
+/// The colors of a text's lines, by index, with the lines they were taken for.
+type TextColors = (Vec<String>, HashMap<usize, LineColors>);
+
+/// Where a version's colors are kept.
+fn slot(version: Version) -> usize {
+    usize::from(version == Version::After)
 }
 
 impl ThreadPage {
@@ -55,6 +71,8 @@ impl ThreadPage {
             id,
             page: LocalReview::default(),
             before_read: None,
+            colors: [None, None],
+            asked: [String::new(), String::new()],
         }
     }
 
@@ -109,6 +127,60 @@ impl ThreadPage {
             } => self.page.received_after(*id, *comment, lines.clone()),
             _ => false,
         }
+    }
+
+    /// The text of `version` to color, as the file at `path` reads.
+    fn color_job(&self, path: &str, version: Version) -> Option<ColorJob> {
+        let target = ColorTarget::Thread {
+            id: self.id,
+            after: version == Version::After,
+        };
+        let mut job = ColorJob::new(target, path);
+        for (index, line) in self.page.lines(version)?.iter().enumerate() {
+            job.push(Some((index, 0)), line);
+        }
+        job.finish()
+    }
+
+    /// The texts to color that were not sent yet (D251 (1)).
+    pub fn color_jobs(&mut self, repo: &Repo) -> Vec<ColorJob> {
+        let Some(comment) = repo.comment(self.id) else {
+            return Vec::new();
+        };
+        let mut jobs = Vec::new();
+        for version in [Version::Before, Version::After] {
+            if let Some(job) = self.color_job(&comment.path, version)
+                && self.asked[slot(version)] != job.text
+            {
+                self.asked[slot(version)].clone_from(&job.text);
+                jobs.push(job);
+            }
+        }
+        jobs
+    }
+
+    /// Takes the colors of `job`, when its text is still the one shown.
+    pub fn colored(&mut self, repo: &Repo, job: &ColorJob, spans: &[HighlightSpan]) {
+        let ColorTarget::Thread { after, .. } = job.target else {
+            return;
+        };
+        let version = if after {
+            Version::After
+        } else {
+            Version::Before
+        };
+        let Some(comment) = repo.comment(self.id) else {
+            return;
+        };
+        if self.color_job(&comment.path, version).as_ref() != Some(job) {
+            return;
+        }
+        let lines = self.page.lines(version).unwrap_or_default().to_vec();
+        let colors = split_colors(job, spans)
+            .into_iter()
+            .map(|((index, _), colors)| (index, colors))
+            .collect();
+        self.colors[slot(version)] = Some((lines, colors));
     }
 
     /// Lines added and removed between the two texts, once both are read.
@@ -176,6 +248,11 @@ impl ThreadPage {
             Some(lines) => {
                 let first = self.page.first_line(comment, version);
                 let marks = self.page.marks(version);
+                // Colors taken for other lines would sit on the wrong text.
+                let colors = self.colors[slot(version)]
+                    .as_ref()
+                    .filter(|(of, _)| of.as_slice() == lines)
+                    .map(|(_, colors)| colors);
                 lines
                     .iter()
                     .enumerate()
@@ -188,6 +265,10 @@ impl ThreadPage {
                                 number,
                                 text: text.clone(),
                                 marked: marks.get(index).copied().unwrap_or(false),
+                                colors: colors
+                                    .and_then(|colors| colors.get(&index))
+                                    .cloned()
+                                    .unwrap_or_default(),
                             },
                         )
                     })

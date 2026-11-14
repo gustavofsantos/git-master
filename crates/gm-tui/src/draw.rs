@@ -39,7 +39,7 @@ const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
 /// Columns of a diff line's number.
 const NUMBER_WIDTH: usize = 5;
 
-fn color(color: Color) -> Style {
+pub(crate) fn color(color: Color) -> Style {
     if no_color() {
         Style::new()
     } else {
@@ -386,6 +386,7 @@ fn screen_line(row: &Row<'_, Item>) -> Line<'static> {
             number,
             text,
             marked,
+            colors,
         } => {
             let (sign, tint) = match (marked, version) {
                 (false, _) => (' ', None),
@@ -393,11 +394,15 @@ fn screen_line(row: &Row<'_, Item>) -> Line<'static> {
                 (true, Version::After) => ('+', Some(Color::Green)),
             };
             let style = tint.map_or(Style::new(), color);
-            Line::from(vec![
+            // With tints the background marks a changed line and its code keeps its colors;
+            // without them, the whole line takes the mark's color (D251 (3)).
+            let whole = tint.filter(|_| palette::tints().is_none()).map(color);
+            let mut spans = vec![
                 Span::styled(format!("    {number:>5} "), DIM),
                 Span::styled(format!("{sign} "), style),
-                Span::styled(text.replace('\t', "    "), style),
-            ])
+            ];
+            spans.extend(code_spans(text, Some(colors), whole, usize::MAX));
+            Line::from(spans)
         }
         Item::Messages { count } => Line::from(vec![
             Span::styled(

@@ -229,6 +229,8 @@ pub enum ColorTarget {
     },
     /// The lines the Blame screen shows.
     Blame,
+    /// A thread's Before or After lines.
+    Thread { id: i64, after: bool },
 }
 
 /// A text to color, what it colors, and where each of its lines starts.

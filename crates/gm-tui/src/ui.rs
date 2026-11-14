@@ -446,6 +446,17 @@ impl App {
                     self.dirty = true;
                 }
             }
+            ColorTarget::Thread { id, .. } => {
+                for screen in self.stack.iter_mut() {
+                    if let Screen::Thread { page, .. } = screen
+                        && page.id == *id
+                    {
+                        page.colored(&self.repo, job, spans);
+                    }
+                }
+                // The colors are held by the screen's rows.
+                self.rebuild();
+            }
             ColorTarget::Blame => {
                 let current = self
                     .repo
@@ -504,8 +515,11 @@ impl App {
             | Event::ReviewCurrentText { .. } => {
                 let mut took = false;
                 for screen in self.stack.iter_mut() {
-                    if let Screen::Thread { page, .. } = screen {
-                        took |= page.received(event);
+                    if let Screen::Thread { page, .. } = screen
+                        && page.received(event)
+                    {
+                        took = true;
+                        self.color_jobs.extend(page.color_jobs(&self.repo));
                     }
                 }
                 if !took {
@@ -2546,6 +2560,54 @@ mod tests {
             })
             .collect();
         assert_eq!(marked, [(4, true), (5, true)]);
+        // Both texts are colored as the file's language reads them (D251 (1)).
+        let jobs = app.take_color_jobs();
+        assert_eq!(jobs.len(), 2, "{jobs:?}");
+        for job in &jobs {
+            app.colored(job, &highlighted(job));
+        }
+        let colored = app
+            .tree()
+            .rows()
+            .iter()
+            .find_map(|r| match &r.section.item {
+                Item::Text { text, colors, .. } if text == "    more();" => colors
+                    .iter()
+                    .find(|(start, ..)| *start == 4)
+                    .map(|(.., role)| *role),
+                _ => None,
+            })
+            .is_some();
+        assert!(colored, "`more` is colored");
+        // Without tints a marked line keeps the mark's color whole (D251 (3)).
+        if crate::palette::tints().is_none() {
+            assert_eq!(
+                drawn_fg(&mut app, "more()"),
+                crate::draw::color(ratatui::style::Color::Green)
+                    .fg
+                    .unwrap_or(ratatui::style::Color::Reset)
+            );
+        }
+        // The same texts read again are not colored again.
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(9),
+            comments: app.repo.comments.clone(),
+        });
+        let asked = app.take_commands();
+        app.sent(OperationId(10), &asked[0]);
+        app.apply(&Event::ReviewChange {
+            id: OperationId(10),
+            comment: 1,
+            path: "src/lib.rs".to_owned(),
+            change: Some(gm_schema::ReviewChange {
+                before: vec!["    old();".to_owned()],
+                after: vec!["    new();".to_owned(), "    more();".to_owned()],
+                changed: true,
+                before_start_line: 4,
+                after_start_line: 4,
+            }),
+        });
+        assert!(app.take_color_jobs().is_empty());
         let all = texts(&app);
         assert!(all.iter().any(|t| t.contains("changed +2 -1")), "{all:?}");
         // Thread actions act on the screen's thread wherever the cursor is.
