@@ -11,6 +11,7 @@ mod draw;
 mod help;
 mod icons;
 mod nav;
+mod palette;
 mod review_screens;
 mod reviews;
 mod status;

@@ -27,6 +27,7 @@ use crate::icons;
 use crate::nav::keys::show_sequence;
 use crate::nav::prompt::Answer;
 use crate::nav::sections::Row;
+use crate::palette::{self, Tints};
 use crate::reviews::Turn;
 use crate::status::{self, Item, Mark};
 use crate::threads::TYPES;
@@ -167,6 +168,8 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let width = usize::from(body.width);
     let mut lines = Vec::with_capacity(height);
     let mut hits = Vec::new();
+    // Each row's background and its gutter's (columns, tint), when the terminal gave tints.
+    let mut backgrounds = Vec::new();
     for (index, row) in rows.iter().enumerate().skip(scroll).take(height) {
         let y = body.y + u16::try_from(index - scroll).unwrap_or(u16::MAX);
         hits.push(Hit {
@@ -181,14 +184,87 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
         };
         let mut line = row_line(app, row, width.saturating_sub(1));
         line.spans.insert(0, mark);
-        if index == cursor {
-            line = line.patch_style(ON);
+        let on = index == cursor;
+        match palette::tints() {
+            Some(tints) => backgrounds.push((y, row_tint(tints, app, row, on, selected))),
+            None if on => line = line.patch_style(ON),
+            None => {}
         }
         lines.push(line);
     }
     frame.render_widget(Paragraph::new(lines), body);
+    let buffer = frame.buffer_mut();
+    for (y, (whole, gutter)) in backgrounds {
+        if let Some((columns, tint)) = gutter {
+            let split = columns.min(body.width);
+            buffer.set_style(
+                Rect::new(body.x, y, split, 1),
+                Style::new().bg(tint.color()),
+            );
+            if let Some(whole) = whole {
+                let rest = Rect::new(body.x + split, y, body.width - split, 1);
+                buffer.set_style(rest, Style::new().bg(whole.color()));
+            }
+        } else if let Some(whole) = whole {
+            buffer.set_style(
+                Rect::new(body.x, y, body.width, 1),
+                Style::new().bg(whole.color()),
+            );
+        }
+    }
     app.hits.extend(hits);
     app.view_mut().scroll = scroll;
+}
+
+/// Whether a row is an added (`true`) or removed (`false`) line, with the columns of its
+/// gutter (the selection mark, number and sign).
+fn row_change(app: &App, row: &Row<'_, Item>) -> Option<(bool, u16)> {
+    match &row.section.item {
+        Item::Line {
+            group,
+            path,
+            row: index,
+        } => match status::line_of(&app.repo, *group, path, *index)?.kind {
+            LineKind::Added => Some((true, 11)),
+            LineKind::Removed => Some((false, 11)),
+            LineKind::Context => None,
+        },
+        Item::Text {
+            version,
+            marked: true,
+            ..
+        } => Some((matches!(version, Version::After), 13)),
+        Item::Agent(AgentRow::Patch {
+            kind: PatchKind::Added,
+            ..
+        }) => Some((true, 0)),
+        Item::Agent(AgentRow::Patch {
+            kind: PatchKind::Removed,
+            ..
+        }) => Some((false, 0)),
+        _ => None,
+    }
+}
+
+/// A row's background and its gutter's (D250): the line's change, then the cursor on it, or
+/// the selection.
+type RowTint = (Option<palette::Rgb>, Option<(u16, palette::Rgb)>);
+
+fn row_tint(tints: &Tints, app: &App, row: &Row<'_, Item>, on: bool, selected: bool) -> RowTint {
+    match row_change(app, row) {
+        Some((added, gutter)) => {
+            let (base, strong, cursor) = if added {
+                (tints.added, tints.added_gutter, tints.added_cursor)
+            } else {
+                (tints.removed, tints.removed_gutter, tints.removed_cursor)
+            };
+            let whole = if on { cursor } else { base };
+            (Some(whole), (gutter > 0).then_some((gutter, strong)))
+        }
+        None if on => (Some(tints.cursor), None),
+        None if selected => (Some(tints.selected), None),
+        None => (None, None),
+    }
 }
 
 fn fold_icon(row: &Row<'_, Item>) -> &'static str {
@@ -673,7 +749,16 @@ fn letter_color(letter: char, group: Group) -> Color {
 fn code_line(line: &DiffLine, colors: Option<&LineColors>, width: usize) -> Line<'static> {
     let (number, sign, sign_style, whole) = match line.kind {
         LineKind::Added => (line.new_no, "+", color(Color::Green), None),
-        LineKind::Removed => (None, "-", color(Color::Red), Some(color(Color::Red))),
+        LineKind::Removed => {
+            // With tints the red background marks the line, so its code keeps the plain
+            // foreground (D250 (3)).
+            let whole = if palette::tints().is_some() {
+                Style::new()
+            } else {
+                color(Color::Red)
+            };
+            (None, "-", color(Color::Red), Some(whole))
+        }
         LineKind::Context => (line.new_no, " ", DIM, None),
     };
     let number = number.map_or_else(
@@ -856,13 +941,22 @@ fn thread_line(app: &App, id: i64, width: usize) -> Line<'static> {
 
 // ---- The bottom lines ----
 
+/// A chip that stands out: the terminal's background on its blue with tints (D250 (4)),
+/// reversed without.
+fn chip_style() -> Style {
+    match palette::tints() {
+        Some(tints) => Style::new()
+            .fg(tints.background.color())
+            .bg(tints.chip.color())
+            .add_modifier(Modifier::BOLD),
+        None => ON.add_modifier(Modifier::BOLD),
+    }
+}
+
 fn draw_mode_line(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut strip = Strip::new(area);
     strip
-        .text(
-            format!(" {} ", app.mode().label()),
-            ON.add_modifier(Modifier::BOLD),
-        )
+        .text(format!(" {} ", app.mode().label()), chip_style())
         .text("  ", Style::new());
     let trail = app.stack.trail();
     let top = trail.len() - 1;
@@ -1022,7 +1116,7 @@ fn draw_text_box(frame: &mut Frame, app: &mut App, body: Rect, now: Instant) {
         let mut spans = vec![Span::styled("type ", DIM)];
         for (index, (word, _)) in TYPES.iter().enumerate() {
             let style = if index == composer.kind % TYPES.len() {
-                ON
+                chip_style()
             } else {
                 DIM
             };

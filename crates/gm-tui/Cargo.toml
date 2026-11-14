@@ -18,5 +18,9 @@ async-channel.workspace = true
 # so its version always matches the one ratatui draws with.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
+[target.'cfg(unix)'.dependencies]
+# Waits for the terminal's answer to the palette query with a deadline (D250).
+rustix = { version = "1", features = ["event", "stdio"] }
+
 [dev-dependencies]
 tempfile.workspace = true
