@@ -137,7 +137,7 @@ Open **Threads** from the menu anywhere (`Space t`). It lists the review threads
 
 Diffs, on Status and on Diff, have two layouts, as in the app's [diff views](diff-and-staging.md#unified-and-split-layouts). **Unified** shows removed and added lines one after another. **Split** shows the old side on the left and the new side on the right, a removed line next to the added line that replaces it; each side has its own line numbers and its own tint. The companion starts in the layout set by `gitmaster.diffLayout` (see [Configuration](../reference/configuration.md#preferences)), and `Space d s` switches it for as long as it runs; the switch does not change the setting, so the app keeps its own. Split needs a terminal at least 100 columns wide: in a narrower one the diffs are shown Unified, and the hint line says why. The cursor stays on the same line when the layout changes.
 
-In Split, a row holds a line of each side, and selecting rows selects both of their lines: staging a selection stages the removed and the added lines of those rows and no others, and a comment covers the lines from the first row to the last.
+In Split, a row holds a line of each side, and selecting rows selects both of their lines: staging a selection stages the removed and the added lines of those rows and no others, and a comment covers the new lines from the first selected row to the last.
 
 **File** (`g f` on a line, a file or a thread) shows a whole file as it is in the working tree, colored, at the line you came from. Lines not yet committed are marked `+`: green when the change is not staged, cyan when it is. Long runs of unchanged lines are folded; `Tab` unfolds one. It follows the file as you or the agent edit it. One File screen is open at a time.
 
