@@ -139,8 +139,6 @@ Diffs, on Status and on Diff, have two layouts, as in the app's [diff views](dif
 
 In Split, a row holds a line of each side, and selecting rows selects both of their lines: staging a selection stages the removed and the added lines of those rows and no others, and a comment covers the lines from the first row to the last.
 
-> **Planned.** The Split layout is not available yet.
-
 **File** (`g f` on a line, a file or a thread) shows a whole file as it is in the working tree, colored, at the line you came from. Lines not yet committed are marked `+`: green when the change is not staged, cyan when it is. Long runs of unchanged lines are folded; `Tab` unfolds one. It follows the file as you or the agent edit it. One File screen is open at a time.
 
 `Enter` on a line, on Status, Diff or File, opens the file at that line in `$VISUAL`, else `$EDITOR`, else `vi`. The companion hands the terminal to the editor and takes it back when the editor quits.
