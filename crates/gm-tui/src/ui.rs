@@ -19,7 +19,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::agent_screen::AgentPage;
 use crate::blame_screens;
-use crate::data::{ColorJob, FileText, Group, Repo, color_job};
+use crate::data::{ColorJob, ColorTarget, FileText, Group, Repo, diff_color_jobs, split_colors};
 use crate::diff_screen::{self, DiffKind};
 use crate::nav::Mode;
 use crate::nav::action::{Behavior, Registry};
@@ -427,10 +427,23 @@ impl App {
         self.in_flight.insert(id, pending);
     }
 
+    /// Takes the colors of `job`, unless its target's text changed since it was sent: a late
+    /// answer would paint the newer text with the older offsets.
     pub fn colored(&mut self, job: &ColorJob, spans: &[gm_schema::HighlightSpan]) {
-        if let Some(file) = self.repo.files.get_mut(&(job.group, job.path.clone())) {
-            file.colors = crate::data::split_colors(job, spans);
-            self.dirty = true;
+        match &job.target {
+            ColorTarget::Diff { group, path, .. } => {
+                let Some(file) = self.repo.files.get_mut(&(*group, path.clone())) else {
+                    return;
+                };
+                let current = file
+                    .diff
+                    .as_ref()
+                    .is_some_and(|diff| diff_color_jobs(*group, diff).contains(job));
+                if current {
+                    file.colors.extend(split_colors(job, spans));
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -596,9 +609,7 @@ impl App {
     }
 
     fn file_loaded(&mut self, group: Group, path: &str, diff: gm_schema::FileDiff) {
-        if let Some(job) = color_job(group, &diff) {
-            self.color_jobs.push(job);
-        }
+        self.color_jobs.extend(diff_color_jobs(group, &diff));
         self.repo
             .files
             .entry((group, path.to_owned()))
@@ -1920,6 +1931,45 @@ mod tests {
             .map(|row| format!("{}{:?}", "  ".repeat(row.depth), row.section.item))
             .map(|text| text.chars().take(60).collect())
             .collect()
+    }
+
+    /// Colors every line of `job` as a keyword.
+    fn all_keyword(job: &ColorJob) -> Vec<gm_schema::HighlightSpan> {
+        vec![gm_schema::HighlightSpan {
+            start: 0,
+            end: job.text.len(),
+            role: gm_schema::SyntaxRole::Keyword,
+        }]
+    }
+
+    #[test]
+    fn every_file_of_a_diff_is_colored_on_both_sides_and_a_late_answer_is_dropped() {
+        let mut app = app();
+        app.file_loaded(Group::Commit, "src/lib.rs", diff());
+        let mut other = diff();
+        other.path = "src/main.rs".to_owned();
+        app.file_loaded(Group::Commit, "src/main.rs", other);
+        let jobs = app.take_color_jobs();
+        assert_eq!(jobs.len(), 4, "two files, each with its new and old side");
+        for job in &jobs {
+            app.colored(job, &all_keyword(job));
+        }
+        for path in ["src/lib.rs", "src/main.rs"] {
+            let file = &app.repo.files[&(Group::Commit, path.to_owned())];
+            let mut keys: Vec<_> = file.colors.keys().copied().collect();
+            keys.sort_unstable();
+            assert_eq!(keys, [(0, 0), (0, 1), (0, 2)], "{path}");
+        }
+
+        // The file changed after its jobs were sent: their answers are dropped.
+        let mut newer = diff();
+        newer.hunks[0].lines[2].text = "    newer();".to_owned();
+        app.file_loaded(Group::Commit, "src/lib.rs", newer);
+        for job in jobs.iter().filter(|job| job.path == "src/lib.rs") {
+            app.colored(job, &all_keyword(job));
+        }
+        let file = &app.repo.files[&(Group::Commit, "src/lib.rs".to_owned())];
+        assert!(!file.colors.contains_key(&(0, 2)));
     }
 
     /// Unfolds src/lib.rs and gives it its diff.

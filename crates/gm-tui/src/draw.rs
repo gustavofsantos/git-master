@@ -750,14 +750,10 @@ fn code_line(line: &DiffLine, colors: Option<&LineColors>, width: usize) -> Line
     let (number, sign, sign_style, whole) = match line.kind {
         LineKind::Added => (line.new_no, "+", color(Color::Green), None),
         LineKind::Removed => {
-            // With tints the red background marks the line, so its code keeps the plain
-            // foreground (D250 (3)).
-            let whole = if palette::tints().is_some() {
-                Style::new()
-            } else {
-                color(Color::Red)
-            };
-            (None, "-", color(Color::Red), Some(whole))
+            // With tints the red background marks the line, so its code keeps its syntax
+            // colors (D251 (3)); without them, the whole line is red.
+            let whole = palette::tints().is_none().then(|| color(Color::Red));
+            (None, "-", color(Color::Red), whole)
         }
         LineKind::Context => (line.new_no, " ", DIM, None),
     };

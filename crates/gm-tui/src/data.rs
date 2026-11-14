@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use gm_core::syntax::language_for_path;
 use gm_schema::{
     BlameEntry, ChangeStats, CommitDetail, DiffSide, FileBody, FileDiff, FileView, HighlightSpan,
     History, LineKind, RepoStatus, ReviewComment, RevisionRange, StackSnapshot, StashEntry,
@@ -211,53 +212,100 @@ impl Repo {
     }
 }
 
-/// The text to color for a file's diff, and where each line of it starts.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ColorJob {
-    pub group: Group,
-    pub path: String,
-    /// The new side of every hunk, context and added lines, one after another.
-    pub text: String,
-    /// For each line in `text`: its hunk, its index in the hunk and its byte offset.
-    pub lines: Vec<(usize, usize, usize)>,
+/// Where a line's colors are kept: a diff's hunk and line, or a line's index and 0.
+pub type LineKey = (usize, usize);
+
+/// What a color job colors (D251 (2)). A new job stops only the job of the same target.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ColorTarget {
+    /// One side of a file's diff: the old (context and removed lines) or the new (context
+    /// and added lines). One text holding both sides would not parse.
+    Diff {
+        group: Group,
+        path: String,
+        old: bool,
+    },
 }
 
-/// The text to color for `diff`, or `None` when it is too large or has nothing to color.
-pub fn color_job(group: Group, diff: &FileDiff) -> Option<ColorJob> {
-    let count: usize = diff.hunks.iter().map(|hunk| hunk.lines.len()).sum();
-    if count == 0 || count > COLOR_LINE_LIMIT {
-        return None;
-    }
-    let mut text = String::new();
-    let mut lines = Vec::new();
-    for (hunk_index, hunk) in diff.hunks.iter().enumerate() {
-        for (line_index, line) in hunk.lines.iter().enumerate() {
-            if line.kind != LineKind::Removed {
-                lines.push((hunk_index, line_index, text.len()));
-                text.push_str(&line.text);
-                text.push('\n');
-            }
+/// A text to color, what it colors, and where each of its lines starts.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ColorJob {
+    pub target: ColorTarget,
+    /// The file the text comes from, which names its language.
+    pub path: String,
+    pub text: String,
+    /// For each line in `text`: where its colors go (`None` for a line that is there only
+    /// for the parse) and its byte offset.
+    pub lines: Vec<(Option<LineKey>, usize)>,
+}
+
+impl ColorJob {
+    pub fn new(target: ColorTarget, path: &str) -> Self {
+        Self {
+            target,
+            path: path.to_owned(),
+            text: String::new(),
+            lines: Vec::new(),
         }
     }
-    Some(ColorJob {
-        group,
-        path: diff.path.clone(),
-        text,
-        lines,
-    })
+
+    pub fn push(&mut self, key: Option<LineKey>, line: &str) {
+        self.lines.push((key, self.text.len()));
+        self.text.push_str(line);
+        self.text.push('\n');
+    }
+
+    /// The job, or `None` when it has nothing to color, is too large or has no grammar.
+    pub fn finish(self) -> Option<Self> {
+        let empty = self.lines.iter().all(|(key, _)| key.is_none());
+        let fits = self.lines.len() <= COLOR_LINE_LIMIT;
+        (!empty && fits && language_for_path(&self.path).is_some()).then_some(self)
+    }
+}
+
+/// The texts to color for `diff`: its new side, and its old side when it removes lines.
+pub fn diff_color_jobs(group: Group, diff: &FileDiff) -> Vec<ColorJob> {
+    let count: usize = diff.hunks.iter().map(|hunk| hunk.lines.len()).sum();
+    if count > COLOR_LINE_LIMIT {
+        return Vec::new();
+    }
+    [false, true]
+        .into_iter()
+        .filter_map(|old| {
+            let target = ColorTarget::Diff {
+                group,
+                path: diff.path.clone(),
+                old,
+            };
+            let mut job = ColorJob::new(target, &diff.path);
+            for (hunk_index, hunk) in diff.hunks.iter().enumerate() {
+                for (line_index, line) in hunk.lines.iter().enumerate() {
+                    let key = Some((hunk_index, line_index));
+                    match (line.kind, old) {
+                        (LineKind::Context, _) => job.push(key.filter(|_| !old), &line.text),
+                        (LineKind::Added, false) | (LineKind::Removed, true) => {
+                            job.push(key, &line.text);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            job.finish()
+        })
+        .collect()
 }
 
 /// The spans of a whole text cut at each line, as ranges of the line's own text.
-pub fn split_colors(
-    job: &ColorJob,
-    spans: &[HighlightSpan],
-) -> HashMap<(usize, usize), LineColors> {
-    let mut colors: HashMap<(usize, usize), LineColors> = HashMap::new();
-    for (index, &(hunk, line, start)) in job.lines.iter().enumerate() {
+pub fn split_colors(job: &ColorJob, spans: &[HighlightSpan]) -> HashMap<LineKey, LineColors> {
+    let mut colors: HashMap<LineKey, LineColors> = HashMap::new();
+    for (index, &(key, start)) in job.lines.iter().enumerate() {
+        let Some(key) = key else {
+            continue;
+        };
         let end = job
             .lines
             .get(index + 1)
-            .map_or(job.text.len(), |next| next.2)
+            .map_or(job.text.len(), |next| next.1)
             .saturating_sub(1);
         let own: LineColors = spans
             .iter()
@@ -271,7 +319,7 @@ pub fn split_colors(
             })
             .collect();
         if !own.is_empty() {
-            colors.insert((hunk, line), own);
+            colors.insert(key, own);
         }
     }
     colors
@@ -283,7 +331,7 @@ mod tests {
     use gm_schema::{DiffLine, Hunk, HunkId};
 
     #[test]
-    fn colors_cover_the_new_side_and_split_per_line() {
+    fn colors_cover_both_sides_and_split_per_line() {
         let line = |kind, text: &str| DiffLine {
             kind,
             old_no: None,
@@ -309,8 +357,14 @@ mod tests {
                 ],
             }],
         };
-        let job = color_job(Group::Unstaged, &diff).unwrap();
+        let jobs = diff_color_jobs(Group::Unstaged, &diff);
+        let [job, old] = jobs.as_slice() else {
+            panic!("two sides: {jobs:?}");
+        };
         assert_eq!(job.text, "fn a() {\n    new();\n");
+        // The old side keeps its context for the parse but colors only the removed line.
+        assert_eq!(old.text, "fn a() {\nold\n");
+        assert_eq!(old.lines, [(None, 0), (Some((0, 1)), 9)]);
         let spans = [
             HighlightSpan {
                 start: 0,
@@ -323,7 +377,7 @@ mod tests {
                 role: SyntaxRole::Function,
             },
         ];
-        let colors = split_colors(&job, &spans);
+        let colors = split_colors(job, &spans);
         assert_eq!(colors[&(0, 0)], [(0, 2, SyntaxRole::Keyword)]);
         assert_eq!(colors[&(0, 2)], [(4, 7, SyntaxRole::Function)]);
     }
