@@ -278,8 +278,6 @@ The exit status is `0` when the file has no problem, `1` when it has one, and `2
 
 ## Check and render an extension
 
-> **Planned.** The `extension` subcommands are not available yet.
-
 ```sh
 gitmaster extension check <file> [--json]
 gitmaster extension render <file> --slot <slot> [--commit <rev>] [--repo <path>] [--json] [--allow-exec]

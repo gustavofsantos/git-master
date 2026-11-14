@@ -179,7 +179,7 @@ An extension reaches the network either through a program it runs (`ctx.exec`, t
 
 ## Trust
 
-The hash rule of D101 applies unchanged, in the same trust store, with the kind `extension`:
+The hash rule of D101 applies unchanged, in the same trust store (`script::trust`, keyed by the hash of the text, so a workflow and an extension never share a review):
 
 - A new or edited file is **unreviewed** and does not run. Its slot shows one line instead: **github-pr is not reviewed. Review…**. Review opens the dialog with the script and the programs of `meta.exec`; confirming marks the hash as reviewed and runs it.
 - An extension an agent writes into the folder therefore never runs before the person has read it.
@@ -222,7 +222,7 @@ The author's longer aim is that new views, such as a history explorer, are built
 ## Slices
 
 1. **X0, docs and decisions:** D254; `docs/guide/extensions.md` and `docs/reference/extension-api.md` with `status: planned`.
-2. **X1, engine:** `gm-schema::ext` (nodes, validation, JSON Schema); `gm-core::extension` (loader, `meta`/`slots` reading, the sandbox and budgets of `script::luau`, the read-only `ctx` with `exec` and `http`, the `ui` helpers); `RenderSlot`/`SlotRendered` with settle delay, pool, cancellation, cache; trust kind `extension`; `gitmaster extension check` and `render`. Tests: pure tests of validation and the cache; real-Git tests of `render` on a temporary repository with a fake `gh` on `PATH`.
+2. **X1, engine:** `gm-schema::ext` (nodes, validation, JSON Schema); `gm-core::extension` (loader, `meta`/`slots` reading, the sandbox and budgets of `script::luau`, the read-only `ctx` with `exec` and `http`, the `ui` helpers); `RenderSlot`/`SlotRendered` with settle delay, pool, cancellation, cache; the workflow trust store; `gitmaster extension check` and `render`. Tests: pure tests of validation and the cache; real-Git tests of `render` on a temporary repository with a fake `gh` on `PATH`.
 3. **X2, the GUI slot:** the commit details panel draws the documents through `gm-view::ext_doc`; loading, error, not reviewed and **Refresh**; links. UI smoke scenario with a local extension that needs no network.
 4. **X3, the TUI slot:** the same on the companion's commit Diff screen; fold with `Tab`, `Enter` on a link.
 5. **X4, the extensions screen** in both front ends, and the review dialog.
