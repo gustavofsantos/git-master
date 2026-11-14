@@ -622,14 +622,24 @@ fn agent_line(row: &Row<'_, Item>, agent: &AgentRow) -> Line<'static> {
             Span::styled(format!("  +{added}"), color(Color::Green)),
             Span::styled(format!(" -{removed}"), color(Color::Red)),
         ]),
-        AgentRow::Patch { kind, text } => {
+        AgentRow::Patch { kind, text, colors } => {
             let style = match kind {
                 PatchKind::Added => color(Color::Green),
                 PatchKind::Removed => color(Color::Red),
                 PatchKind::Hunk => color(Color::Blue),
                 PatchKind::Context => Style::new(),
             };
-            Line::styled(format!("{indent}{}", text.replace('\t', "    ")), style)
+            if colors.is_empty() {
+                return Line::styled(format!("{indent}{}", text.replace('\t', "    ")), style);
+            }
+            // The sign in its color; the code in its syntax colors, or whole in the sign's
+            // color when there are no tints to mark the line (D251 (3)).
+            let (sign, code) = text.split_at(text.chars().next().map_or(0, char::len_utf8));
+            let tinted = matches!(kind, PatchKind::Added | PatchKind::Removed);
+            let whole = (tinted && palette::tints().is_none()).then_some(style);
+            let mut spans = vec![Span::styled(format!("{indent}{sign}"), style)];
+            spans.extend(code_spans(code, Some(colors), whole, usize::MAX));
+            Line::from(spans)
         }
         AgentRow::Turn { number, prompt } => Line::from(vec![
             Span::raw(format!("{indent}{} ", fold_icon(row))),

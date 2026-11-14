@@ -457,6 +457,14 @@ impl App {
                 // The colors are held by the screen's rows.
                 self.rebuild();
             }
+            ColorTarget::Patch { .. } => {
+                for screen in self.stack.iter_mut() {
+                    if let Screen::Agent { page, .. } = screen {
+                        page.colored(job, spans);
+                    }
+                }
+                self.rebuild();
+            }
             ColorTarget::Blame => {
                 let current = self
                     .repo
@@ -631,6 +639,7 @@ impl App {
                         && page.uid == uid
                     {
                         next = page.received(detail);
+                        self.color_jobs.extend(page.color_jobs());
                     }
                 }
                 self.commands.extend(next);

@@ -4,11 +4,14 @@
 //! **Runs** of commands and how they ended, the **Files read** and the **Timeline** of turns.
 //! Text from a thread is untrusted: it is shown as plain text, one line per row, capped.
 
-use gm_schema::{CommandKind, ThreadDetail};
+use std::collections::{HashMap, HashSet};
+
+use gm_schema::{CommandKind, HighlightSpan, ThreadDetail, ThreadEdit};
 use gm_view::thread_turns::{
     self, Block, Call, CallStatus, PatchKind, duration_label, file_lines, patch_lines,
 };
 
+use crate::data::{ColorJob, ColorTarget, LineColors, split_colors};
 use crate::nav::sections::Section;
 use crate::status::Item;
 
@@ -41,8 +44,13 @@ pub enum AgentRow {
         added: u32,
         removed: u32,
     },
-    /// A line of an edit's patch.
-    Patch { kind: PatchKind, text: String },
+    /// A line of an edit's patch, with the colors of its code: ranges of `text` after its
+    /// first character (the `+`, `-` or space).
+    Patch {
+        kind: PatchKind,
+        text: String,
+        colors: LineColors,
+    },
     /// A turn of the timeline: its number and the first line of its prompt.
     Turn { number: u32, prompt: String },
 }
@@ -74,6 +82,10 @@ pub struct AgentPage {
     pub uid: String,
     pub detail: Option<ThreadDetail>,
     pub failure: Option<String>,
+    /// The colors of patch lines, by edit and line index in its patch (D251 (5)).
+    colors: HashMap<(i64, usize), LineColors>,
+    /// The edits sent to color.
+    asked: HashSet<i64>,
 }
 
 impl AgentPage {
@@ -82,6 +94,39 @@ impl AgentPage {
             uid,
             detail: None,
             failure: None,
+            colors: HashMap::new(),
+            asked: HashSet::new(),
+        }
+    }
+
+    /// The patches to color that were not sent yet.
+    pub fn color_jobs(&mut self) -> Vec<ColorJob> {
+        let Some(detail) = &self.detail else {
+            return Vec::new();
+        };
+        detail
+            .edits
+            .iter()
+            .filter(|edit| self.asked.insert(edit.id))
+            .flat_map(patch_color_jobs)
+            .collect()
+    }
+
+    /// Takes the colors of `job`, a side of one of its edits.
+    pub fn colored(&mut self, job: &ColorJob, spans: &[HighlightSpan]) {
+        let ColorTarget::Patch { edit, .. } = job.target else {
+            return;
+        };
+        let current = self
+            .detail
+            .iter()
+            .flat_map(|detail| &detail.edits)
+            .find(|known| known.id == edit)
+            .is_some_and(|known| patch_color_jobs(known).contains(job));
+        if current {
+            for ((index, _), colors) in split_colors(job, spans) {
+                self.colors.insert((edit, index), colors);
+            }
         }
     }
 
@@ -162,7 +207,7 @@ impl AgentPage {
             .collect();
         out.push(request(&turns));
         out.push(decisions(&calls));
-        out.push(changes(detail));
+        out.push(changes(detail, &self.colors));
         out.push(runs(&calls));
         out.push(files_read(&calls, &summary.worktree));
         out.push(timeline(&turns));
@@ -301,7 +346,7 @@ fn decisions(calls: &[&Call]) -> Section<Item> {
     heading("decisions", "Decisions", children)
 }
 
-fn changes(detail: &ThreadDetail) -> Section<Item> {
+fn changes(detail: &ThreadDetail, colors: &HashMap<(i64, usize), LineColors>) -> Section<Item> {
     let children = file_lines(detail)
         .into_iter()
         .filter(|file| file.edited)
@@ -323,6 +368,10 @@ fn changes(detail: &ThreadDetail) -> Section<Item> {
                                 AgentRow::Patch {
                                     kind: *kind,
                                     text: (*text).to_owned(),
+                                    colors: colors
+                                        .get(&(edit.id, index))
+                                        .cloned()
+                                        .unwrap_or_default(),
                                 },
                             )
                         })
@@ -352,6 +401,35 @@ fn changes(detail: &ThreadDetail) -> Section<Item> {
         })
         .collect();
     heading("changes", "Changes", children)
+}
+
+/// The two texts to color of an edit's patch (D251 (5)): the old side (context and removed
+/// lines) and the new (context and added lines), each line without its first character.
+/// Header lines are left out; context is colored from the new side.
+fn patch_color_jobs(edit: &ThreadEdit) -> Vec<ColorJob> {
+    let lines = patch_lines(&edit.patch);
+    [false, true]
+        .into_iter()
+        .filter_map(|old| {
+            let target = ColorTarget::Patch { edit: edit.id, old };
+            let mut job = ColorJob::new(target, &edit.path);
+            for (index, (kind, text)) in lines.iter().enumerate() {
+                let key = Some((index, 0));
+                let code = text.get(1..).unwrap_or_default();
+                match (kind, old) {
+                    (PatchKind::Context, _) if text.is_empty() => {
+                        job.push(key.filter(|_| !old), "");
+                    }
+                    (PatchKind::Context, _) if text.starts_with(' ') => {
+                        job.push(key.filter(|_| !old), code);
+                    }
+                    (PatchKind::Added, false) | (PatchKind::Removed, true) => job.push(key, code),
+                    _ => {}
+                }
+            }
+            job.finish()
+        })
+        .collect()
 }
 
 /// A call that runs a command: Claude Code's `Bash`, and shells by other names.
@@ -599,7 +677,7 @@ pub(crate) mod tests {
             "{rows:#?}"
         );
         assert!(
-            find("Patch { kind: Added, text: \"+pub fn parse() {}\" }"),
+            find("Patch { kind: Added, text: \"+pub fn parse() {}\""),
             "{rows:#?}"
         );
         assert!(
@@ -615,6 +693,43 @@ pub(crate) mod tests {
             find("Turn { number: 1, prompt: \"Add a parser for the ledger.\" }"),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn patches_are_colored_per_side_without_their_signs_and_headers() {
+        let mut edit = detail().edits.remove(0);
+        edit.patch = "--- a/src/parser.rs\n+++ b/src/parser.rs\n@@ -1,2 +1,2 @@\n fn a() {\n-    old();\n+    new();".to_owned();
+        let jobs = patch_color_jobs(&edit);
+        let [new, old] = jobs.as_slice() else {
+            panic!("two sides: {jobs:?}");
+        };
+        assert_eq!(new.text, "fn a() {\n    new();\n");
+        assert_eq!(new.lines, [(Some((3, 0)), 0), (Some((5, 0)), 9)]);
+        // The old side parses its context but colors only the removed line.
+        assert_eq!(old.text, "fn a() {\n    old();\n");
+        assert_eq!(old.lines, [(None, 0), (Some((4, 0)), 9)]);
+    }
+
+    #[test]
+    fn a_patch_line_takes_its_colors_once() {
+        let mut page = AgentPage::new("t1".to_owned());
+        page.received(&detail());
+        let jobs = page.color_jobs();
+        assert_eq!(jobs.len(), 1, "the patch only adds: {jobs:?}");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let language = gm_core::syntax::language_for_path(&jobs[0].path).unwrap();
+        let spans = gm_core::syntax::highlight(language, &jobs[0].text, &stop).unwrap();
+        page.colored(&jobs[0], &spans);
+        let mut rows = Vec::new();
+        texts(&page.sections(), 0, &mut rows);
+        let keyword = format!("colors: [(0, 3, {:?})", gm_schema::SyntaxRole::Keyword);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Patch") && row.contains(&keyword)),
+            "`pub` is a keyword, counted after the sign: {rows:#?}"
+        );
+        page.received(&detail());
+        assert!(page.color_jobs().is_empty(), "an edit is colored once");
     }
 
     #[test]
