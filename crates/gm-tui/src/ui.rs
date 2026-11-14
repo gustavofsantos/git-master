@@ -363,6 +363,8 @@ impl App {
         }
         if narrowed {
             self.notice = Some(split_too_narrow());
+        } else if shown == Layout::Split && self.notice == Some(split_too_narrow()) {
+            self.notice = None;
         }
         self.dirty = true;
     }
@@ -1478,7 +1480,17 @@ impl App {
             self.notice = Some("Select lines of one file to comment on.".to_owned());
             return;
         };
-        // A comment covers a range: from the first line picked to the last.
+        // A comment covers a range of new lines: from the first picked to the last. In Split
+        // a row's removed line may sit apart from its added one in the hunk, so the range is
+        // taken over the new lines only, else rows nobody picked would fall inside it.
+        let new: Vec<usize> = picked
+            .iter()
+            .copied()
+            .filter(|&row| {
+                line_of(&self.repo, group, &path, row).is_some_and(|l| l.new_no.is_some())
+            })
+            .collect();
+        let picked = if new.is_empty() { picked } else { new };
         let (from, to) = (picked[0], picked[picked.len() - 1]);
         let Some(file) = self.repo.files.get(&(group, path.clone())) else {
             return;
@@ -2317,6 +2329,24 @@ mod tests {
                 }
             }]
         );
+    }
+
+    #[test]
+    fn a_comment_on_a_split_row_covers_its_new_line_only() {
+        let now = Instant::now();
+        let mut app = split_app(120, now);
+        key(&mut app, "<down> <down> <down> <down>", now); // the pair two / TWO
+        key(&mut app, "V <space> c", now);
+        key(&mut app, "N o <c-s>", now + Duration::from_millis(1100));
+        // `ONE` sits between `two` and `TWO` in the hunk, but it was not selected.
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [CommandKind::AddReviewComment {
+                start_line: 3,
+                end_line: 3,
+                ..
+            }]
+        ));
     }
 
     #[test]
