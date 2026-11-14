@@ -979,11 +979,11 @@ Re-cut on 2026-11-13 after the author used T1 to T7 and asked for a Magit-like c
 
 **Done when:** in tmux, with the mouse, a person stages a line range, comments on another, an agent over MCP handles the comment and the companion shows it **Handled** without a key press; the page's `Planned` marker is removed; `make check` passes.
 
-## Slice X: extensions (proposed 2026-11-14; D253, Q52 to Q55)
+## Slice X: extensions (planned 2026-11-14; D253, D254)
 
-Requested by the author on 2026-11-14: extend the user interface with Lua scripts that claim a slot of a view and fill it with a typed document both front ends draw, starting with the commit view and the pull request of a commit. Engineering proposal in `design/extensions.md`; nothing is built and no page in `docs/` exists yet.
+Requested by the author on 2026-11-14: extend the user interface with Lua scripts that claim a slot of a view and fill it with a typed document both front ends draw, starting with the commit view and the pull request of a commit. Behaviour in `docs/guide/extensions.md` and `docs/reference/extension-api.md` (`status: planned`); engineering design in `design/extensions.md`.
 
-1. **X0, docs and decisions (to do):** the author answers Q52 to Q55 and confirms D253 (2); `docs/guide/extensions.md` and `docs/reference/extension-api.md` with `status: planned`.
+1. **X0, docs and decisions (done 2026-11-14; D254):** `docs/guide/extensions.md` and `docs/reference/extension-api.md` with `status: planned`.
 2. **X1, engine:** the document types in `gm-schema`, the loader, the read-only `ctx` and `ui` helpers on the workflow sandbox, `RenderSlot`/`SlotRendered` with settle delay, cancellation and cache, trust kind `extension`, `gitmaster extension check` and `render`.
 3. **X2, the commit slot in the window.**
 4. **X3, the commit slot in the terminal companion.**

@@ -1,6 +1,6 @@
 # Extensions: engineering design
 
-> Proposal. The direction comes from the author (D253, 2026-11-14); the shape below is the agent's proposal and is **Proposed** until the author confirms it. Nothing here is built. The user-facing pages in `docs/` are written once the open questions Q52 to Q55 are answered.
+> The direction and the shape are decided (D253, D254, 2026-11-14). The user-facing pages are `docs/guide/extensions.md` and `docs/reference/extension-api.md`; this file records the engineering rationale and the rules the code keeps. Whether workflows stay is still open (Q52).
 
 Last updated: 2026-11-14.
 
@@ -10,7 +10,7 @@ Last updated: 2026-11-14.
 - Extensions are **Lua scripts in a sandbox**, simple files in a known place that expose a known API.
 - An extension **registers itself and claims a piece of the UI**, then **fills it through a communication protocol**.
 - The protocol is **typed** and works for **both front ends**: the window (GPUI) and the terminal companion (ratatui). Each front end renders the result properly; the extension never draws.
-- Start with the **smallest API**: one region, the **commit view**, with a sidebar of extra data about the commit you are looking at. The first example: the GitHub pull request the commit belongs to.
+- Start with the **smallest API**: one region, the **commit view**, with a sidebar of extra data about the commit you are looking at. The first example: the pull request on the code host that brought the commit in.
 - Later, built-in views (for example a history explorer and viewer) are built on the same machinery.
 
 The design canvas boards 12 to 17 (protocol, commit view with extension sections, sidecar, region map, extensions buffer, module chain) are the visual reference. Board 12 sketches an extension as a process in any language that reads JSON on standard input and is registered in `~/.gitconfig`; the author's request of 2026-11-14 replaces that with Lua files in a sandbox. What carries over from the canvas: named regions, a structured document instead of text with escape codes, cancellation when the focus moves, an extensions screen with state and a message log.
@@ -55,7 +55,7 @@ M.meta = {
   name = "github-pr",
   description = "The pull request that brought the commit in",
   api = 1,
-  exec = { "gh" },
+  exec = { "gh" },  -- an open source command-line client of a code host
 }
 
 M.slots = {}
@@ -91,9 +91,9 @@ A slot is a named place the host exposes, with the focus it passes to the extens
 
 | Slot | Where | Focus passed | Status |
 |---|---|---|---|
-| `commit` | GUI: the commit details panel of History, as sections after the native fields and before **Files**. TUI: the Diff screen of a commit, as sections under the commit's header | The commit | First slice |
+| `commit` | GUI: the commit details panel of History, as sections after the native fields and before **Files** (D254 (2)). TUI: the Diff screen of a commit, as sections under the commit's header | The commit | First slice |
 | `blame.run` | A short note per Blame run (canvas board 14, margin) | The run's commit and lines | Later |
-| `sidecar` | A side panel that follows the focus anywhere (canvas board 14) | Whatever has the focus | Later (Q54) |
+| `sidecar` | A side panel that follows the focus anywhere (canvas board 14) | Whatever has the focus | Later |
 | `status.section` | A section of the companion's Status and of the Working Copy | The branch | Later |
 | `palette` | Commands in the palette and the companion's menu | The focus | Later, with actions |
 | `page` | A whole page or screen of its own (`ext/<name>`) | Its own state | Later: the base for built-in views such as a history explorer |
@@ -147,7 +147,7 @@ Rendering is shared where it can be: `gm-view` gets an `ext_doc` model that flat
 5. **Cache.** Results are kept in memory per extension hash, slot and focus (256 entries). Coming back to a commit shows the kept result at once and asks again in the background when it is older than 5 minutes. **Refresh** in the slot's header asks again now.
 6. **Draw.** The native part of the view never waits. While a run is in progress for more than 150 ms the host draws one muted line with the extension's name and a spinner, so the layout does not jump for fast answers. Extensions are drawn in the order of their names; each block ends with a muted line naming the extension, its time and a **Refresh** control.
 
-Budgets per run are those of workflows (D99) with a shorter wall clock: 15 seconds in total, and 10 seconds by default for an `exec`. Exceeding a budget ends the run with the reason, shown in the extension's place.
+Budgets per run are those of workflows (D99) with a shorter wall clock and fewer calls: 15 seconds in total, `exec` and `http` included; 10 seconds by default for one `exec` or `http` call; 50 calls on `ctx`. Exceeding a budget ends the run with the reason, shown in the extension's place.
 
 ## What the script receives
 
@@ -163,7 +163,19 @@ Budgets per run are those of workflows (D99) with a shorter wall clock: 15 secon
 | `ctx.log(text)` | A line in the extension's message log on the extensions screen |
 | `ctx.now()` | The time, as in workflows |
 
-Nothing else in this slice. Reading Git beyond the focus (`ctx.git`, read-only subcommands) and HTTP without an external program (`ctx.http`) are left open (Q53).
+| `ctx.http.get(url, opts)` | An HTTPS `GET` to a host listed in `meta.http`; see below |
+
+Reading Git beyond the focus (`ctx.git`, read-only subcommands) is left for later.
+
+### HTTP (D254 (1))
+
+An extension reaches the network either through a program it runs (`ctx.exec`, the program is the extension's dependency, not the app's) or through the host's own HTTP client, so that an extension needs nothing installed.
+
+- `ctx.http.get(url, { headers, timeout, format, credential })` returns `{ status, text, json, headers, truncated }`. Only `GET`: extensions are read-only. Only `https`. The host must be in `meta.http`, a list of exact host names; any other host fails before a connection is made. Redirects are followed only to listed hosts.
+- `credential = "<host>"` asks Git's credential helper for that host (`git credential fill`, never prompting) and sends the password as `Authorization: Bearer …`, or as basic authentication with `credential_scheme = "basic"`. The host must be in `meta.credentials`. **The script never sees the secret**: the host adds the header, and it is never put in the result, the log or an error. A token typed for Git pushes therefore also serves the extension, with no second place to keep secrets.
+- Response bodies are capped at 1 MiB (`truncated = true` past it); the default timeout is 10 seconds; each request counts against the run's budgets.
+- The client is a Rust library compiled into the binary (`ureq`, already a dependency of the app for author pictures), so the app stays self-contained.
+- The review dialog shows `meta.exec`, `meta.http` and `meta.credentials`: what the extension may run, which hosts it may reach, and which of the person's credentials it may use.
 
 ## Trust
 
@@ -171,7 +183,7 @@ The hash rule of D101 applies unchanged, in the same trust store, with the kind 
 
 - A new or edited file is **unreviewed** and does not run. Its slot shows one line instead: **github-pr is not reviewed. Review…**. Review opens the dialog with the script and the programs of `meta.exec`; confirming marks the hash as reviewed and runs it.
 - An extension an agent writes into the folder therefore never runs before the person has read it.
-- An extension can be turned off on the extensions screen without deleting it.
+- An extension runs in every repository (D254 (3)); it returns nothing where it does not apply. It can be turned off on the extensions screen without deleting it, for all repositories.
 - Output is untrusted: it is data for the host to draw, never instructions. A link to a URL is opened only when the person clicks it.
 
 ## The extensions screen
@@ -191,7 +203,7 @@ As for workflows (D102), one-off subcommands with no resident process:
 
 ## MCP
 
-Not in this design. An agent does not need extensions to reach GitHub; it has its own tools. Whether an agent should read what the slots show for a commit is left for later.
+Not in this design. An agent does not need extensions to reach a code host; it has its own tools. Whether an agent should read what the slots show for a commit is left for later.
 
 ## Performance
 
@@ -209,8 +221,8 @@ The author's longer aim is that new views, such as a history explorer, are built
 
 ## Slices
 
-1. **X0, docs and decisions:** answer Q52 to Q55; `docs/guide/extensions.md` and `docs/reference/extension-api.md` with `status: planned`; confirm D253.
-2. **X1, engine:** `gm-schema::ext` (nodes, validation, JSON Schema); `gm-core::extension` (loader, `meta`/`slots` reading, the sandbox and budgets of `script::luau`, the read-only `ctx`, the `ui` helpers); `RenderSlot`/`SlotRendered` with settle delay, pool, cancellation, cache; trust kind `extension`; `gitmaster extension check` and `render`. Tests: pure tests of validation and the cache; real-Git tests of `render` on a temporary repository with a fake `gh` on `PATH`.
+1. **X0, docs and decisions:** D254; `docs/guide/extensions.md` and `docs/reference/extension-api.md` with `status: planned`.
+2. **X1, engine:** `gm-schema::ext` (nodes, validation, JSON Schema); `gm-core::extension` (loader, `meta`/`slots` reading, the sandbox and budgets of `script::luau`, the read-only `ctx` with `exec` and `http`, the `ui` helpers); `RenderSlot`/`SlotRendered` with settle delay, pool, cancellation, cache; trust kind `extension`; `gitmaster extension check` and `render`. Tests: pure tests of validation and the cache; real-Git tests of `render` on a temporary repository with a fake `gh` on `PATH`.
 3. **X2, the GUI slot:** the commit details panel draws the documents through `gm-view::ext_doc`; loading, error, not reviewed and **Refresh**; links. UI smoke scenario with a local extension that needs no network.
 4. **X3, the TUI slot:** the same on the companion's commit Diff screen; fold with `Tab`, `Enter` on a link.
 5. **X4, the extensions screen** in both front ends, and the review dialog.

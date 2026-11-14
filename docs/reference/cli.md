@@ -276,6 +276,26 @@ Compiles the script in the same sandbox the app uses, and checks that it is a mo
 
 The exit status is `0` when the file has no problem, `1` when it has one, and `2` for a wrong command line.
 
+## Check and render an extension
+
+> **Planned.** The `extension` subcommands are not available yet.
+
+```sh
+gitmaster extension check <file> [--json]
+gitmaster extension render <file> --slot <slot> [--commit <rev>] [--repo <path>] [--json] [--allow-exec]
+```
+
+`check` compiles the extension in the same sandbox the app uses and checks `M.meta` and `M.slots`, with the same output and exit status as [Check a workflow](#check-a-workflow).
+
+`render` runs one slot function for real and prints the document it returns, drawn as the terminal companion draws it, or as JSON with `--json`. It is read-only, like every extension.
+
+- `--slot` names the slot, such as `commit`.
+- `--commit <rev>` is the commit given to the `commit` slot; the default is `HEAD`.
+- `--repo <path>` names the repository. Without it, the repository that contains the current directory is used.
+- `ctx.exec` and `ctx.http.get` run only when the current text of the file is reviewed in the app, or with `--allow-exec`, which you type yourself. Without either, they fail with a message that says so.
+
+The exit status is `0` when the function returned a document or `nil`, `1` when it failed or the file has a problem, and `2` for a wrong command line.
+
 ## Dry run a workflow
 
 > **Planned.** In a dry run, `ctx.stack.tree` and `ctx.stack.stale` return an empty list instead of the real stacks.
