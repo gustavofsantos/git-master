@@ -4,6 +4,7 @@
 mod compare;
 mod conflict;
 mod diff;
+pub mod ext;
 pub mod features;
 mod files;
 mod grep;
