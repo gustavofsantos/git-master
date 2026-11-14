@@ -118,6 +118,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), size);
         return;
     }
+    app.fit_layout(size.width);
     let body = Rect {
         height: size.height - 2,
         ..size
@@ -168,8 +169,8 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let width = usize::from(body.width);
     let mut lines = Vec::with_capacity(height);
     let mut hits = Vec::new();
-    // Each row's background and its gutter's (columns, tint), when the terminal gave tints.
-    let mut backgrounds = Vec::new();
+    // The tinted spans of each row (D250), when the terminal gave tints.
+    let mut backgrounds: Vec<(Rect, palette::Rgb)> = Vec::new();
     for (index, row) in rows.iter().enumerate().skip(scroll).take(height) {
         let y = body.y + u16::try_from(index - scroll).unwrap_or(u16::MAX);
         hits.push(Hit {
@@ -186,7 +187,10 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
         line.spans.insert(0, mark);
         let on = index == cursor;
         match palette::tints() {
-            Some(tints) => backgrounds.push((y, row_tint(tints, app, row, on, selected))),
+            Some(tints) => {
+                let area = Rect::new(body.x, y, body.width, 1);
+                backgrounds.extend(row_backgrounds(tints, app, row, on, selected, area));
+            }
             None if on => line = line.patch_style(ON),
             None => {}
         }
@@ -194,23 +198,8 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     }
     frame.render_widget(Paragraph::new(lines), body);
     let buffer = frame.buffer_mut();
-    for (y, (whole, gutter)) in backgrounds {
-        if let Some((columns, tint)) = gutter {
-            let split = columns.min(body.width);
-            buffer.set_style(
-                Rect::new(body.x, y, split, 1),
-                Style::new().bg(tint.color()),
-            );
-            if let Some(whole) = whole {
-                let rest = Rect::new(body.x + split, y, body.width - split, 1);
-                buffer.set_style(rest, Style::new().bg(whole.color()));
-            }
-        } else if let Some(whole) = whole {
-            buffer.set_style(
-                Rect::new(body.x, y, body.width, 1),
-                Style::new().bg(whole.color()),
-            );
-        }
+    for (area, tint) in backgrounds {
+        buffer.set_style(area.intersection(body), Style::new().bg(tint.color()));
     }
     app.hits.extend(hits);
     app.view_mut().scroll = scroll;
@@ -250,8 +239,8 @@ fn row_change(app: &App, row: &Row<'_, Item>) -> Option<(bool, u16)> {
 /// the selection.
 type RowTint = (Option<palette::Rgb>, Option<(u16, palette::Rgb)>);
 
-fn row_tint(tints: &Tints, app: &App, row: &Row<'_, Item>, on: bool, selected: bool) -> RowTint {
-    match row_change(app, row) {
+fn row_tint(tints: &Tints, change: Option<(bool, u16)>, on: bool, selected: bool) -> RowTint {
+    match change {
         Some((added, gutter)) => {
             let (base, strong, cursor) = if added {
                 (tints.added, tints.added_gutter, tints.added_cursor)
@@ -265,6 +254,71 @@ fn row_tint(tints: &Tints, app: &App, row: &Row<'_, Item>, on: bool, selected: b
         None if selected => (Some(tints.selected), None),
         None => (None, None),
     }
+}
+
+/// The tinted spans of a row in `area`: the whole row, or in Split each side on its own
+/// (D252 (5)).
+fn row_backgrounds(
+    tints: &Tints,
+    app: &App,
+    row: &Row<'_, Item>,
+    on: bool,
+    selected: bool,
+    area: Rect,
+) -> Vec<(Rect, palette::Rgb)> {
+    let spans = |area: Rect, (whole, gutter): RowTint| {
+        let mut out = Vec::new();
+        let split = gutter.map_or(0, |(columns, _)| columns.min(area.width));
+        if let Some((_, strong)) = gutter {
+            out.push((
+                Rect {
+                    width: split,
+                    ..area
+                },
+                strong,
+            ));
+        }
+        if let Some(whole) = whole {
+            let rest = Rect {
+                x: area.x + split,
+                width: area.width - split,
+                ..area
+            };
+            out.push((rest, whole));
+        }
+        out
+    };
+    let Item::Pair {
+        group,
+        path,
+        old,
+        new,
+        ..
+    } = &row.section.item
+    else {
+        return spans(area, row_tint(tints, row_change(app, row), on, selected));
+    };
+    let (left, right) = pair_sides(area.width);
+    let side = |index: Option<usize>, x: u16, width: u16, gutter: u16| {
+        let kind = index
+            .and_then(|i| status::line_of(&app.repo, *group, path, i))
+            .map(|line| line.kind);
+        let change = match kind {
+            Some(LineKind::Added) => Some((true, gutter)),
+            Some(LineKind::Removed) => Some((false, gutter)),
+            _ => None,
+        };
+        let area = Rect {
+            x: area.x + x,
+            width,
+            ..area
+        };
+        spans(area, row_tint(tints, change, on, selected))
+    };
+    // The mark and the space before the left side take its tint.
+    let mut out = side(*old, 0, 2 + left, 2 + SIDE_GUTTER);
+    out.extend(side(*new, 3 + left, right, SIDE_GUTTER));
+    out
 }
 
 fn fold_icon(row: &Row<'_, Item>) -> &'static str {
@@ -323,6 +377,80 @@ fn diff_line(app: &App, group: Group, path: &str, index: usize, width: usize) ->
         return Line::default();
     };
     code_line(line, file.colors.get(&(hunk_index, line_index)), width)
+}
+
+/// The columns of a side's gutter in Split: the number, the sign and a space each side.
+const SIDE_GUTTER: u16 = 8;
+
+/// The widths of the two sides of a Split row `width` columns wide. The row is the
+/// selection mark, a space, the left side, a separator and the right side.
+fn pair_sides(width: u16) -> (u16, u16) {
+    let room = width.saturating_sub(3);
+    let left = room / 2;
+    (left, room - left)
+}
+
+/// A row of a file's diff in Split: the old line on the left, the new on the right, each
+/// with its number, sign and colors (D252).
+fn pair_line(
+    app: &App,
+    group: Group,
+    path: &str,
+    (old, new): (Option<usize>, Option<usize>),
+    width: usize,
+) -> Line<'static> {
+    let (left, right) = pair_sides(u16::try_from(width + 1).unwrap_or(u16::MAX));
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(cell_spans(app, group, path, old, true, usize::from(left)));
+    spans.push(Span::styled("│", DIM));
+    spans.extend(cell_spans(app, group, path, new, false, usize::from(right)));
+    Line::from(spans)
+}
+
+/// One side of a Split row, exactly `width` columns: blank when the side has no line.
+fn cell_spans(
+    app: &App,
+    group: Group,
+    path: &str,
+    row: Option<usize>,
+    old_side: bool,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let file = app.repo.files.get(&(group, path.to_owned()));
+    let line = row.and_then(|row| status::line_of(&app.repo, group, path, row));
+    let (Some(file), Some(row), Some(line)) = (file, row, line) else {
+        return vec![Span::raw(" ".repeat(width))];
+    };
+    let colors = match file.rows.get(row) {
+        Some(DiffRow::Line {
+            hunk_index,
+            line_index,
+            ..
+        }) => file.colors.get(&(*hunk_index, *line_index)),
+        _ => None,
+    };
+    let (sign, sign_style, whole) = match line.kind {
+        LineKind::Added => ("+", color(Color::Green), None),
+        // Without tints a removed line is red, as in Unified (D251 (3)).
+        LineKind::Removed => (
+            "-",
+            color(Color::Red),
+            palette::tints().is_none().then(|| color(Color::Red)),
+        ),
+        LineKind::Context => (" ", DIM, None),
+    };
+    let number = if old_side { line.old_no } else { line.new_no };
+    let number = number.map_or_else(
+        || " ".repeat(NUMBER_WIDTH),
+        |no| format!("{no:>NUMBER_WIDTH$}"),
+    );
+    let gutter = usize::from(SIDE_GUTTER);
+    let mut spans = vec![Span::styled(format!("{number} {sign} "), sign_style)];
+    let code = code_spans(&line.text, colors, whole, width.saturating_sub(gutter));
+    let used: usize = code.iter().map(|span| span.content.chars().count()).sum();
+    spans.extend(code);
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(gutter + used))));
+    spans
 }
 
 /// A row of the Commits and Stashes sections.
@@ -690,6 +818,13 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             path,
             row: index,
         } => diff_line(app, *group, path, *index, width),
+        Item::Pair {
+            group,
+            path,
+            old,
+            new,
+            ..
+        } => pair_line(app, *group, path, (*old, *new), width),
         Item::Card { id, part } => card_line(app, *id, part),
         Item::Heading(Heading::Outdated { count, open }) => Line::styled(
             format!(

@@ -38,7 +38,7 @@ impl DiffKind {
 }
 
 /// The Diff screen's sections: what it compares, then each file unfolded into its hunks.
-pub fn diff(repo: &Repo, kind: &DiffKind, opened: Opened<'_>) -> Vec<Section<Item>> {
+pub fn diff(repo: &Repo, kind: &DiffKind, opened: Opened<'_>, split: bool) -> Vec<Section<Item>> {
     let header = |label, text: String| Section::leaf(label, Item::Header { label, text });
     let note = |id: &str, text: &str| Section::leaf(id, Item::Note(text.to_owned()));
     let mut out = Vec::new();
@@ -94,7 +94,7 @@ pub fn diff(repo: &Repo, kind: &DiffKind, opened: Opened<'_>) -> Vec<Section<Ite
                 counts,
                 threads: 0,
             },
-            file_children(repo, group, &path, file, opened),
+            file_children(repo, group, &path, file, opened, split),
         ));
     }
     out

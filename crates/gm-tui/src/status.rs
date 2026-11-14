@@ -3,11 +3,11 @@
 //! its hunks and lines with the review threads under the lines they are about, laid out by
 //! `gm_view::review::notes`, as the app's diff lays them out.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use gm_schema::{Change, ReviewStatus, StackState, StatusEntry};
-use gm_view::diff_rows::{self, Row as DiffRow};
+use gm_view::diff_rows::{self, Cell, Row as DiffRow, SplitRow, SplitRows};
 use gm_view::local_review::{Filter, Version};
 use gm_view::provenance_view::Row;
 use gm_view::review::{self, Entry, Heading, Opened, Part};
@@ -59,6 +59,15 @@ pub enum Item {
         group: Group,
         path: String,
         row: usize,
+    },
+    /// A row of a file's diff in the Split layout (D252): its split row, and the `gm_view`
+    /// rows of its old and new cells (a context line is the same row on both sides).
+    Pair {
+        group: Group,
+        path: String,
+        row: usize,
+        old: Option<usize>,
+        new: Option<usize>,
     },
     /// A row of a review thread drawn under its lines.
     Card {
@@ -160,8 +169,15 @@ impl Item {
                 part: Part::Text(text) | Part::Folded(text),
                 ..
             } => text.clone(),
-            Item::Line { group, path, row } => {
-                line_of(repo, *group, path, *row).map_or_default(|line| line.text.clone())
+            Item::Line { .. } | Item::Pair { .. } => {
+                let Some((group, path, rows)) = self.diff_rows() else {
+                    return String::new();
+                };
+                rows.iter()
+                    .filter_map(|row| line_of(repo, group, path, *row))
+                    .map(|line| line.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             }
             Item::Thread { id } => repo.comment(*id).map_or_default(|c| c.body.clone()),
             Item::Commit { index } => repo
@@ -210,7 +226,43 @@ impl Item {
         match self {
             Item::File { group, path, .. }
             | Item::Hunk { group, path, .. }
-            | Item::Line { group, path, .. } => Some((*group, path.as_str())),
+            | Item::Line { group, path, .. }
+            | Item::Pair { group, path, .. } => Some((*group, path.as_str())),
+            _ => None,
+        }
+    }
+
+    /// The file and the `gm_view` diff rows a row holds: a line's one row, a pair's old and
+    /// new (once when they are the same context line).
+    pub fn diff_rows(&self) -> Option<(Group, &str, Vec<usize>)> {
+        match self {
+            Item::Line { group, path, row } => Some((*group, path.as_str(), vec![*row])),
+            Item::Pair {
+                group,
+                path,
+                old,
+                new,
+                ..
+            } => {
+                let mut rows: Vec<usize> = old.iter().chain(new).copied().collect();
+                rows.dedup();
+                Some((*group, path.as_str(), rows))
+            }
+            _ => None,
+        }
+    }
+
+    /// The diff row that stands for a row: a line's, a pair's new line, else its old one.
+    pub fn diff_row(&self) -> Option<(Group, &str, usize)> {
+        match self {
+            Item::Line { group, path, row } => Some((*group, path.as_str(), *row)),
+            Item::Pair {
+                group,
+                path,
+                old,
+                new,
+                ..
+            } => Some((*group, path.as_str(), new.or(*old)?)),
             _ => None,
         }
     }
@@ -337,6 +389,7 @@ pub fn file_children(
     path: &str,
     file: Option<&FileData>,
     opened: Opened<'_>,
+    in_split: bool,
 ) -> Vec<Section<Item>> {
     let id = |kind: &str, rest: String| format!("{kind}/{group:?}/{path}/{rest}");
     let note = |text: &str| {
@@ -371,33 +424,36 @@ pub fn file_children(
         &repo.comments
     };
     let notes = review::notes(&file.rows, diffs, &split, comments, path, opened);
+    let lines = line_rows(file);
+    let listing = if in_split { notes.split } else { notes.unified };
     let mut top: Vec<Section<Item>> = Vec::new();
     let mut hunks: Vec<Section<Item>> = Vec::new();
     let mut cards = 0usize;
-    for entry in notes.unified.entries {
+    for entry in listing.entries {
         let section = match entry {
-            Entry::Diff(row) => match file.rows[row] {
-                DiffRow::HunkHeader { hunk_index, .. } => {
-                    hunks.push(Section::with(
-                        id("hunk", hunk_index.to_string()),
-                        Item::Hunk {
-                            group,
-                            path: path.to_owned(),
-                            hunk: hunk_index,
-                        },
-                        Vec::new(),
-                    ));
-                    continue;
+            Entry::Diff(row) => {
+                let laid = if in_split {
+                    split_entry(&split, &lines, group, path, row)
+                } else {
+                    unified_entry(file, group, path, row)
+                };
+                match laid {
+                    Some(Laid::Hunk(hunk)) => {
+                        hunks.push(Section::with(
+                            id("hunk", hunk.to_string()),
+                            Item::Hunk {
+                                group,
+                                path: path.to_owned(),
+                                hunk,
+                            },
+                            Vec::new(),
+                        ));
+                        continue;
+                    }
+                    Some(Laid::Row(kind, item)) => Section::leaf(id(kind, row.to_string()), item),
+                    None => continue,
                 }
-                _ => Section::leaf(
-                    id("line", row.to_string()),
-                    Item::Line {
-                        group,
-                        path: path.to_owned(),
-                        row,
-                    },
-                ),
-            },
+            }
             Entry::Card { id: comment, part } => {
                 cards += 1;
                 Section::leaf(
@@ -417,6 +473,70 @@ pub fn file_children(
     }
     top.extend(hunks);
     top
+}
+
+/// A diff row of a file's listing: the hunk it opens, or its row's kind and item.
+enum Laid {
+    Hunk(usize),
+    Row(&'static str, Item),
+}
+
+/// The `gm_view` row of each line of a file, by hunk and line index.
+fn line_rows(file: &FileData) -> HashMap<(usize, usize), usize> {
+    file.rows
+        .iter()
+        .enumerate()
+        .filter_map(|(row, kind)| match *kind {
+            DiffRow::Line {
+                hunk_index,
+                line_index,
+                ..
+            } => Some(((hunk_index, line_index), row)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn unified_entry(file: &FileData, group: Group, path: &str, row: usize) -> Option<Laid> {
+    Some(match file.rows.get(row)? {
+        DiffRow::HunkHeader { hunk_index, .. } => Laid::Hunk(*hunk_index),
+        _ => Laid::Row(
+            "line",
+            Item::Line {
+                group,
+                path: path.to_owned(),
+                row,
+            },
+        ),
+    })
+}
+
+/// Split row `row`: a pair holds the unified rows of its two cells (D252 (4)).
+fn split_entry(
+    split: &SplitRows,
+    lines: &HashMap<(usize, usize), usize>,
+    group: Group,
+    path: &str,
+    row: usize,
+) -> Option<Laid> {
+    let cell_row = |cell: Option<Cell>| {
+        let (_, hunk, line) = cell?.key;
+        lines.get(&(hunk, line)).copied()
+    };
+    match *split.rows.get(row)? {
+        SplitRow::HunkHeader { hunk_index, .. } => Some(Laid::Hunk(hunk_index)),
+        SplitRow::Pair { old, new } => Some(Laid::Row(
+            "pair",
+            Item::Pair {
+                group,
+                path: path.to_owned(),
+                row,
+                old: cell_row(old),
+                new: cell_row(new),
+            },
+        )),
+        SplitRow::Banner(_) => None,
+    }
 }
 
 /// The branches from the root of HEAD's stack to HEAD, and what is due on HEAD's branch;
@@ -544,11 +664,12 @@ fn headers(repo: &Repo) -> Vec<Section<Item>> {
 }
 
 /// The Status screen's sections for what the repository holds now.
-pub fn sections(repo: &Repo, opened: Opened<'_>) -> Vec<Section<Item>> {
+/// `split` lays the diffs out in Split (D252).
+pub fn sections(repo: &Repo, opened: Opened<'_>, split: bool) -> Vec<Section<Item>> {
     let mut out = headers(repo);
     let mut any = false;
     for group in [Group::Untracked, Group::Unstaged, Group::Staged] {
-        if let Some(section) = group_section(repo, group, opened) {
+        if let Some(section) = group_section(repo, group, opened, split) {
             any = true;
             out.push(section);
         }
@@ -566,7 +687,12 @@ pub fn sections(repo: &Repo, opened: Opened<'_>) -> Vec<Section<Item>> {
 }
 
 /// A group of files and what unfolds under them; `None` when it has no file.
-fn group_section(repo: &Repo, group: Group, opened: Opened<'_>) -> Option<Section<Item>> {
+fn group_section(
+    repo: &Repo,
+    group: Group,
+    opened: Opened<'_>,
+    split: bool,
+) -> Option<Section<Item>> {
     let files = files_of(repo, group);
     if files.is_empty() {
         return None;
@@ -589,7 +715,7 @@ fn group_section(repo: &Repo, group: Group, opened: Opened<'_>) -> Option<Sectio
                     counts,
                     threads,
                 },
-                file_children(repo, group, &path, file, opened),
+                file_children(repo, group, &path, file, opened, split),
             )
             .folded()
         })

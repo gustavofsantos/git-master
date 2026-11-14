@@ -148,7 +148,13 @@ fn run(opened: Opened) -> io::Result<()> {
     } = opened;
     let mut colorer = Colorer::start()?;
     let mut screen = Screen::take()?;
+    let root = std::path::PathBuf::from(&status.root);
     let mut app = App::new(status);
+    // The layout the app uses, for this session only (D252 (2)).
+    let settings = gm_core::settings::Settings::load(&root, &gm_core::settings::Source::default());
+    if settings.diff_layout == gm_core::settings::DiffLayout::Split {
+        app.layout = gm_view::diff_rows::Layout::Split;
+    }
     loop {
         // A prompt's keys light up when its guard opens (D242 (5)).
         if app.guard_closed(std::time::Instant::now()) {

@@ -11,7 +11,7 @@ use gm_schema::{
     ReviewAuthorFilter, ReviewStatus, StageTarget,
 };
 use gm_view::compose::{self, ReviewTarget};
-use gm_view::diff_rows::Row as DiffRow;
+use gm_view::diff_rows::{Layout, Row as DiffRow};
 use gm_view::local_review::Filter;
 use gm_view::review::{self, Opened};
 use ratatui::crossterm::event::{KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
@@ -230,6 +230,13 @@ enum Pending {
     Text,
 }
 
+/// The narrowest terminal that shows the Split layout (D252 (3)).
+pub const SPLIT_MIN_WIDTH: u16 = 100;
+
+fn split_too_narrow() -> String {
+    format!("Split needs {SPLIT_MIN_WIDTH} columns: the diffs are shown Unified.")
+}
+
 pub struct App {
     pub repo: Repo,
     /// The read of the file the File screen shows, whose colors follow its answer.
@@ -258,6 +265,12 @@ pub struct App {
     reveal: Option<i64>,
     commands: Vec<CommandKind>,
     color_jobs: Vec<ColorJob>,
+    /// The layout chosen for the diffs (D252), and whether the terminal is wide enough to
+    /// show it: Split falls back to Unified in a narrow one.
+    pub layout: Layout,
+    shown_layout: Layout,
+    /// The terminal's width at the last draw.
+    width: u16,
     /// Diffs asked for, in the order their commands go out, to match them to their ids.
     asked: VecDeque<(Group, String)>,
     in_flight: HashMap<OperationId, Pending>,
@@ -299,6 +312,9 @@ impl App {
             reveal: None,
             commands: Vec::new(),
             color_jobs: Vec::new(),
+            layout: Layout::Unified,
+            shown_layout: Layout::Unified,
+            width: u16::MAX,
             asked: VecDeque::new(),
             in_flight: HashMap::new(),
             range_head: None,
@@ -306,6 +322,49 @@ impl App {
         app.rebuild();
         app.ask_for_reads();
         app
+    }
+
+    /// Shows the diffs in the chosen layout if `width` columns hold it (D252 (3)), keeping
+    /// the cursor of each screen on the same diff line.
+    pub fn fit_layout(&mut self, width: u16) {
+        self.width = width;
+        let shown = if width >= SPLIT_MIN_WIDTH {
+            self.layout
+        } else {
+            Layout::Unified
+        };
+        if shown == self.shown_layout {
+            return;
+        }
+        let narrowed = self.shown_layout == Layout::Split && self.layout == Layout::Split;
+        let at: Vec<Option<(Group, String, usize)>> = self
+            .stack
+            .iter_mut()
+            .map(|screen| {
+                let item = &screen.view().tree.current()?.item;
+                let (group, path, row) = item.diff_row()?;
+                Some((group, path.to_owned(), row))
+            })
+            .collect();
+        self.shown_layout = shown;
+        self.rebuild();
+        for (screen, at) in self.stack.iter_mut().zip(at) {
+            let Some((group, path, row)) = at else {
+                continue;
+            };
+            let tree = &mut screen.view_mut().tree;
+            let id = tree.rows().iter().find_map(|r| {
+                let (g, p, rows) = r.section.item.diff_rows()?;
+                (g == group && p == path && rows.contains(&row)).then(|| r.section.id.clone())
+            });
+            if let Some(id) = id {
+                tree.move_to_id(&id);
+            }
+        }
+        if narrowed {
+            self.notice = Some(split_too_narrow());
+        }
+        self.dirty = true;
     }
 
     pub fn take_commands(&mut self) -> Vec<CommandKind> {
@@ -834,7 +893,7 @@ impl App {
             comments: &self.opened,
             threads: &self.expanded,
         };
-        let sections = status::sections(&self.repo, opened);
+        let sections = status::sections(&self.repo, opened, self.shown_layout == Layout::Split);
         self.status_tree_mut().set(sections);
         let missing: Vec<(Group, String)> = status::unfolded_files(self.status_tree().toggled())
             .into_iter()
@@ -852,10 +911,11 @@ impl App {
                 comments: &self.opened,
                 threads: &self.expanded,
             };
-            let sections = status::sections(&self.repo, opened);
+            let sections = status::sections(&self.repo, opened, self.shown_layout == Layout::Split);
             self.status_tree_mut().set(sections);
         }
         let repo = &self.repo;
+        let split = self.shown_layout == Layout::Split;
         let opened = Opened {
             outdated: self.outdated_open,
             comments: &self.opened,
@@ -869,7 +929,7 @@ impl App {
                 }
                 Screen::Thread { view, page } => view.tree.set(page.sections(repo)),
                 Screen::Diff { view, kind } => {
-                    view.tree.set(diff_screen::diff(repo, kind, opened));
+                    view.tree.set(diff_screen::diff(repo, kind, opened, split));
                     let group = kind.group();
                     wanted.extend(
                         status::files_of(repo, group)
@@ -1185,7 +1245,7 @@ impl App {
                 .and_then(Item::file)
                 .is_some_and(|(g, _)| g.stages() == Some(true)),
             "review.comment" => {
-                self.tree().selection().is_some() || matches!(current, Some(Item::Line { .. }))
+                self.tree().selection().is_some() || current.and_then(Item::diff_row).is_some()
             }
             "thread.reply" => thread.is_some_and(|c| review::can_reply(c.status)),
             "thread.resolve" => thread.is_some_and(|c| c.status != ReviewStatus::Resolved),
@@ -1286,27 +1346,27 @@ impl App {
     }
 
     /// The diff rows a selection, or the line at the cursor, covers in one file: the file and
-    /// the first and last of its `gm_view` rows. `None` over several files or on no line.
-    fn picked_rows(&self) -> Option<(Group, String, usize, usize)> {
+    /// its `gm_view` rows, in order. `None` over several files or on no line. In Split, a
+    /// row's two lines are taken, and only those: the rows between are not (D252 (4)).
+    fn picked_rows(&self) -> Option<(Group, String, Vec<usize>)> {
         let rows = self.tree().rows();
         let (first, last) = self
             .tree()
             .selection()
             .or_else(|| self.tree().cursor_index().map(|at| (at, at)))?;
         let mut file: Option<(Group, String)> = None;
-        let mut span: Option<(usize, usize)> = None;
+        let mut picked: BTreeSet<usize> = BTreeSet::new();
         for row in &rows[first..=last.min(rows.len().saturating_sub(1))] {
-            if let Item::Line { group, path, row } = &row.section.item {
-                if file.as_ref().is_some_and(|(g, p)| g != group || p != path) {
+            if let Some((group, path, held)) = row.section.item.diff_rows() {
+                if file.as_ref().is_some_and(|(g, p)| *g != group || p != path) {
                     return None;
                 }
-                file = Some((*group, path.clone()));
-                span = Some(span.map_or((*row, *row), |(a, b)| (a.min(*row), b.max(*row))));
+                file = Some((group, path.to_owned()));
+                picked.extend(held);
             }
         }
         let (group, path) = file?;
-        let (from, to) = span?;
-        Some((group, path, from, to))
+        (!picked.is_empty()).then(|| (group, path, picked.into_iter().collect()))
     }
 
     fn stage(&mut self, stage: bool) {
@@ -1318,7 +1378,7 @@ impl App {
             }
         };
         if self.tree().selection().is_some() {
-            let Some((group, path, from, to)) = self.picked_rows() else {
+            let Some((group, path, picked)) = self.picked_rows() else {
                 self.notice = Some("Select lines of one file to stage them.".to_owned());
                 return;
             };
@@ -1327,7 +1387,7 @@ impl App {
             };
             let Some(diff) = &file.diff else { return };
             let mut per_hunk: Vec<(usize, Vec<u32>)> = Vec::new();
-            for row in &file.rows[from..=to] {
+            for row in picked.iter().filter_map(|&row| file.rows.get(row)) {
                 let DiffRow::Line {
                     hunk_index,
                     line_index,
@@ -1365,6 +1425,15 @@ impl App {
         }
         let Some(item) = self.tree().current().map(|s| s.item.clone()) else {
             return;
+        };
+        // A Split row stages the hunk of its line, as a Unified line does.
+        let item = match item.diff_row() {
+            Some((group, path, row)) => Item::Line {
+                group,
+                path: path.to_owned(),
+                row,
+            },
+            None => item,
         };
         let on_line = matches!(item, Item::Line { .. });
         let targets: Vec<StageTarget> = match item {
@@ -1405,10 +1474,12 @@ impl App {
     }
 
     fn open_comment(&mut self, now: Instant) {
-        let Some((group, path, from, to)) = self.picked_rows() else {
+        let Some((group, path, picked)) = self.picked_rows() else {
             self.notice = Some("Select lines of one file to comment on.".to_owned());
             return;
         };
+        // A comment covers a range: from the first line picked to the last.
+        let (from, to) = (picked[0], picked[picked.len() - 1]);
         let Some(file) = self.repo.files.get(&(group, path.clone())) else {
             return;
         };
@@ -1453,6 +1524,16 @@ impl App {
                 }
             }
             "go.branch" => self.open_diff(DiffKind::Branch),
+            "diff.layout" => {
+                self.layout = match self.layout {
+                    Layout::Unified => Layout::Split,
+                    Layout::Split => Layout::Unified,
+                };
+                self.fit_layout(self.width);
+                if self.layout != self.shown_layout {
+                    self.notice = Some(split_too_narrow());
+                }
+            }
             "blame.open" => {
                 if let Some((path, line)) = self.current_file() {
                     self.open_blame(path, line);
@@ -1497,23 +1578,26 @@ impl App {
 
     /// The file and line `Enter` opens in the editor: a line of a diff or of the File screen.
     fn edit_target(&self) -> Option<(String, u32)> {
-        match &self.tree().current()?.item {
+        let item = &self.tree().current()?.item;
+        match item.diff_row() {
             // A removed line opens at its old number, near where it was.
-            Item::Line { group, path, row } => {
-                let line = line_of(&self.repo, *group, path, *row)?;
-                Some((path.clone(), line.new_no.or(line.old_no)?))
+            Some((group, path, row)) => {
+                let line = line_of(&self.repo, group, path, row)?;
+                Some((path.to_owned(), line.new_no.or(line.old_no)?))
             }
-            item => self.numbered(item),
+            None => self.numbered(item),
         }
     }
 
     /// The file and the line number in the working tree of a line row: a diff line's new
     /// number, a File line, a Blame line.
     fn numbered(&self, item: &Item) -> Option<(String, u32)> {
-        match item {
-            Item::Line { group, path, row } => line_of(&self.repo, *group, path, *row)
+        if let Some((group, path, row)) = item.diff_row() {
+            return line_of(&self.repo, group, path, row)
                 .and_then(|line| line.new_no)
-                .map(|n| (path.clone(), n)),
+                .map(|n| (path.to_owned(), n));
+        }
+        match item {
             Item::FileLine { index, .. } => {
                 let file = self.repo.file.as_ref()?;
                 Some((file.path.clone(), u32::try_from(index + 1).ok()?))
@@ -1591,12 +1675,10 @@ impl App {
             return Some((path.clone(), None));
         }
         let (_, path) = item.file()?;
-        let line = match item {
-            Item::Line { group, path, row } => {
-                line_of(&self.repo, *group, path, *row).and_then(|l| l.new_no)
-            }
-            _ => None,
-        };
+        let line = item
+            .diff_row()
+            .and_then(|(group, path, row)| line_of(&self.repo, group, path, row))
+            .and_then(|l| l.new_no);
         Some((path.to_owned(), line))
     }
 
@@ -1776,8 +1858,9 @@ impl App {
     /// Puts `@path:lines` of the selection, the line or the file at the cursor on the clipboard.
     fn copy_reference(&mut self) {
         let reference = match self.picked_rows() {
-            Some((group, path, from, to)) => {
-                let numbers: Vec<u32> = (from..=to)
+            Some((group, path, picked)) => {
+                let numbers: Vec<u32> = picked
+                    .into_iter()
                     .filter_map(|row| line_of(&self.repo, group, &path, row))
                     .filter_map(|line| line.new_no)
                     .collect();
@@ -1853,7 +1936,7 @@ impl App {
             Some(Item::Group { group, count }) => format!("{} ({count})", group.title()),
             Some(Item::File { path, .. }) => path.clone(),
             Some(Item::Hunk { path, hunk, .. }) => format!("Hunk {} · {path}", hunk + 1),
-            Some(Item::Line { path, .. }) => format!("Line · {path}"),
+            Some(Item::Line { path, .. } | Item::Pair { path, .. }) => format!("Line · {path}"),
             Some(Item::Card { id, .. } | Item::Thread { id }) => format!("Thread {id}"),
             _ => "Status".to_owned(),
         }
@@ -1869,6 +1952,7 @@ fn status_files(repo: &Repo, group: Group) -> Vec<String> {
             comments: &BTreeSet::new(),
             threads: &BTreeSet::new(),
         },
+        false,
     );
     rows.into_iter()
         .find(|s| s.id == format!("group/{group:?}"))
@@ -2150,6 +2234,176 @@ mod tests {
             }]
         );
         assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    /// A hunk whose two removed lines are replaced by two added ones: Split pairs the first
+    /// removed with the first added, so a pair is not a span of the unified rows.
+    fn two_for_two() -> FileDiff {
+        let line = |kind, text: &str, old_no, new_no| DiffLine {
+            kind,
+            old_no,
+            new_no,
+            text: text.to_owned(),
+            no_newline: false,
+        };
+        FileDiff {
+            path: "src/lib.rs".to_owned(),
+            old_path: None,
+            binary: false,
+            hunks: vec![Hunk {
+                id: HunkId("h1".to_owned()),
+                old_start: 1,
+                old_lines: 4,
+                new_start: 1,
+                new_lines: 4,
+                header: String::new(),
+                lines: vec![
+                    line(LineKind::Context, "fn a() {", Some(1), Some(1)),
+                    line(LineKind::Removed, "    one();", Some(2), None),
+                    line(LineKind::Removed, "    two();", Some(3), None),
+                    line(LineKind::Added, "    ONE();", None, Some(2)),
+                    line(LineKind::Added, "    TWO();", None, Some(3)),
+                    line(LineKind::Context, "}", Some(4), Some(4)),
+                ],
+            }],
+        }
+    }
+
+    /// An app `width` columns wide in Split, with src/lib.rs unfolded on `two_for_two`.
+    fn split_app(width: u16, now: Instant) -> App {
+        let mut app = app();
+        app.layout = Layout::Split;
+        app.fit_layout(width);
+        app.tree_mut().move_to_id("file/Unstaged/src/lib.rs");
+        key(&mut app, "<tab>", now);
+        let asked = app.take_commands();
+        app.sent(OperationId(7), &asked[0]);
+        app.apply(&Event::DiffLoaded {
+            id: OperationId(7),
+            side: gm_schema::DiffSide::Unstaged,
+            diff: two_for_two(),
+        });
+        app.take_color_jobs();
+        app
+    }
+
+    #[test]
+    fn selecting_a_split_row_stages_its_two_lines_and_no_others() {
+        let now = Instant::now();
+        let mut app = split_app(120, now);
+        // The file, the hunk, the context pair, then the first changed pair.
+        key(&mut app, "<down> <down> <down>", now);
+        assert!(
+            matches!(
+                app.tree().current().map(|s| &s.item),
+                Some(Item::Pair {
+                    old: Some(_),
+                    new: Some(_),
+                    ..
+                })
+            ),
+            "{:?}",
+            shown(&app)
+        );
+        key(&mut app, "V <space> s", now);
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::Stage {
+                target: StageTarget::Lines {
+                    path: "src/lib.rs".to_owned(),
+                    hunk: HunkId("h1".to_owned()),
+                    // `one` and `ONE`; `two`, between them in the hunk, is not selected.
+                    lines: vec![1, 3]
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn switching_the_layout_keeps_the_cursor_on_its_line() {
+        let now = Instant::now();
+        let mut app = split_app(120, now);
+        key(&mut app, "<down> <down> <down> <down>", now); // the pair two / TWO
+        key(&mut app, "<space> d s", now);
+        assert_eq!(app.layout, Layout::Unified);
+        assert!(matches!(
+            app.tree().current().map(|s| &s.item),
+            Some(Item::Line { row: 5, .. })
+        ));
+        assert_eq!(app.edit_target(), Some(("src/lib.rs".to_owned(), 3)));
+        key(&mut app, "<space> d s", now);
+        assert!(matches!(
+            app.tree().current().map(|s| &s.item),
+            Some(Item::Pair { new: Some(5), .. })
+        ));
+    }
+
+    #[test]
+    fn split_chosen_before_a_diff_is_read_lays_it_out_split() {
+        let now = Instant::now();
+        let mut app = app();
+        app.fit_layout(120);
+        key(&mut app, "<space> d s", now);
+        assert_eq!(app.layout, Layout::Split);
+        app.tree_mut().move_to_id("file/Unstaged/src/lib.rs");
+        key(&mut app, "<tab>", now);
+        let asked = app.take_commands();
+        app.sent(OperationId(7), &asked[0]);
+        app.apply(&Event::DiffLoaded {
+            id: OperationId(7),
+            side: gm_schema::DiffSide::Unstaged,
+            diff: two_for_two(),
+        });
+        app.fit_layout(120);
+        assert!(
+            shown(&app).iter().any(|row| row.contains("Pair {")),
+            "{:?}",
+            shown(&app)
+        );
+    }
+
+    #[test]
+    fn a_narrow_terminal_shows_split_as_unified_and_says_why() {
+        let now = Instant::now();
+        let mut app = split_app(90, now);
+        assert!(shown(&app).iter().any(|row| row.contains("Line {")));
+        assert!(!shown(&app).iter().any(|row| row.contains("Pair {")));
+        // Widening the terminal brings Split back.
+        app.fit_layout(120);
+        assert!(shown(&app).iter().any(|row| row.contains("Pair {")));
+        app.fit_layout(90);
+        assert_eq!(app.notice.as_deref(), Some(split_too_narrow().as_str()));
+    }
+
+    #[test]
+    fn a_split_row_draws_the_old_line_beside_the_new_one() {
+        let now = Instant::now();
+        let mut app = split_app(120, now);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::draw::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        let row = rows
+            .iter()
+            .find(|row| row.contains("one();"))
+            .expect("the pair is drawn");
+        assert!(row.contains("ONE();"), "{row}");
+        assert!(
+            row.contains("    2 - ") && row.contains("    2 + "),
+            "{row}"
+        );
+        let separator = row.find('│').unwrap();
+        assert!(row.find("one();").unwrap() < separator);
+        assert!(row.find("ONE();").unwrap() > separator);
     }
 
     #[test]

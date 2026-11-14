@@ -362,6 +362,14 @@ const SPECS: &[Spec] = &[
         OneShot,
     ),
     spec(
+        "diff.layout",
+        "split / unified",
+        "Switch the diffs between Unified and Split.",
+        "Diff",
+        MOVE,
+        OneShot,
+    ),
+    spec(
         "go.branch",
         "branch changes",
         "Show the branch's changes against its base.",
@@ -511,6 +519,7 @@ const NORMAL: &[(&str, &str)] = &[
     ("<space> f a", "filter.agent"),
     ("<space> f A", "filter.all"),
     ("<space> d b", "go.branch"),
+    ("<space> d s", "diff.layout"),
     ("<space> ?", "help.keys"),
 ];
 
