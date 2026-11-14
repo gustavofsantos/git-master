@@ -63,6 +63,7 @@ sha2.workspace = true
 tempfile.workspace = true
 rusqlite.workspace = true
 mlua.workspace = true
+ureq = "3"
 tree-sitter.workspace = true
 tree-sitter-rust = { workspace = true, optional = true }
 tree-sitter-python = { workspace = true, optional = true }

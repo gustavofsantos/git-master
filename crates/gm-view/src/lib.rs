@@ -5,6 +5,7 @@
 
 pub mod compose;
 pub mod diff_rows;
+pub mod ext_doc;
 pub mod local_review;
 pub mod provenance_view;
 pub mod review;

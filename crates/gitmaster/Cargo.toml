@@ -22,6 +22,7 @@ preview = []
 [dependencies]
 gm-core.workspace = true
 gm-schema.workspace = true
+gm-view.workspace = true
 gm-ui.workspace = true
 gm-mcp.workspace = true
 gm-tui.workspace = true

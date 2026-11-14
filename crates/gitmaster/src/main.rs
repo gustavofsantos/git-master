@@ -44,6 +44,10 @@ fn main() {
         let words: Vec<String> = args.collect();
         std::process::exit(workflow_command(&words));
     }
+    if first.as_deref() == Some("extension") {
+        let words: Vec<String> = args.collect();
+        std::process::exit(extension_command(&words));
+    }
     if first.as_deref() == Some("tui") {
         // The terminal companion (D235): no window, no GPUI.
         let words: Vec<String> = args.collect();
@@ -168,6 +172,37 @@ fn workflow_command(words: &[String]) -> i32 {
         }
     };
     let result = gm_core::script::cli::run(words, &gm_core::script::luau::LuauEngine::new(), &cwd);
+    print!("{}", result.out);
+    eprint!("{}", result.err);
+    result.code
+}
+
+/// `gitmaster extension check | render` (docs/reference/cli.md). Read-only, like every extension.
+fn extension_command(words: &[String]) -> i32 {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("gitmaster: {error}");
+            return 1;
+        }
+    };
+    let trust = gm_core::script::trust::default_file()
+        .and_then(|file| gm_core::script::trust::TrustStore::open(&file).ok());
+    let is_reviewed = |hash: &str| {
+        trust
+            .as_ref()
+            .is_some_and(|store| store.is_reviewed(hash).unwrap_or(false))
+    };
+    let outside = gm_core::extension::cli::Outside {
+        is_reviewed: &is_reviewed,
+        draw: &gm_view::ext_doc::to_text,
+    };
+    let result = gm_core::extension::cli::run(
+        words,
+        &gm_core::script::luau::LuauEngine::new(),
+        &cwd,
+        &outside,
+    );
     print!("{}", result.out);
     eprint!("{}", result.err);
     result.code

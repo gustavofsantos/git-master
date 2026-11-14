@@ -14,6 +14,7 @@ pub mod contexts;
 mod contexts_session;
 pub mod diff;
 mod engine;
+pub mod extension;
 pub mod external_editor;
 pub mod fake;
 pub mod file_index;
