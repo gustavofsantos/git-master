@@ -26,7 +26,7 @@ The terminal must be at least 80 columns wide and 24 rows high. A smaller termin
 
 The terminal must use a Nerd Font: the companion draws its icons, such as the branch, the folders, the file types and the status of a thread, with Nerd Font glyphs, and has no other set. With another font they show as empty boxes.
 
-The companion uses your terminal's colors, so it matches your terminal theme and your tmux theme. Set `NO_COLOR` to anything to turn colors off. It keeps itself up to date: when a file changes, when the agent stages something or when the agent answers a thread, the screen refreshes by itself.
+The companion uses your terminal's colors, so it matches your terminal theme and your tmux theme. At start it asks the terminal for its palette and blends those colors into soft backgrounds: the line under the cursor, the selected lines, and added and removed lines tinted with your terminal's green and red. Through tmux this works as it does in the terminal itself. A terminal that does not answer, or that does not set `COLORTERM` to `truecolor` or `24bit`, gets no backgrounds: the line under the cursor is shown reversed. Set `NO_COLOR` to anything to turn colors off. It keeps itself up to date: when a file changes, when the agent stages something or when the agent answers a thread, the screen refreshes by itself.
 
 ## Screens
 
