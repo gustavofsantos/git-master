@@ -71,7 +71,7 @@ When you change a preference in the app, it is written to `~/.gitconfig` (`git c
 
 | Key | Values | Default | Meaning |
 |---|---|---|---|
-| `gitmaster.diffLayout` | `unified`, `split` | `unified` | The layout of the diff, set by the **Unified** or **Split** selector. The choice applies to the Working Copy diff and to the commit diff. |
+| `gitmaster.diffLayout` | `unified`, `split` | `unified` | The layout of the diff, set by the **Unified** or **Split** selector. The choice applies to the Working Copy diff and to the commit diff, and is the layout the [terminal companion](../guide/terminal-companion.md) starts in. |
 | `gitmaster.authorPictures` | boolean | `false` | Whether author pictures are looked up on Gravatar. |
 | `gitmaster.threads.capture` | boolean | `true` | Turns [thread](../guide/threads.md) capture off when `false`. |
 | `gitmaster.threads.maxResultBytes` | integer | `65536` | The most bytes of one tool result that are stored. A longer result is cut, and the entry records its original size. |
