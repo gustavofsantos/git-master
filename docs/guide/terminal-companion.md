@@ -30,8 +30,6 @@ The companion uses your terminal's colors, so it matches your terminal theme and
 
 Code is colored by its language wherever the companion shows it: the hunks on Status and Diff, removed lines as well as added ones, the File and Blame screens, a thread's **Before** and **After** lines, and the patches on an **Agent thread**. Without the soft backgrounds, removed lines stay in your terminal's red. The language comes from the file's name, as in the app's [file viewer](code-navigation.md); a file of another language, a diff of more than 20,000 lines, or a file that takes more than two seconds to color is shown plain.
 
-> **Planned.** Removed lines, Blame without the File screen, a thread's Before and After lines and Agent thread patches are not colored yet, and a diff of several files colors only one of them.
-
 ## Screens
 
 The companion is a stack of screens. It opens on **Status**. Opening something, such as a thread or the blame of a line, puts its screen on top; `q` or `Esc` goes back to the screen below, exactly as you left it: the same cursor, the same folds, the same selection. The line at the bottom shows where you are, such as `status › threads › thread/12`; click a step to go back to it.
