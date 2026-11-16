@@ -64,7 +64,7 @@ fn now_ms() -> i64 {
 
 /// Runs `gitmaster thread <args…>`. `words` are the words after `thread`.
 ///
-/// `hook` always returns `0` and prints nothing. `redact-test` returns `0`, `1` for a pattern
+/// `hook` always returns `0` and prints nothing, or the harness's fixed reply (`{}` for Cursor). `redact-test` returns `0`, `1` for a pattern
 /// that does not build, or `2` for a wrong command line. Any other first word is a usage error.
 pub fn thread_command(
     words: &[String],
@@ -94,6 +94,13 @@ fn thread_with(
     match word.as_str() {
         "hook" => {
             guarded_hook(rest, stdin, env, adapters);
+            // A harness that reads the hook's output as JSON gets its reply whatever happened.
+            if let Some(reply) = harness_option(rest)
+                .and_then(|id| find(adapters, id))
+                .and_then(HarnessAdapter::hook_reply)
+            {
+                let _ = writeln!(out, "{reply}");
+            }
             0
         }
         "redact-test" => redact_test(rest, stdin, out, err, env),
@@ -132,8 +139,12 @@ fn hook(rest: &[String], stdin: &mut dyn Read, env: &Env, adapters: &[&dyn Harne
     if !read || oversized {
         return;
     }
-    let cwd = cwd_of(&payload);
-    let Some(adapter) = find(adapters, id) else {
+    let adapter = find(adapters, id);
+    let cwd = match adapter {
+        Some(adapter) => adapter.hook_cwd(&payload),
+        None => cwd_of(&payload),
+    };
+    let Some(adapter) = adapter else {
         if let Some(repo) = cwd.as_deref().and_then(pipeline::locate_repo) {
             pipeline::append_log(
                 &repo.common_dir,
@@ -602,7 +613,38 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = harness_command(&words(&["list"]), &mut out, &mut err);
         assert_eq!(code, 0);
-        assert!(String::from_utf8_lossy(&out).starts_with("claude-code  Claude Code"));
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "claude-code  Claude Code\ncursor  Cursor\n"
+        );
+    }
+
+    #[test]
+    fn the_cursor_hook_prints_an_empty_object_even_when_it_drops_the_payload() {
+        let sandbox = Sandbox::new();
+        let repo = sandbox.repo();
+        let env = Sandbox::env();
+        let cursor = crate::threads::harness::cursor::CursorAdapter;
+        let adapters: [&dyn HarnessAdapter; 1] = [&cursor];
+        let payload = json!({
+            "conversation_id": "c1",
+            "generation_id": "g1",
+            "hook_event_name": "beforeSubmitPrompt",
+            "prompt": "add retries",
+            "workspace_roots": [repo.display().to_string()],
+        })
+        .to_string();
+        let (code, out, err) = run_thread(
+            &["hook", "--harness", "cursor"],
+            payload.as_bytes(),
+            &env,
+            &adapters,
+        );
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "{}\n", ""));
+        assert_eq!(stored_threads(&repo), 1);
+
+        let (code, out, _) = run_thread(&["hook", "--harness", "cursor"], b"nope", &env, &adapters);
+        assert_eq!((code, out.as_str()), (0, "{}\n"));
     }
 
     #[test]

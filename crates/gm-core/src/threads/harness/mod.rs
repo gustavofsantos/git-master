@@ -7,6 +7,7 @@
 pub mod claude_code;
 #[cfg(test)]
 pub mod conformance;
+pub mod cursor;
 pub mod fake;
 
 use std::fmt::{self, Write as _};
@@ -114,10 +115,29 @@ pub trait HarnessAdapter: Send + Sync {
     fn clean_stored_text(&self, _kind: EntryKind, _text: &str) -> Option<Cleaned> {
         None
     }
+
+    /// The directory a hook payload runs in, used to find its repository: its `cwd` field by
+    /// default. A harness whose payloads name the directory another way overrides this.
+    fn hook_cwd(&self, payload: &[u8]) -> Option<PathBuf> {
+        #[derive(serde::Deserialize)]
+        struct CwdOnly {
+            cwd: Option<String>,
+        }
+        let parsed: CwdOnly = serde_json::from_slice(payload).ok()?;
+        parsed.cwd.filter(|cwd| !cwd.is_empty()).map(PathBuf::from)
+    }
+
+    /// What `thread hook` prints on standard output for this harness, whatever happened to the
+    /// payload. `None` prints nothing (D124); a harness that reads the hook's output as JSON
+    /// gets a reply that decides nothing.
+    fn hook_reply(&self) -> Option<&'static str> {
+        None
+    }
 }
 
-/// The known adapters. Empty until a harness is added: a harness is one line here.
-static REGISTRY: &[&dyn HarnessAdapter] = &[&claude_code::ClaudeCodeAdapter];
+/// The known adapters: a harness is one line here.
+static REGISTRY: &[&dyn HarnessAdapter] =
+    &[&claude_code::ClaudeCodeAdapter, &cursor::CursorAdapter];
 
 /// Every registered harness id, sorted.
 #[must_use]

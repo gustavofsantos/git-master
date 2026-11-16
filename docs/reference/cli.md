@@ -358,7 +358,7 @@ gitmaster thread hook --harness claude-code
 
 The [agent integration](../agents/agent-integration.md) runs this command from the agent's hooks. You do not run it yourself. It reads one JSON event from the standard input, redacts it, stores it in the thread database of the repository named in the event, and exits. It starts no resident process and opens no window.
 
-The command always exits with status `0` and prints nothing, even when it cannot store the event, so a failure never reaches the agent. A problem is written to `.git/gitmaster/threads.log`. An event that cannot be written at once is kept redacted in `.git/gitmaster/threads-spool/` and stored later.
+The command always exits with status `0`, even when it cannot store the event, so a failure never reaches the agent. It prints nothing, except for `--harness cursor`: Cursor reads a hook's output as JSON, so the command prints `{}`, an answer that allows the action and asks for nothing. A problem is written to `.git/gitmaster/threads.log`. An event that cannot be written at once is kept redacted in `.git/gitmaster/threads-spool/` and stored later.
 
 ## Test a redaction pattern
 

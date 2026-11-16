@@ -1,0 +1,13 @@
+[
+  {
+    "type": "assistant_message",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "response:490b90b7-a2ce-4c2c-bb76-cb77b125df2f:e215b17b3e184f4e",
+      "at": 0
+    },
+    "text": "I added a retry loop with exponential backoff.",
+    "model": "claude-sonnet-4-5"
+  }
+]

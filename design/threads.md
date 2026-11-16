@@ -143,9 +143,36 @@ The first adapter. The left column is the harness's contract and **unverified un
 
 An event or record the adapter does not recognize is **not an error**: it is skipped, counted in a `capture_gap` row with the native type name. A payload that does not parse at all is a gap too. That makes harness version drift visible instead of silent.
 
+### Mapping for Cursor (D255)
+
+The second adapter, `cursor`. Its contract comes from Cursor's Hooks and Plugins documentation and is **unverified against a real session** (Q56). Cursor's hooks carry the prompt and the reply, so the adapter captures from hooks alone and reads no transcript (`session_log` false). The session id is `conversation_id`; the directory that finds the repository is the payload's `cwd`, else the first of `workspace_roots`, since plugin hooks run in the plugin's folder. Every invocation prints `{}`: Cursor reads a hook's output as JSON, and a permission hook (`preToolUse`, `beforeSubmitPrompt`) whose output is not JSON blocks the action.
+
+| Cursor | Canonical |
+|---|---|
+| hook `sessionStart` | `SessionStarted`, `origin` new, `harness_version` from `cursor_version` |
+| hook `beforeSubmitPrompt` (`prompt`) | `PromptSubmitted`, `source_id` `prompt:<generation_id>` |
+| hook `afterAgentResponse` (`text`) | `AssistantMessage` |
+| hook `preToolUse` on `Write`, `Delete` | `EditPhase::Before` and `ToolCalled` |
+| hook `postToolUse` | `ToolCalled` and `ToolReturned` (`tool_output` unwrapped from its JSON string), `EditPhase::After` for `Write` and `Delete` |
+| hook `postToolUseFailure` | `ToolCalled` and `ToolReturned` with `is_error`, the `failure_type` before the message |
+| hook `subagentStop` | `Notice` with the sub-agent's type, status, task and summary; no sub-agent thread (`subagents` false) |
+| hook `stop` | `TurnEnded` |
+| hook `sessionEnd` | `SessionEnded` with `reason` |
+| hook `afterAgentThought` and any other | not hooked by the plugin; a gap if it arrives |
+| tool `Read` | `ToolKind::Read` |
+| tool `Write` with `old_string` | `ToolKind::Edit` |
+| tool `Write` otherwise, `Delete` | `ToolKind::Write` (`Delete` with `EditChange::Delete`) |
+| tool `Shell` | `ToolKind::Shell` |
+| tool `Grep`, `Glob` | `ToolKind::Search` |
+| tool `WebSearch`, `WebFetch` | `ToolKind::Web` |
+| tool `Task` | `ToolKind::Agent` |
+| tool `MCP:<name>` and any other | `ToolKind::Other`, name kept |
+
+The edited file's path is read from `file_path`, `path`, `target_file` or `filePath` of `tool_input`, because the documentation does not give the input of `Write` and `Delete`.
+
 ### Adding a harness
 
-A new harness is: one module implementing `HarnessAdapter`, its fixtures, one line in the registry, and a row in the docs. No change is needed in `gm-schema` commands, the store, redaction, search, the Threads page or the MCP tools. If a harness has a concept the canonical model lacks, the model is extended first, for all harnesses, by a decision (D129), not by a harness-specific column.
+A new harness is: one module implementing `HarnessAdapter`, its fixtures, one line in the registry, and a row in the docs. A harness whose payloads name the directory another way than `cwd`, or that reads the hook's output, overrides `hook_cwd` or `hook_reply` (D255). No change is needed in `gm-schema` commands, the store, redaction, search, the Threads page or the MCP tools. If a harness has a concept the canonical model lacks, the model is extended first, for all harnesses, by a decision (D129), not by a harness-specific column.
 
 ### Conformance kit
 

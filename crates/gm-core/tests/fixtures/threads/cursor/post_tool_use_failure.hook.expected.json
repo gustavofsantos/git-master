@@ -1,0 +1,30 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "tool_04",
+      "at": 0
+    },
+    "tool": "shell",
+    "native_tool": "Shell",
+    "args": {
+      "command": "cargo build"
+    },
+    "parent_call": null,
+    "edit": null
+  },
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "tool_04:result",
+      "at": 0
+    },
+    "call_source_id": "tool_04",
+    "text": "timeout: command timed out",
+    "is_error": true
+  }
+]

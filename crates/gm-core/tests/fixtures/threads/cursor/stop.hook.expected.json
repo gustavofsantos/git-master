@@ -1,0 +1,12 @@
+[
+  {
+    "type": "turn_ended",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "stop:490b90b7-a2ce-4c2c-bb76-cb77b125df2f:0",
+      "at": 0
+    },
+    "parent_call": null
+  }
+]

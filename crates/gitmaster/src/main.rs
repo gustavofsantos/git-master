@@ -59,9 +59,7 @@ fn main() {
         let code = gm_mcp::command(
             &words,
             &cwd,
-            std::env::var_os("CLAUDE_PROJECT_DIR")
-                .map(std::path::PathBuf::from)
-                .as_deref(),
+            project_dir().as_deref(),
             std::io::stdin().lock(),
             std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
@@ -115,6 +113,17 @@ fn main() {
         from_argument,
     };
     gm_ui::run(engine, command_log, watch, start, features);
+}
+
+/// The project folder the agent names for `gitmaster mcp`, tried when the working directory is
+/// not in a repository: `GITMASTER_PROJECT_DIR` (the Cursor plugin sets it to the workspace
+/// folder), else `CLAUDE_PROJECT_DIR` (Claude Code exports it).
+fn project_dir() -> Option<std::path::PathBuf> {
+    ["GITMASTER_PROJECT_DIR", "CLAUDE_PROJECT_DIR"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// Runs the one-shot subcommand `name` that lives in `gm-core` (`thread`, `harness`, `worktree`,

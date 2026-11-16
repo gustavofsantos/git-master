@@ -1,0 +1,31 @@
+[
+  {
+    "type": "tool_called",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "tool_02",
+      "at": 0
+    },
+    "tool": "shell",
+    "native_tool": "Shell",
+    "args": {
+      "command": "cargo test",
+      "working_directory": "/home/dev/project"
+    },
+    "parent_call": null,
+    "edit": null
+  },
+  {
+    "type": "tool_returned",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "tool_02:result",
+      "at": 0
+    },
+    "call_source_id": "tool_02",
+    "text": "test result: ok. 3 passed",
+    "is_error": false
+  }
+]

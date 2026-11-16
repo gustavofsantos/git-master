@@ -948,6 +948,11 @@ Known gaps: nothing was seen in a window and no smoke scenario was written or ru
 
 A reply is a review comment with a parent, and the agent's summary is its reply (review store v4 migrates the existing summaries). The MCP tool `review_comment_reply` writes a reply, and the app shows each thread under its comment on the Local review page and in the Working Copy diff, with a Reply box on the Local review page. Known gaps: in the diff, Reply opens the composer dialog, not an inline box, because a diff row cannot hold a growing text area; no palette action; `scripts/ui-smoke.sh` does not cover replies; the `ai/` plugin skill does not name `review_comment_reply` yet. Nothing was seen in a window.
 
+## Cursor plugin and harness (done 2026-11-16, unverified against Cursor; D255, Q56)
+
+- Built: the `cursor` harness adapter (hook-only) with conformance fixtures, `hook_cwd` and `hook_reply` on `HarnessAdapter`, `{}` printed by `gitmaster thread hook --harness cursor`, `GITMASTER_PROJECT_DIR` for `gitmaster mcp`; in `git-master-ai`, `plugins/cursor/` (cursor plugin 0.1.0: hooks, MCP settings, six skills, two read-only sub-agents), `.cursor-plugin/marketplace.json` and `scripts/install-local.sh cursor`; the contract test `crates/gitmaster/tests/cursor_plugin.rs`.
+- Gaps: nothing was run in Cursor. The payload fields, the `{}` answer for permission hooks, `${workspaceFolder}` in a plugin's `mcp.json`, MCP writes from a `readonly` sub-agent and the hooks of sub-agents are from the documentation only (Q56). Cursor CLI flags for review workflows stay open (Q42). The Threads page still shows only the Claude Code install commands. Sub-agent runs are a `Notice` in the parent thread, not threads of their own (D199 is Claude Code only).
+
 ## Slice T: terminal companion (planned 2026-11-13; D235)
 
 Requested by the author on 2026-11-13: GitMaster in a terminal pane next to Claude Code in tmux, as a code-review companion. Behaviour in `docs/guide/terminal-companion.md` (`status: planned`) and the `gitmaster tui` section of `docs/reference/cli.md`. Each slice is one brief; every engine command it needs exists already.

@@ -1,0 +1,16 @@
+[
+  {
+    "type": "session_started",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "session-start:668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "at": 0
+    },
+    "cwd": "/home/dev/project",
+    "model": "claude-sonnet-4-5",
+    "harness_version": "2.5.0",
+    "log_path": null,
+    "origin": "new"
+  }
+]

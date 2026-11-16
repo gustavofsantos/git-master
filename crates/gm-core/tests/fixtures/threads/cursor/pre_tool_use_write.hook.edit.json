@@ -1,0 +1,5 @@
+{
+  "phase": "before",
+  "call_source_id": "tool_01",
+  "path": "/home/dev/project/src/upload.rs"
+}

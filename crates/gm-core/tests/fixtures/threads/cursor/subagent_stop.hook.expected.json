@@ -1,0 +1,12 @@
+[
+  {
+    "type": "notice",
+    "header": {
+      "harness": "cursor",
+      "session_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+      "source_id": "subagent-stop:504c4b6abc3d412c",
+      "at": 0
+    },
+    "text": "Sub-agent gitmaster-memory-proposer completed: Propose memories from thread 12\n\nProposed 2 memories."
+  }
+]

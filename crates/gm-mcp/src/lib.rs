@@ -24,9 +24,10 @@ use gm_core::git::SubprocessGit;
 /// `output` until `input` ends. Returns the exit status: 0 after a normal end, 1 when the
 /// repository cannot be opened or the output fails, 2 for a wrong command line.
 ///
-/// Without `--repo` the repository is the one `cwd` is in. Claude Code does not document the
-/// directory a plugin's server starts in, so when `cwd` is not in a repository the
-/// `project_dir` it exports (`CLAUDE_PROJECT_DIR`) is tried next.
+/// Without `--repo` the repository is the one `cwd` is in. Neither Claude Code nor Cursor
+/// documents the directory a plugin's server starts in, so when `cwd` is not in a repository
+/// the `project_dir` the agent names is tried next (`GITMASTER_PROJECT_DIR`, which the Cursor
+/// plugin sets, else `CLAUDE_PROJECT_DIR`, which Claude Code exports).
 pub fn command(
     words: &[String],
     cwd: &Path,
