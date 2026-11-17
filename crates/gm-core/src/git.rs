@@ -2389,7 +2389,7 @@ impl GitPort for SubprocessGit {
         let mut input = String::from("HEAD\n");
         for reference in repo.references().map_err(|e| git_err(&e))? {
             let reference = reference.map_err(|e| git_err(&e))?;
-            let Some(name) = reference.name() else {
+            let Ok(name) = reference.name() else {
                 continue;
             };
             let shared = name.starts_with("refs/heads/") || name.starts_with("refs/remotes/");
@@ -2410,7 +2410,7 @@ impl GitPort for SubprocessGit {
                 .find_branch(branch, BranchType::Local)
                 .ok()
                 .and_then(|local| local.upstream().ok())
-                .and_then(|upstream| upstream.get().name().map(str::to_owned));
+                .and_then(|upstream| upstream.get().name().ok().map(str::to_owned));
             if let Some(name) = upstream {
                 let mut command = self.git(path);
                 command.args(["rev-list", "--count", &format!("{name}..HEAD")]);
@@ -2576,7 +2576,7 @@ impl GitPort for SubprocessGit {
             .map_err(|e| git_err(&e))?;
         while let Some(entry) = iter.next() {
             let entry = entry.map_err(|e| git_err(&e))?;
-            if let (Some(name), Some(value)) = (entry.name(), entry.value()) {
+            if let (Ok(name), Ok(value)) = (entry.name(), entry.value()) {
                 entries.push((name.to_owned(), value.to_owned()));
             }
         }
@@ -3920,6 +3920,8 @@ fn current_branch(repo: &Repository) -> Result<Option<String>, GitError> {
     let head = repo.find_reference("HEAD").map_err(|e| git_err(&e))?;
     Ok(head
         .symbolic_target()
+        .ok()
+        .flatten()
         .and_then(|target| target.strip_prefix("refs/heads/"))
         .map(str::to_owned))
 }
@@ -3928,7 +3930,7 @@ fn current_branch(repo: &Repository) -> Result<Option<String>, GitError> {
 /// read gives `None` rather than failing the whole listing.
 fn tip_author_email(branch: &git2::Branch<'_>) -> Option<String> {
     let commit = branch.get().peel_to_commit().ok()?;
-    clean_email(commit.author().email()?)
+    clean_email(commit.author().email().ok()?)
 }
 
 /// An email as the listing shows it: trimmed, without the angle brackets Git
@@ -3954,7 +3956,12 @@ fn upstream_of(repo: &Repository, branch: &str) -> Result<Option<(String, String
 
 fn remote_names(repo: &Repository) -> Result<Vec<String>, GitError> {
     let names = repo.remotes().map_err(|e| git_err(&e))?;
-    Ok(names.iter().flatten().map(str::to_owned).collect())
+    Ok(names
+        .iter()
+        .flatten()
+        .flatten()
+        .map(str::to_owned)
+        .collect())
 }
 
 fn has_ref(repo: &Repository, name: &str) -> bool {
