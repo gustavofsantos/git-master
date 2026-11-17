@@ -104,6 +104,7 @@ GitMaster reads Git's own configuration through `git`, so Git's scope rules appl
 | `gitmaster.worktree.root` | Any | `../<repo>-<branch>` | The base folder for new worktrees. `gitmaster worktree add` reads it; see [Command line](cli.md#create-a-worktree). The worktree dialog does not read it yet. | Planned |
 | `gitmaster.worktree.include` | Any | `symlink` | How `gitmaster worktree add` brings the paths of `.worktreeinclude` into a new worktree: `symlink`, `reflink` or `none`. See [Command line](cli.md#share-ignored-files-worktreeinclude). | |
 | `gitmaster.workspace.root` | Any | `~/workspaces` | The base folder for new [workspaces](../guide/workspaces.md). | Planned |
+| `gitmaster.clone.root` | Any | `~/src` | The base folder of a repository cloned from a URL to be added to a workspace, as `<root>/<name>`. See [Workspaces](../guide/workspaces.md#add-a-repository-from-a-url). | |
 | `gitmaster.health.*` | Any | See [Code health](../guide/code-health.md#configuration) | The half-life, dormancy gap, analysis window, excluded paths and ignored commits of code health. | |
 | `gitmaster-health.<path>.*` | Any | The repository's values | The half-life and dormancy gap of the files under `<path>`. See [Code health](../guide/code-health.md#configuration). | |
 | `branch.<name>.stackParent` | Repository | Not set | The parent branch of a branch in a stack. See [Stacks](../guide/stacks.md). | |

@@ -36,13 +36,13 @@ The workspace keeps its own [threads](threads.md). A new memory you write or an 
 
 The **Workspaces** section of the sidebar lists the workspaces under the workspace root, by name, in every window. A **here** badge marks the workspace the window shows. Click a row to switch the window to that workspace; see [Work in a workspace](#work-in-a-workspace).
 
-The **+** in the section header opens **New Workspace…**. The menu of a row has **Switch to Workspace**, **Open in New Window**, **Reveal in File Manager** and **Remove Workspace**. A **×** appears when you point at a row: it removes that workspace, as **Remove Workspace** does. The section starts folded, like **Branches** and **Worktrees**: click its header to open it; see [Branches](branches.md#fold-the-sections).
+The **+** in the section header opens **New Workspace…**. The menu of a row has **Switch to Workspace**, **Open in New Window**, **Add Repository to Workspace…**, **Reveal in File Manager** and **Remove Workspace**. A **×** appears when you point at a row: it removes that workspace, as **Remove Workspace** does. The section starts folded, like **Branches** and **Worktrees**: click its header to open it; see [Branches](branches.md#fold-the-sections).
 
 ## Create a workspace
 
 1. Run **New Workspace…** from the command palette, or click **+** in the **Workspaces** section of the sidebar.
 2. Name the workspace.
-3. Add a member for each repository: choose the repository, then its branch. The repository list offers the repository of the window, your recent repositories and **Choose Folder…**. The branch button opens the repository's branches, local ones first, then the remote ones that have no local branch, marked as remote. A filter at the top narrows the list as you type, and a name that matches no branch offers **Create branch** with that name. **Branch for all** fills the same branch into every member.
+3. Add a member for each repository: choose the repository, then its branch. The repository list offers the repository of the window, your recent repositories, **Choose Folder…** and **Clone from URL…** (see [Add a repository from a URL](#add-a-repository-from-a-url)). The branch button opens the repository's branches, local ones first, then the remote ones that have no local branch, marked as remote. A filter at the top narrows the list as you type, and a name that matches no branch offers **Create branch** with that name. **Branch for all** fills the same branch into every member.
 4. Check the folder and click **Create workspace**.
 
 A branch that does not exist yet is created from the repository's base branch, such as `main`; a branch that exists only on a remote is created to track it. Each member row says which will happen before you create the workspace.
@@ -75,6 +75,36 @@ checkout  feat/pay-v2  9be03d7
 Your own files in the workspace repository, such as notes or scripts, are not staged by it: commit them as in any repository. **Record Combination** is not available when no member has a new commit, or when a member is on a detached HEAD.
 
 The combinations follow each other on one branch, `main`. The workspace's [History](history.md) is the list of the combinations you recorded, and each one opens to the commits of each member.
+
+## Change the members of a workspace
+
+A workspace keeps the members you gave it until you change them. Add a repository when a change reaches one more service, and remove one the change no longer touches. Each change of the members is a commit in the workspace repository, so its history says when a repository joined or left.
+
+### Add a repository
+
+1. Choose **Add Repository to Workspace…** in the menu of a workspace's row in the **Workspaces** section, or run it from the command palette, picking the workspace with **Tab**.
+2. Add a row for each repository, as in **New Workspace…**: choose the repository, then its branch. **Branch for all** fills the same branch into every row.
+3. Click **Add to workspace**.
+
+Each row says what will happen to its branch before you add it, with the rules of [Create a workspace](#create-a-workspace). A repository that is already a member, a folder name that another member has, and a branch that is checked out in another worktree are refused, and the dialog says which. Nothing is added while one row is refused. The member's folder is the folder name of the repository's main checkout.
+
+### Add a repository from a URL
+
+When you do not have a clone of the repository yet, choose **Clone from URL…** in the repository list of a row. Type the URL of the repository, check the folder the clone goes to and click **Clone**. When the clone is done, the row holds it, and you choose its branch as for any other repository.
+
+GitMaster suggests the folder `<root>/<name>`, where `<name>` is the last part of the URL without `.git`. The root is `~/src` unless you set `gitmaster.clone.root` (see [Configuration](../reference/configuration.md#git-configuration-keys)). The folder must not exist. The clone is a plain clone of your own, like one you make with `git clone`, and it stays when the member is removed or the workspace is.
+
+Git does not ask for a password while GitMaster clones: use a URL your credential helper or SSH agent already serves. When Git cannot reach the repository, the dialog shows Git's message and nothing is created. **Clone from URL…** is offered in **New Workspace…** too.
+
+### Remove a repository
+
+Choose **Remove from Workspace…** in the menu of a member's row in the workspace's Working Copy, or run it from the command palette, picking the member with **Tab**. The window stays on the workspace.
+
+When nothing would be lost, the dialog asks once and **Remove member** removes it. When the member has changes that are not committed, or is on a detached HEAD with commits that no local or remote branch holds, the dialog lists them; tick the confirmation checkbox, which names what will be discarded, to enable **Remove member**.
+
+GitMaster removes the member's worktree from your clone and commits the removal in the workspace repository. The member's branch and its commits stay in your clone. The combinations recorded before still name the member, in the workspace's history.
+
+On the command line, `gitmaster workspace add` adds a repository, from a folder or a URL, and `gitmaster workspace remove-member` removes one; see [Command line](../reference/cli.md#add-a-member).
 
 ## Run an agent in a workspace
 

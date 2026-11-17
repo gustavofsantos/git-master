@@ -5,7 +5,7 @@ status: partial
 order: 30
 ---
 
-The `gitmaster` command opens the app. The worktree, workspace, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add`, `remove` and `include`, and `gitmaster workspace create`, `add` and `remove`, change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts. `gitmaster tui` runs GitMaster in the terminal until you quit it.
+The `gitmaster` command opens the app. The worktree, workspace, workflow, thread and agent subcommands run once and exit. They keep no process running and no state between runs. Only `gitmaster worktree add`, `remove` and `include`, and `gitmaster workspace create`, `add`, `remove-member` and `remove`, change a repository. The section Open a repository covers the arguments the app accepts. `gitmaster mcp` is the MCP server your agent starts. `gitmaster tui` runs GitMaster in the terminal until you quit it.
 
 ## Open a repository
 
@@ -161,7 +161,8 @@ IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --rep
 
 ```sh
 gitmaster workspace create <name> [--root <dir>] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
-gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
+gitmaster workspace add <repo|url> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none] [--clone-to <dir>]
+gitmaster workspace remove-member <member> [--workspace <name|dir>] [--root <dir>] [--force]
 gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
 gitmaster workspace path <name> [--root <dir>]
 gitmaster workspace status [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
@@ -204,6 +205,18 @@ Every repository of the list is checked before anything is created. When one of 
 3. The workspace's repository commits `.gitmodules` and the member.
 
 `add` refuses a branch that is checked out in another worktree, and says which. It refuses a `<member>` folder that exists, and a repository that is already a member. When the commit fails, for example because Git has no user name, the member stays added and staged, the message says how to commit it, and the exit status is `1`. When registering the submodule fails, the new worktree is removed again.
+
+`<repo>` can be the URL of a repository you have no clone of yet. A value that is not a folder and looks like a URL, such as `https://host/team/billing.git`, `ssh://host/billing` or `git@host:team/billing.git`, is cloned first, then added as above. The clone goes to `--clone-to <dir>` when given, else to `<root>/<name>`, where `<name>` is the last part of the URL without `.git` and the root is `gitmaster.clone.root`, else `~/src`. The folder must not exist. `add` prints `cloned <url> into <dir>` on the standard error when the clone is done. When the clone fails, nothing is created and the exit status is `1`; when the clone succeeds and adding the member fails, the clone stays and the message names it.
+
+### Remove a member
+
+`remove-member <member>` removes the member `<member>`, its folder name in the workspace, and prints the member's former path.
+
+1. The member's worktree is removed from its repository. The branch and its commits stay there.
+2. The member is taken out of the workspace's `.gitmodules`, index and configuration, and the workspace no longer lists itself in the member's repository.
+3. The workspace's repository commits the removal, `Remove <member>`.
+
+It refuses a member that contains the current directory, even with `--force`. It refuses a member with staged, unstaged or untracked files, or on a detached `HEAD` that holds commits no local or remote branch has, and says which; `--force` removes it anyway, with what it discards. A member whose folder is gone is pruned from its repository's worktree records and removed from the workspace. A member whose repository is gone while its folder is there is refused, even with `--force`. When the commit fails, the removal stays staged, the message says how to commit it, and the exit status is `1`.
 
 ### List and find workspaces
 
