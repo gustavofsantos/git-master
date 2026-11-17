@@ -1,6 +1,6 @@
 ---
 title: Terminal companion
-description: Run GitMaster in a terminal next to your coding agent: one status screen of foldable sections, a menu that shows what you can do where you are, and keys you can remap.
+description: Run GitMaster in a terminal next to your coding agent: one status screen of foldable sections, a menu that shows what you can do where you are, commit, pull and push, and keys you can remap.
 status: partial
 order: 115
 ---
@@ -100,6 +100,10 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 | `Space d s` | Switch the diffs between **Unified** and **Split**. |
 | `g b` | Open who last changed each line of the file at the cursor on the **Blame** screen. |
 | `Space w` | Show how the selected lines, or the line, got where they are on the **Origin** screen. |
+| `Space C` | Commit the staged changes, with a message written in a text box. |
+| `Space F` | Fetch every remote. |
+| `Space p` | Pull: fast-forward the branch to its upstream. |
+| `Space P` | Push the branch to its upstream, after asking. |
 | `q`, `Esc` | Close the menu, clear the selection, or go back one screen; on **Status**, `q` quits. |
 | `Space` | Open the menu. |
 | `?` | Open the **Keys** screen. |
@@ -110,6 +114,20 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 ## Stage and unstage
 
 Stage what is under the cursor, at the size you choose: a section, a file, a hunk, or the lines you selected. Open the menu and choose **stage** or **unstage**. Staging lines works as in the app; see [Diff and staging](diff-and-staging.md). A selection over several hunks stages each hunk's selected lines.
+
+## Commit, pull and push
+
+Once you staged what you accept, commit it from Status: open the menu and choose **commit** (`Space C`). A text box opens at the bottom, as for a comment: write the message, the subject on the first line; `Enter` starts a new line, `Ctrl+S` commits and `Esc` cancels, asking first when the box holds text. The commit takes what is staged and nothing else, so **commit** is offered only when something is staged. When Git refuses the commit, the box stays open with Git's reason under your message. When it succeeds, the box closes and the hint line shows the new commit's short id.
+
+The branch's remote is one key away, in the **Remote** group of the menu:
+
+- **fetch** (`Space F`) fetches every remote and removes the remote branches a remote deleted.
+- **pull** (`Space p`) fast-forwards the branch to its upstream. It never makes a merge commit and never rebases: when the branch and its upstream have both moved, it fails and says so. It is offered only when the branch has an upstream.
+- **push** (`Space P`) pushes the branch alone, with a lease: to its upstream, or, when it has none, to the only remote, which becomes its upstream. It asks first, naming the branch and where it goes, since a remote cannot take a push back. Tags and other branches are never pushed.
+
+These run as the app's own [Fetch, Pull and Push with lease](branches.md#fetch-pull-and-push-with-lease) do, without asking for a password: use a credential helper or an SSH agent. The hint line says what runs (`Pushing…`), then how it ended, with Git's reason when it failed. **Merge** on Status follows: how far ahead and behind the upstream the branch is.
+
+The companion runs no [workflow](../workflows/overview.md) on a commit or a push: it has no place to approve a run. Commit and push from the app when a workflow should gate them.
 
 ## Review threads
 

@@ -228,6 +228,53 @@ enum Pending {
     Agent(String),
     Write(&'static str),
     Text,
+    /// A commit of what is staged, written in the text box.
+    Commit,
+    /// A fetch, a pull or a push.
+    Remote(Remote),
+}
+
+/// An operation with a remote, as the hint line names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Remote {
+    Fetch,
+    Pull,
+    Push,
+}
+
+impl Remote {
+    fn of(kind: &CommandKind) -> Option<Self> {
+        match kind {
+            CommandKind::Fetch => Some(Self::Fetch),
+            CommandKind::Pull => Some(Self::Pull),
+            CommandKind::PushWithLease => Some(Self::Push),
+            _ => None,
+        }
+    }
+
+    fn running(self) -> &'static str {
+        match self {
+            Self::Fetch => "Fetching…",
+            Self::Pull => "Pulling…",
+            Self::Push => "Pushing…",
+        }
+    }
+
+    fn done(self) -> &'static str {
+        match self {
+            Self::Fetch => "Fetched.",
+            Self::Pull => "Pulled.",
+            Self::Push => "Pushed.",
+        }
+    }
+
+    fn failed(self) -> &'static str {
+        match self {
+            Self::Fetch => "Fetch failed",
+            Self::Pull => "Pull failed",
+            Self::Push => "Push failed",
+        }
+    }
 }
 
 /// The narrowest terminal that shows the Split layout (D252 (3)).
@@ -485,8 +532,24 @@ impl App {
             CommandKind::AddReviewComment { .. }
             | CommandKind::AddReviewCommentByText { .. }
             | CommandKind::ReplyToReviewComment { .. } => Pending::Text,
+            CommandKind::Commit { .. } => Pending::Commit,
+            CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease => {
+                let Some(remote) = Remote::of(kind) else {
+                    return;
+                };
+                self.notice = Some(remote.running().to_owned());
+                self.dirty = true;
+                Pending::Remote(remote)
+            }
             _ => return,
         };
+        // The box sends once: a second `Ctrl+S` waits for the answer to the first.
+        if matches!(pending, Pending::Text | Pending::Commit)
+            && let Some(Overlay::Text { composer, .. }) = self.overlays.last_mut()
+        {
+            composer.pending = Some(id);
+            composer.error = None;
+        }
         self.in_flight.insert(id, pending);
     }
 
@@ -635,6 +698,10 @@ impl App {
             Event::OperationChanged {
                 id, state, detail, ..
             } => self.ended(*id, *state, detail.as_deref()),
+            Event::Committed { id, oid } if self.in_flight.get(id) == Some(&Pending::Commit) => {
+                let short: String = oid.chars().take(7).collect();
+                self.notice = Some(format!("Committed {short}."));
+            }
             _ if self.apply_screen_read(event) => {}
             _ => return,
         }
@@ -797,7 +864,14 @@ impl App {
             Some(Pending::Write(what)) if failed => {
                 self.notice = Some(format!("{what} failed: {reason}"));
             }
-            Some(Pending::Text) => {
+            Some(Pending::Remote(remote)) => {
+                self.notice = Some(if failed {
+                    format!("{}: {reason}", remote.failed())
+                } else {
+                    remote.done().to_owned()
+                });
+            }
+            Some(Pending::Text | Pending::Commit) => {
                 if let Some(Overlay::Text { composer, .. }) = self.overlays.last_mut() {
                     if failed {
                         composer.pending = None;
@@ -1254,6 +1328,9 @@ impl App {
             "thread.reopen" => thread.is_some_and(|c| c.status == ReviewStatus::Resolved),
             "thread.delete" | "thread.show" => thread.is_some(),
             "copy.reference" => current.and_then(Item::file).is_some(),
+            "commit" => self.repo.status.entries.iter().any(|e| e.staged.is_some()),
+            "remote.pull" => self.repo.status.branch.upstream.is_some(),
+            "remote.push" => self.repo.status.branch.head.is_some(),
             "go.branch" => self.repo.range.is_some(),
             "file.open" | "blame.open" => self.current_file().is_some(),
             "origin.open" => self.selected_lines().is_some(),
@@ -1340,6 +1417,13 @@ impl App {
             "thread.reply" => self.open_reply(now),
             "thread.resolve" | "thread.reopen" | "thread.delete" => self.thread_write(name, now),
             "copy.reference" => self.copy_reference(),
+            "commit" => self.overlays.push(Overlay::Text {
+                composer: Composer::commit(),
+                guard: Guard::new(now, true),
+            }),
+            "remote.fetch" => self.commands.push(CommandKind::Fetch),
+            "remote.pull" => self.commands.push(CommandKind::Pull),
+            "remote.push" => self.ask_push(now),
             "terminal.suspend" => self.requests.push(Request::Suspend),
             "terminal.redraw" => self.requests.push(Request::Redraw),
             "quit" => self.quit = true,
@@ -1867,6 +1951,23 @@ impl App {
         }
     }
 
+    /// Asks before a push: it is `--force-with-lease`, and a remote cannot take it back.
+    fn ask_push(&mut self, now: Instant) {
+        let branch = &self.repo.status.branch;
+        let Some(head) = &branch.head else {
+            return;
+        };
+        let question = match &branch.upstream {
+            Some(upstream) => format!("Push {head} to {upstream}?"),
+            None => format!("Push {head}? It has no upstream: the only remote becomes it."),
+        };
+        self.overlays.push(Overlay::Confirm {
+            question,
+            yes: Yes::Send(vec![CommandKind::PushWithLease]),
+            guard: Guard::new(now, true),
+        });
+    }
+
     /// Puts `@path:lines` of the selection, the line or the file at the cursor on the clipboard.
     fn copy_reference(&mut self) {
         let reference = match self.picked_rows() {
@@ -2118,6 +2219,134 @@ mod tests {
         crate::draw::role_style(gm_schema::SyntaxRole::Keyword)
             .fg
             .unwrap_or(ratatui::style::Color::Reset)
+    }
+
+    fn ended(app: &mut App, id: u64, state: OperationState, detail: Option<&str>) {
+        app.apply(&Event::OperationChanged {
+            id: OperationId(id),
+            actor: gm_schema::Actor::Human,
+            state,
+            detail: detail.map(str::to_owned),
+        });
+    }
+
+    #[test]
+    fn space_shift_c_commits_what_is_staged_with_the_message_written_in_the_box() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(2);
+        let mut app = app();
+        assert!(app.applies("commit"), "README.md is staged");
+        key(&mut app, "<space> C", now);
+        assert_eq!(app.mode(), Mode::Insert);
+        app.on_paste("fix: keep the cursor");
+        // Inside the guard's second, Ctrl+S is dropped.
+        key(&mut app, "<c-s>", now);
+        assert!(app.take_commands().is_empty());
+        key(&mut app, "<c-s>", later);
+        let sent = app.take_commands();
+        assert_eq!(
+            sent,
+            [CommandKind::Commit {
+                message: "fix: keep the cursor".to_owned()
+            }]
+        );
+        app.sent(OperationId(40), &sent[0]);
+        // A second Ctrl+S while the first is in flight sends nothing.
+        key(&mut app, "<c-s>", later);
+        assert!(app.take_commands().is_empty());
+        app.apply(&Event::Committed {
+            id: OperationId(40),
+            oid: "b52e0d1ffff".to_owned(),
+        });
+        ended(&mut app, 40, OperationState::Done, None);
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.notice.as_deref(), Some("Committed b52e0d1."));
+    }
+
+    #[test]
+    fn a_refused_commit_keeps_the_box_with_the_reason_and_nothing_staged_offers_no_commit() {
+        let later = Instant::now() + Duration::from_secs(2);
+        let mut app = app();
+        app.run("commit", later);
+        key(&mut app, "x", later);
+        key(&mut app, "<c-s>", later + Duration::from_secs(2));
+        let sent = app.take_commands();
+        app.sent(OperationId(41), &sent[0]);
+        ended(
+            &mut app,
+            41,
+            OperationState::Failed,
+            Some("a hook refused it"),
+        );
+        match app.overlays.last() {
+            Some(Overlay::Text { composer, .. }) => {
+                assert_eq!(composer.error.as_deref(), Some("a hook refused it"));
+                assert_eq!(composer.pending, None);
+                assert_eq!(composer.text, "x");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let mut clean = App::new(RepoStatus {
+            entries: vec![entry("src/lib.rs", None, Some(Change::Modified))],
+            ..app.repo.status.clone()
+        });
+        assert!(!clean.applies("commit"));
+        clean.run("commit", later);
+        assert!(clean.overlays.is_empty());
+    }
+
+    #[test]
+    fn fetch_and_pull_go_at_once_and_push_asks_first() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(2);
+        let mut app = app();
+        assert!(!app.applies("remote.pull"), "no upstream");
+        app.repo.status.branch.upstream = Some("origin/feature".to_owned());
+        assert!(app.applies("remote.pull"));
+
+        key(&mut app, "<space> F", now);
+        let sent = app.take_commands();
+        assert_eq!(sent, [CommandKind::Fetch]);
+        app.sent(OperationId(50), &sent[0]);
+        assert_eq!(app.notice.as_deref(), Some("Fetching…"));
+        ended(&mut app, 50, OperationState::Executing, None);
+        assert_eq!(app.notice.as_deref(), Some("Fetching…"));
+        ended(&mut app, 50, OperationState::Done, None);
+        assert_eq!(app.notice.as_deref(), Some("Fetched."));
+
+        key(&mut app, "<space> p", now);
+        let sent = app.take_commands();
+        assert_eq!(sent, [CommandKind::Pull]);
+        app.sent(OperationId(51), &sent[0]);
+        ended(
+            &mut app,
+            51,
+            OperationState::Failed,
+            Some("not possible to fast-forward"),
+        );
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Pull failed: not possible to fast-forward")
+        );
+
+        key(&mut app, "<space> P", now);
+        assert!(app.take_commands().is_empty());
+        match app.overlays.last() {
+            Some(Overlay::Confirm { question, .. }) => {
+                assert_eq!(question, "Push feature to origin/feature?");
+            }
+            other => panic!("{other:?}"),
+        }
+        // An early yes is dropped; a later one pushes.
+        key(&mut app, "y", now);
+        assert!(app.take_commands().is_empty());
+        key(&mut app, "y", later);
+        let sent = app.take_commands();
+        assert_eq!(sent, [CommandKind::PushWithLease]);
+        app.sent(OperationId(52), &sent[0]);
+        ended(&mut app, 52, OperationState::Done, None);
+        assert_eq!(app.notice.as_deref(), Some("Pushed."));
     }
 
     #[test]

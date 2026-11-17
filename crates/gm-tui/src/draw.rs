@@ -13,7 +13,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use gm_schema::{DiffLine, LineKind, SyntaxRole};
-use gm_view::compose;
 use gm_view::diff_rows::Row as DiffRow;
 use gm_view::local_review::Version;
 use gm_view::provenance_view::Row as ProvenanceRow;
@@ -1250,7 +1249,7 @@ fn draw_text_box(frame: &mut Frame, app: &mut App, body: Rect, now: Instant) {
     let shown = text.len().min(6);
     let extra = usize::from(composer.typed()) + usize::from(composer.error.is_some());
     let height = u16::try_from(shown + extra + 3).unwrap_or(u16::MAX);
-    let inner = panel(frame, body, height, &compose::title(&composer.target));
+    let inner = panel(frame, body, height, &composer.title());
     let mut lines: Vec<Line> = Vec::new();
     if composer.typed() {
         let mut spans = vec![Span::styled("type ", DIM)];
@@ -1273,7 +1272,7 @@ fn draw_text_box(frame: &mut Frame, app: &mut App, body: Rect, now: Instant) {
     }
     let open = guard.accepts(Answer::Confirm, now);
     let cancel = guard.accepts(Answer::Cancel, now);
-    let save = compose::save_label(&composer.target).to_lowercase();
+    let save = composer.save_label();
     lines.push(Line::from(vec![
         Span::styled("Ctrl+S ", guarded(open)),
         Span::styled(format!("{save}   "), DIM),

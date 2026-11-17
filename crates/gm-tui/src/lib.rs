@@ -303,3 +303,104 @@ mod copy_tests {
         assert_eq!(super::base64(b"abc"), "YWJj");
     }
 }
+
+/// The companion's commit and push against the real engine and real Git: the actions send
+/// the commands, the engine runs them, and the answers reach the hint line.
+#[cfg(test)]
+mod remote_real_git {
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::ui::App;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// Sends what the app asked for and takes the engine's answers until `done` holds.
+    fn pump(app: &mut App, opened: &super::Opened, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(app) {
+            assert!(Instant::now() < deadline, "timed out: {:?}", app.notice);
+            for kind in app.take_commands() {
+                let id = opened
+                    .engine
+                    .dispatch(gm_schema::Actor::Human, kind.clone());
+                app.sent(id, &kind);
+            }
+            while let Ok(event) = opened.events.try_recv() {
+                app.apply(&event);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers, now: Instant) {
+        app.on_key_at(KeyEvent::new(code, modifiers), now);
+    }
+
+    #[test]
+    fn commits_the_staged_change_and_pushes_it_to_the_upstream() {
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "first"]);
+        let url = remote.path().to_string_lossy().into_owned();
+        git(dir.path(), &["remote", "add", "origin", &url]);
+        git(dir.path(), &["push", "-q", "-u", "origin", "main"]);
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+
+        let opened = super::open(dir.path()).unwrap();
+        let mut app = App::new(opened.status.clone());
+        let later = || Instant::now() + Duration::from_secs(2);
+
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, later());
+        press(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT, later());
+        app.on_paste("second");
+        press(
+            &mut app,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            later() + Duration::from_secs(2),
+        );
+        pump(&mut app, &opened, |app| {
+            app.notice
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Committed"))
+                && app.overlays.is_empty()
+        });
+        assert_eq!(git(dir.path(), &["log", "-1", "--format=%s"]), "second");
+        let head = git(dir.path(), &["rev-parse", "HEAD"]);
+        // The status that followed the commit reaches the app: one ahead of origin/main.
+        pump(&mut app, &opened, |app| app.repo.status.branch.ahead == 1);
+
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, later());
+        press(&mut app, KeyCode::Char('P'), KeyModifiers::SHIFT, later());
+        press(
+            &mut app,
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+            later() + Duration::from_secs(2),
+        );
+        pump(&mut app, &opened, |app| {
+            app.notice.as_deref() == Some("Pushed.")
+        });
+        assert_eq!(git(remote.path(), &["rev-parse", "main"]), head);
+    }
+}

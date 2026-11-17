@@ -1,7 +1,7 @@
 //! Review threads in the companion (D236): the box that writes a comment or a reply, and
 //! which threads are unfolded. The rules come from `gm_view`: where picked lines can be
 //! commented (`compose`), the command a comment sends (`compose::command`), and how a
-//! thread folds (`review`).
+//! thread folds (`review`). The same box writes a commit message.
 
 use gm_schema::{CommandKind, CommentLabel, OperationId};
 use gm_view::compose::{self, ReviewTarget};
@@ -14,10 +14,18 @@ pub const TYPES: [(&str, CommentLabel); 3] = [
     ("nit", CommentLabel::Nitpick),
 ];
 
-/// The box that writes a new comment or a reply.
+/// What the box writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Review(ReviewTarget),
+    /// The message of a commit of what is staged.
+    Commit,
+}
+
+/// The box that writes a new comment, a reply or a commit message.
 #[derive(Debug)]
 pub struct Composer {
-    pub target: ReviewTarget,
+    pub target: Target,
     pub text: String,
     /// Index into `TYPES`; a reply has no type.
     pub kind: usize,
@@ -31,6 +39,15 @@ pub struct Composer {
 
 impl Composer {
     pub fn new(target: ReviewTarget) -> Self {
+        Self::of(Target::Review(target))
+    }
+
+    /// The box for a commit message.
+    pub fn commit() -> Self {
+        Self::of(Target::Commit)
+    }
+
+    fn of(target: Target) -> Self {
         Self {
             target,
             text: String::new(),
@@ -45,8 +62,24 @@ impl Composer {
     pub fn typed(&self) -> bool {
         matches!(
             self.target,
-            ReviewTarget::New { .. } | ReviewTarget::NewByText { .. }
+            Target::Review(ReviewTarget::New { .. } | ReviewTarget::NewByText { .. })
         )
+    }
+
+    /// The title of the box.
+    pub fn title(&self) -> String {
+        match &self.target {
+            Target::Review(target) => compose::title(target),
+            Target::Commit => "Commit the staged changes".to_owned(),
+        }
+    }
+
+    /// What `Ctrl+S` does, in lower case.
+    pub fn save_label(&self) -> String {
+        match &self.target {
+            Target::Review(target) => compose::save_label(target).to_lowercase(),
+            Target::Commit => "commit".to_owned(),
+        }
     }
 
     pub fn label(&self) -> Option<CommentLabel> {
@@ -77,7 +110,13 @@ impl Composer {
         if !self.may_save() {
             return None;
         }
-        compose::command(&self.target, &self.text, self.label())
+        match &self.target {
+            Target::Review(target) => compose::command(target, &self.text, self.label()),
+            // Git strips the trailing blank lines; the leading ones would make an empty subject.
+            Target::Commit => Some(CommandKind::Commit {
+                message: self.text.trim().to_owned(),
+            }),
+        }
     }
 }
 
@@ -111,6 +150,21 @@ mod tests {
         );
         composer.pending = Some(OperationId(3));
         assert_eq!(composer.save(), None);
+    }
+
+    #[test]
+    fn a_commit_message_is_sent_trimmed_and_has_no_type() {
+        let mut composer = Composer::commit();
+        assert!(!composer.typed());
+        assert_eq!(composer.save(), None);
+        composer.type_text("\nfix: keep the cursor\n\nBody.\n\n");
+        assert_eq!(
+            composer.save(),
+            Some(CommandKind::Commit {
+                message: "fix: keep the cursor\n\nBody.".to_owned(),
+            })
+        );
+        assert_eq!(composer.save_label(), "commit");
     }
 
     #[test]

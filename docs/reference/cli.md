@@ -263,7 +263,7 @@ A member whose folder is gone prints `(missing)` as its branch, and the command 
 gitmaster tui [PATH]
 ```
 
-Runs GitMaster in the terminal, for reading, staging and commenting on the changes next to a coding agent. With no path it works on the repository that contains the current directory; a path is resolved as for the app. It opens no window and needs no display. It runs until you press `q`, then restores the terminal. See [Terminal companion](../guide/terminal-companion.md).
+Runs GitMaster in the terminal, for reading, staging, committing and commenting on the changes next to a coding agent, and for fetching, pulling and pushing the branch. With no path it works on the repository that contains the current directory; a path is resolved as for the app. It opens no window and needs no display. It runs until you press `q`, then restores the terminal. See [Terminal companion](../guide/terminal-companion.md).
 
 The exit status is `0` after you quit, `1` when the repository cannot be opened or the terminal cannot be used (standard input or output is not a terminal), and `2` for a wrong command line.
 
