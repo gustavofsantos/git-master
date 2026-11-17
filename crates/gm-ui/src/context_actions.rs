@@ -105,6 +105,7 @@ mod tests {
             submodules: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
         }
     }
 

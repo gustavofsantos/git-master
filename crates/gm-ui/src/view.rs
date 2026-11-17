@@ -883,6 +883,7 @@ impl StatusView {
         if let Some(outcome) = self.model.workspace_removal.take_outcome() {
             self.on_workspace_removal_settled(outcome, window, cx);
         }
+        self.request_members();
         if let Some(suggestion) = self.model.workspace_clone.take_suggestion() {
             self.on_clone_suggested(suggestion, cx);
         }
@@ -1843,6 +1844,7 @@ impl StatusView {
                 .record()
                 .is_some()
                 .then_some("Undo restack"),
+            members: self.model.members.listed(),
             selected_file: self.model.selected_path(),
             stack: crate::action_registry::StackCtx {
                 stacks: Some(&self.model.stacks),

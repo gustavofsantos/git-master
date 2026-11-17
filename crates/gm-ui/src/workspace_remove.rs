@@ -88,9 +88,24 @@ pub(crate) fn member_body_lines(member: &str, blockers: &[RemovalBlocker]) -> Ve
             "The worktree of {member} is removed from its clone and the removal is committed in the workspace. Its branch stays in your clone."
         )];
     }
+    // The engine words a reason to follow the member's name; alone on its line it is a sentence.
     blockers
         .iter()
-        .map(|blocker| blocker.detail.clone())
+        .map(|blocker| {
+            let mut chars = blocker.detail.chars();
+            let first: String = chars
+                .next()
+                .map(char::to_uppercase)
+                .into_iter()
+                .flatten()
+                .collect();
+            let line = first + chars.as_str();
+            if line.ends_with('.') {
+                line
+            } else {
+                line + "."
+            }
+        })
         .collect()
 }
 
@@ -373,6 +388,7 @@ impl StatusView {
             // again (D256 (5)).
             (Ok(_), Some(member)) => {
                 self.workspace_removal_dialog = None;
+                self.model.members.forget();
                 self.list_focus.focus(window);
                 self.request_workspaces();
                 self.notify_user(&format!("Removed {member} from the workspace"), cx);
@@ -751,7 +767,15 @@ mod tests {
         )];
         assert_eq!(
             member_body_lines("billing", &dirty),
-            vec!["MemberDirty detail"]
+            vec!["MemberDirty detail."]
+        );
+        let lower = [RemovalBlocker {
+            detail: "it has uncommitted or untracked files".into(),
+            ..blocker(RemovalBlockerKind::MemberDirty, Some("billing"), true)
+        }];
+        assert_eq!(
+            member_body_lines("billing", &lower),
+            vec!["It has uncommitted or untracked files."]
         );
         assert_ne!(member_key("/w/x", "billing"), "/w/x");
     }

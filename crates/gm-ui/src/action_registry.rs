@@ -425,6 +425,9 @@ pub struct Context<'a> {
     /// The last operation of the operation log that can be undone, as the Undo button names it;
     /// `None` when there is none. Today only a restack records an undo.
     pub undoable: Option<&'a str>,
+    /// The members of the workspace the window shows, by folder name; empty in a plain
+    /// repository and until the engine answered (D256).
+    pub members: &'a [String],
 }
 
 /// What the Code viewer shows, for the rules: the text file on screen and the lines picked in it.
@@ -2046,7 +2049,13 @@ fn workspace_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), 
         let Args::File(path) = args else {
             return Err("No target for this action");
         };
-        return submodule_entry(path, ctx).map(|_| ()).ok_or(NOT_A_MEMBER);
+        let path = path.trim_end_matches('/');
+        let listed = ctx.members.iter().any(|member| member == path);
+        return if listed || submodule_entry(path, ctx).is_some() {
+            Ok(())
+        } else {
+            Err(NOT_A_MEMBER)
+        };
     }
     let row = workspace_entry(args, ctx)?;
     let here = ctx
@@ -3772,6 +3781,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -3976,6 +3986,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&entries, "")
         };
@@ -4055,6 +4066,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4117,6 +4129,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4295,6 +4308,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4370,6 +4384,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -4407,6 +4422,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&entries, "")
@@ -4436,6 +4452,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[], "")
@@ -4515,6 +4532,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4730,6 +4748,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4868,6 +4887,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -4936,6 +4956,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -4989,6 +5010,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5017,6 +5039,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5057,6 +5080,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5091,6 +5115,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5110,6 +5135,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5137,6 +5163,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -5708,6 +5735,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&modified, "")
         };
@@ -5833,6 +5861,7 @@ mod tests {
                 selected_memory: None,
                 features: FeatureSet::all(),
                 undoable: None,
+                members: &[],
                 stack: crate::action_registry::StackCtx::default(),
                 root: None,
                 ..with_stashes(&stashes)
@@ -5940,6 +5969,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -6161,6 +6191,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -6317,6 +6348,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..with_workflows(WorkflowCtx::default())
         };
@@ -6470,6 +6502,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(lines("a.txt", Some((1, 1))), None)
         };
@@ -6583,6 +6616,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..review_ctx(CommentSpot::Nothing, Some(&listed))
         };
@@ -6638,6 +6672,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..ctx(&[], "")
         };
@@ -6709,6 +6744,7 @@ mod tests {
             selected_memory: None,
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             ..open_ctx(&entries, Some(&current))
         };
@@ -7305,6 +7341,7 @@ mod tests {
         let context = Context {
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: StackCtx {
                 branches: &remotes,
                 ..StackCtx::default()
@@ -7331,6 +7368,7 @@ mod tests {
         let known = Context {
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: StackCtx {
                 stacks: Some(&stacks),
                 subject: None,
@@ -7373,6 +7411,7 @@ mod tests {
         let picking = |subject| Context {
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: StackCtx {
                 stacks: Some(&stacks),
                 subject: Some(subject),
@@ -7406,6 +7445,7 @@ mod tests {
         let with = |stacks| Context {
             features: FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: StackCtx {
                 stacks: Some(stacks),
                 ..StackCtx::default()
@@ -7941,6 +7981,16 @@ mod tests {
         assert_eq!(
             Action::RemoveWorkspaceMember.enabled(&Args::File("a.rs".into()), &context),
             Err("Not a workspace member.")
+        );
+        // A clean member has no row; the workspace's listing names it.
+        let listed = ["clean".to_owned()];
+        let with_listing = Context {
+            members: &listed,
+            ..ctx(&entries, "")
+        };
+        assert_eq!(
+            Action::RemoveWorkspaceMember.enabled(&Args::File("clean".into()), &with_listing),
+            Ok(())
         );
         assert_eq!(
             Action::RemoveWorkspaceMember.spec().title,

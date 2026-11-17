@@ -921,6 +921,7 @@ mod tests {
             selected_memory: None,
             features: gm_schema::FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             busy: None,
             entries,
@@ -1363,6 +1364,7 @@ mod tests {
             selected_memory: None,
             features: gm_schema::FeatureSet::all(),
             undoable: None,
+            members: &[],
             stack: crate::action_registry::StackCtx::default(),
             root: None,
             ..ctx(&[])

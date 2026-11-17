@@ -114,6 +114,64 @@ impl Cloning {
     }
 }
 
+/// The members of the workspace the window shows, as the engine last listed them for the root
+/// it was asked about. A plain repository lists none. Asked again when the window changes root and
+/// after a member is added or removed (D256).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Members {
+    /// The root the listing is for, or is being asked for.
+    root: Option<String>,
+    pending: Option<OperationId>,
+    list: Vec<String>,
+}
+
+impl Members {
+    /// Whether the listing must be asked for `root`: it is for another root, or was dropped.
+    #[must_use]
+    pub(crate) fn wants(&self, root: &str) -> bool {
+        self.root.as_deref() != Some(root)
+    }
+
+    /// The listing of `root` is asked by `id`; the old one no longer applies.
+    pub(crate) fn request(&mut self, root: &str, id: OperationId) {
+        self.root = Some(root.to_owned());
+        self.pending = Some(id);
+        self.list.clear();
+    }
+
+    /// Keeps the members that `id` answers, when it is the request waited for.
+    pub(crate) fn listed_by(&mut self, id: OperationId, members: Vec<String>) {
+        if self.pending == Some(id) {
+            self.pending = None;
+            self.list = members;
+        }
+    }
+
+    /// Drops the listing, so it is asked again.
+    pub(crate) fn forget(&mut self) {
+        *self = Self::default();
+    }
+
+    #[must_use]
+    pub(crate) fn listed(&self) -> &[String] {
+        &self.list
+    }
+}
+
+impl StatusView {
+    /// Asks for the members of the window's repository when the listing is not for it.
+    pub(crate) fn request_members(&mut self) {
+        let Some(root) = self.model.status().map(|status| status.root.clone()) else {
+            return;
+        };
+        if !self.model.members.wants(&root) {
+            return;
+        }
+        let id = self.engine.dispatch(Actor::Human, CommandKind::ListMembers);
+        self.model.members.request(&root, id);
+    }
+}
+
 /// Whether **Clone** is enabled: a URL, a folder, and no clone in flight.
 #[must_use]
 pub(crate) fn may_clone(url: &str, folder: &str, cloning: bool) -> bool {
@@ -489,6 +547,22 @@ mod tests {
         cloning.settle(OperationId(5), OperationState::Failed, Some("x".into()));
         assert!(!cloning.owns(OperationId(5)));
         assert_eq!(cloning.take_outcome(), None);
+    }
+
+    #[test]
+    fn members_are_asked_once_per_root_and_only_the_answer_waited_for_is_kept() {
+        let mut members = Members::default();
+        assert!(members.wants("/w/pay"));
+        members.request("/w/pay", OperationId(1));
+        assert!(!members.wants("/w/pay"));
+        members.listed_by(OperationId(9), vec!["x".into()]);
+        assert!(members.listed().is_empty());
+        members.listed_by(OperationId(1), vec!["billing".into()]);
+        assert_eq!(members.listed(), ["billing"]);
+        assert!(members.wants("/src/billing"));
+        members.forget();
+        assert!(members.wants("/w/pay"));
+        assert!(members.listed().is_empty());
     }
 
     #[test]

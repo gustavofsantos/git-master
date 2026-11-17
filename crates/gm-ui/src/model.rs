@@ -49,7 +49,7 @@ use crate::transform_run::Transforms;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
 use crate::workspace_branch::RepoBranches;
-use crate::workspace_clone::{CloneSuggestion, Cloning};
+use crate::workspace_clone::{CloneSuggestion, Cloning, Members};
 use crate::workspace_create::{Answer, Making, Planning};
 use crate::workspace_list::WorkspaceList;
 use crate::workspace_remove::{WorkspaceRemoval, member_key};
@@ -189,6 +189,8 @@ pub struct Model {
     pub workspace_removal: WorkspaceRemoval,
     /// The suggested folder and the clone in flight of **Clone from URL…** (D256 (1)).
     pub(crate) workspace_clone: Cloning,
+    /// The members of the workspace the window shows, which Remove from Workspace picks (D256).
+    pub(crate) members: Members,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
     /// The new-branch dialog's create in flight, and its outcome.
@@ -1181,6 +1183,10 @@ impl Model {
                 let _ = self.workspace_making.created(id, path);
                 None
             }
+            Event::MembersListed { id, members } => {
+                self.members.listed_by(id, members);
+                None
+            }
             Event::ClonePlanned {
                 id,
                 url,
@@ -1657,8 +1663,6 @@ impl Model {
             | Event::WorkspaceRemoved { .. }
             // The member dialogs read these from the view as they come (D256).
             | Event::WorkspaceMemberRemoved { .. }
-        // The members of a workspace are read by the agent's tools; the app keeps none (D181).
-        | Event::MembersListed { .. }
         // The delete preview is read by the Manage Contexts dialog from the view, which asks the
         // delete's question from it; the model keeps no preview (D191).
         | Event::ContextDeletePreview { .. }

@@ -523,10 +523,9 @@ fn action_row(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry])
             )
         }
         ArgKind::File => {
-            let targets: Vec<Args> = ctx
-                .entries
-                .iter()
-                .map(|entry| Args::File(entry.path.clone()))
+            let targets: Vec<Args> = file_targets(action, ctx)
+                .into_iter()
+                .map(Args::File)
                 .collect();
             (
                 Choice::Pick(action),
@@ -646,6 +645,16 @@ fn pick_state(
     Err(first.unwrap_or(nothing))
 }
 
+/// The paths a file action can pick: the Working Copy's rows, or, for Remove from Workspace, the
+/// workspace's members, which a clean member is too, though no row lists it (D256).
+fn file_targets(action: Action, ctx: &ActionContext<'_>) -> Vec<String> {
+    if action == Action::RemoveWorkspaceMember {
+        ctx.members.to_vec()
+    } else {
+        ctx.entries.iter().map(|entry| entry.path.clone()).collect()
+    }
+}
+
 /// The listed workflows the palette can pick, in the order the engine gave them.
 fn workflow_targets(ctx: &ActionContext<'_>) -> Vec<Args> {
     ctx.workflows
@@ -736,12 +745,11 @@ fn pick(action: Action, ctx: &ActionContext<'_>, branches: &[BranchEntry]) -> Ve
                 target_row(action, Section::Branches, branch.name.clone(), args, ctx)
             })
             .collect(),
-        ArgKind::File => ctx
-            .entries
-            .iter()
-            .map(|entry| {
-                let args = Args::File(entry.path.clone());
-                target_row(action, Section::Files, entry.path.clone(), args, ctx)
+        ArgKind::File => file_targets(action, ctx)
+            .into_iter()
+            .map(|path| {
+                let args = Args::File(path.clone());
+                target_row(action, Section::Files, path, args, ctx)
             })
             .collect(),
         ArgKind::Worktree => listed_worktrees(ctx)
@@ -924,6 +932,7 @@ mod tests {
             stashes: None,
             review: crate::action_registry::ReviewCtx::default(),
             undoable: None,
+            members: &[],
         }
     }
 
@@ -1776,6 +1785,37 @@ mod tests {
                         action: Action::Commit,
                         args: Args::None
                     })
+        );
+    }
+
+    #[test]
+    fn remove_from_workspace_picks_every_member_a_clean_one_included() {
+        let entries: [StatusEntry; 0] = [];
+        let members = ["billing".to_owned(), "checkout".to_owned()];
+        let context = ActionContext {
+            members: &members,
+            ..ctx_with(&entries, "")
+        };
+        let top = build(Stage::Actions, "", &context, &[]);
+        let remove = find(&top, "Remove from Workspace…");
+        assert_eq!(remove.choice, Choice::Pick(Action::RemoveWorkspaceMember));
+        assert_eq!(remove.state, Ok(()));
+        let pick = build(
+            Stage::Pick(Action::RemoveWorkspaceMember),
+            "",
+            &context,
+            &[],
+        );
+        assert_eq!(pick.len(), 2);
+        assert_eq!(find(&pick, "checkout").state, Ok(()));
+        let plain = ctx_with(&entries, "");
+        assert!(
+            find(
+                &build(Stage::Actions, "", &plain, &[]),
+                "Remove from Workspace…"
+            )
+            .state
+            .is_err()
         );
     }
 

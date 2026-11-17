@@ -126,6 +126,16 @@ pub(crate) fn repo_choices(window_root: Option<&str>, recents: &[PathBuf]) -> Ve
     choices
 }
 
+/// The repositories the add dialog offers for the workspace at `target`: the recent ones, without
+/// the workspace itself, which cannot be its own member (D256 (4)).
+#[must_use]
+pub(crate) fn add_choices(target: &str, recents: &[PathBuf]) -> Vec<String> {
+    repo_choices(None, recents)
+        .into_iter()
+        .filter(|path| !same_path(path, target))
+        .collect()
+}
+
 /// What a branch of a row does, as the row says it: the engine's plan for it.
 #[must_use]
 pub(crate) fn describe(plan: &MemberPlan) -> String {
@@ -949,6 +959,7 @@ impl StatusView {
             // engine read its status again (D256 (4)).
             Ok(path) if adding.is_some() => {
                 self.workspace_dialog = None;
+                self.model.members.forget();
                 self.list_focus.focus(window);
                 let name = crate::workspace_list::folder_name(&path);
                 self.notify_user(&format!("Added to workspace {name}"), cx);
@@ -1113,13 +1124,13 @@ impl StatusView {
             Some(answer) => outcomes(&form.members, answer).0,
             None => vec![None; dialog.rows.len()],
         };
-        // A workspace's own window is not a repository to add to it.
-        let window_root = self
-            .model
-            .status()
-            .map(|status| status.root.clone())
-            .filter(|_| dialog.target.is_none());
-        let choices = repo_choices(window_root.as_deref(), self.recents.paths());
+        // A workspace is not a repository to add to itself; its window's root is left out.
+        let choices = if let Some(target) = &dialog.target {
+            add_choices(target, self.recents.paths())
+        } else {
+            let window_root = self.model.status().map(|status| status.root.clone());
+            repo_choices(window_root.as_deref(), self.recents.paths())
+        };
         let open = self.workspace_branch_list(cx);
         div()
             .flex()
@@ -1838,6 +1849,8 @@ mod tests {
         assert_eq!(repo_choices(Some("/r"), &recents), ["/r", "/billing"]);
         assert_eq!(repo_choices(None, &recents), ["/r", "/billing"]);
         assert!(repo_choices(None, &[]).is_empty());
+        let recents = [PathBuf::from("/w/pay"), PathBuf::from("/billing")];
+        assert_eq!(add_choices("/w/pay/", &recents), ["/billing"]);
     }
 
     #[test]
