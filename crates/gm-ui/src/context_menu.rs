@@ -218,6 +218,7 @@ pub(crate) fn file_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> {
         items.insert(1, item(Action::OpenSubmoduleNewWindow, 0));
         // A member of a workspace leads with its branch, which Check Out Branch puts back (D183).
         items.insert(2, item(Action::CheckOutMemberBranch, 0));
+        items.insert(3, item(Action::RemoveWorkspaceMember, 0));
     }
     offered_items(items, ctx)
 }
@@ -434,6 +435,7 @@ pub(crate) fn workspace_items(path: &str, ctx: &ActionContext<'_>) -> Vec<Item> 
     vec![
         item(Action::OpenWorkspace, 0),
         item(Action::OpenWorkspaceNewWindow, 0),
+        item(Action::AddToWorkspace, 1),
         item(Action::RevealWorkspace, 1),
         item(Action::RemoveWorkspace, 2),
     ]
@@ -1506,10 +1508,12 @@ mod tests {
             [
                 Action::OpenWorkspace,
                 Action::OpenWorkspaceNewWindow,
+                Action::AddToWorkspace,
                 Action::RevealWorkspace,
                 Action::RemoveWorkspace
             ]
         );
+        assert_eq!(find(&items, Action::AddToWorkspace).state, Ok(()));
         assert_eq!(
             find(&items, Action::OpenWorkspace).state,
             Err("Open in this window.")
@@ -1533,5 +1537,9 @@ mod tests {
         assert_eq!(items[2].action, Action::CheckOutMemberBranch);
         // Nothing has read the member yet, so the item says so.
         assert_eq!(items[2].state, Err("The submodule is still being read."));
+        // Removing it needs no read: the engine checks it (D256).
+        assert_eq!(items[3].action, Action::RemoveWorkspaceMember);
+        assert_eq!(items[3].state, Ok(()));
+        assert!(items[3].destructive());
     }
 }

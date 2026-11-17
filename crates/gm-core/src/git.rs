@@ -3058,6 +3058,30 @@ impl GitPort for SubprocessGit {
         Ok(self.remote_run(root, remote::fetch_args()))
     }
 
+    fn clone_repository(&self, url: &str, dest: &Path) -> Result<RemoteRun, GitError> {
+        if dest.exists() {
+            return Err(GitError(format!("'{}' already exists", dest.display())));
+        }
+        let parent = dest.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let args = vec![
+            "clone".to_owned(),
+            "--quiet".to_owned(),
+            "--".to_owned(),
+            url.to_owned(),
+            dest.to_string_lossy().into_owned(),
+        ];
+        let git = self.clone();
+        Ok(Box::new(move || {
+            std::fs::create_dir_all(&parent).map_err(|e| GitError(e.to_string()))?;
+            let mut command = git.git(&parent);
+            command
+                .args(&args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::null());
+            git.logged(command, None).map(drop)
+        }))
+    }
+
     fn pull(&self, root: &Path) -> Result<RemoteRun, GitError> {
         let repo = open(root)?;
         let branch = current_branch(&repo)?;

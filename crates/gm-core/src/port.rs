@@ -1083,6 +1083,12 @@ pub trait GitPort: Send {
         Err(GitError("fetch is not supported by this adapter".into()))
     }
 
+    /// Checks a `git clone` of `url` into the folder `dest`, which must not exist, and returns
+    /// the run, which creates the parent folders first (D256 (1)). Starts no process itself.
+    fn clone_repository(&self, _url: &str, _dest: &Path) -> Result<RemoteRun, GitError> {
+        Err(GitError("clone is not supported by this adapter".into()))
+    }
+
     /// Checks a `git pull --ff-only` of the current branch and returns the run.
     /// Refuses a detached HEAD and a branch without an upstream, before Git runs.
     fn pull(&self, _root: &Path) -> Result<RemoteRun, GitError> {

@@ -1161,3 +1161,158 @@ fn two_workspaces_sharing_a_repository_are_two_lines_and_remove_drops_only_its_o
     );
     assert!(!repo.join("gitmaster").exists());
 }
+
+#[test]
+fn add_clones_a_url_into_the_clone_root_then_adds_it() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &[]);
+    let origin = origin_of(&s, &repo, "billing");
+    let ws = s.create("w");
+    let url = format!("file://{}", origin.display());
+
+    let (code, out, err) = s.run(&["add", &url, "main", "--workspace", ws.to_str().unwrap()]);
+
+    assert_eq!(code, 0, "{err}");
+    let clone = s.path().join("home/src/billing");
+    assert!(
+        err.contains(&format!("cloned {url} into {}", clone.display())),
+        "{err}"
+    );
+    assert_eq!(out.trim_end(), ws.join("billing").display().to_string());
+    let gitmodules = std::fs::read_to_string(ws.join(".gitmodules")).unwrap();
+    assert!(
+        gitmodules.contains(&format!("url = {}", clone.display())),
+        "{gitmodules}"
+    );
+    assert_eq!(
+        git_in(&ws.join("billing"), &["symbolic-ref", "--short", "HEAD"]),
+        "main"
+    );
+}
+
+#[test]
+fn add_clones_to_the_folder_given_and_never_over_one() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &[]);
+    let origin = origin_of(&s, &repo, "billing");
+    let ws = s.create("w");
+    let url = format!("file://{}", origin.display());
+    let to = s.path().join("mine/pay");
+
+    let (code, _, err) = s.run(&[
+        "add",
+        &url,
+        "main",
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--clone-to",
+        to.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(ws.join("pay").is_dir());
+
+    let other = s.create("v");
+    let (code, _, err) = s.run(&[
+        "add",
+        &url,
+        "main",
+        "--workspace",
+        other.to_str().unwrap(),
+        "--clone-to",
+        to.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("already exists"), "{err}");
+    assert!(!other.join("pay").exists());
+}
+
+#[test]
+fn clone_to_without_a_url_is_a_usage_error_and_a_failed_clone_adds_nothing() {
+    let s = Scratch::new();
+    let repo = s.repo("service-a", &[]);
+    let ws = s.create("w");
+    let (code, _, err) = s.run(&[
+        "add",
+        repo.to_str().unwrap(),
+        "main",
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--clone-to",
+        "x",
+    ]);
+    assert_eq!(code, 2, "{err}");
+
+    let url = format!("file://{}", s.path().join("missing.git").display());
+    let (code, _, err) = s.run(&["add", &url, "main", "--workspace", ws.to_str().unwrap()]);
+    assert_eq!(code, 1, "{err}");
+    assert!(!s.path().join("home/src/missing").exists());
+    assert!(!ws.join(".gitmodules").exists());
+}
+
+#[test]
+fn remove_member_takes_one_member_out_and_keeps_its_branch() {
+    let s = Scratch::new();
+    let a = s.repo("service-a", &["feat/x"]);
+    let b = s.repo("service-b", &["feat/x"]);
+    let ws = s.create("w");
+    s.add(&ws, &a, "feat/x");
+    s.add(&ws, &b, "feat/x");
+
+    let (code, out, err) = s.run_in(&ws, &["remove-member", "service-b"], "");
+
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim_end(), ws.join("service-b").display().to_string());
+    assert!(!ws.join("service-b").exists());
+    assert!(ws.join("service-a").exists());
+    let gitmodules = std::fs::read_to_string(ws.join(".gitmodules")).unwrap();
+    assert!(!gitmodules.contains("service-b"), "{gitmodules}");
+    assert_eq!(git_in(&ws, &["status", "--porcelain"]), "");
+    assert_eq!(
+        git_in(&ws, &["log", "-1", "--format=%s"]),
+        "Remove service-b"
+    );
+    assert!(!worktrees_of(&b).contains(&ws.join("service-b").display().to_string()));
+    assert!(local_oid(&b, "feat/x").is_some());
+    assert!(
+        git_in(&ws, &["config", "--local", "--get-regexp", "^submodule\\."])
+            .lines()
+            .all(|line| !line.contains("service-b")),
+    );
+}
+
+#[test]
+fn remove_member_refuses_a_dirty_member_without_force_and_the_one_it_runs_in() {
+    let s = Scratch::new();
+    let a = s.repo("service-a", &["feat/x"]);
+    let ws = s.create("w");
+    let member = s.add(&ws, &a, "feat/x");
+    std::fs::write(member.join("draft.txt"), "x\n").unwrap();
+
+    let (code, _, err) = s.run(&[
+        "remove-member",
+        "service-a",
+        "--workspace",
+        ws.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1);
+    assert!(err.contains("--force"), "{err}");
+    assert!(member.exists());
+
+    let (code, _, err) = s.run_in(&member, &["remove-member", "service-a", "--force"], "");
+    assert_eq!(code, 1);
+    assert!(err.contains("current directory"), "{err}");
+
+    let (code, _, err) = s.run(&[
+        "remove-member",
+        "service-a",
+        "--workspace",
+        ws.to_str().unwrap(),
+        "--force",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!member.exists());
+
+    let (code, _, err) = s.run(&["remove-member", "nope", "--workspace", ws.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(err.contains("not a member"), "{err}");
+}

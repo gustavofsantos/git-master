@@ -49,9 +49,10 @@ use crate::transform_run::Transforms;
 use crate::workflow_run::Workflows;
 use crate::workflows_page::WorkflowsPage;
 use crate::workspace_branch::RepoBranches;
+use crate::workspace_clone::{CloneSuggestion, Cloning};
 use crate::workspace_create::{Answer, Making, Planning};
 use crate::workspace_list::WorkspaceList;
-use crate::workspace_remove::WorkspaceRemoval;
+use crate::workspace_remove::{WorkspaceRemoval, member_key};
 use crate::worktree_create::Creating;
 use crate::worktree_prune::Pruning;
 use crate::worktree_remove::Removal;
@@ -186,6 +187,8 @@ pub struct Model {
     pub workspace_making: Making,
     /// The Remove Workspace dialog's inspection, removal in flight and outcome (D183).
     pub workspace_removal: WorkspaceRemoval,
+    /// The suggested folder and the clone in flight of **Clone from URL…** (D256 (1)).
+    pub(crate) workspace_clone: Cloning,
     /// The prune dialog's listing, prune in flight and outcome.
     pub pruning: Pruning,
     /// The new-branch dialog's create in flight, and its outcome.
@@ -778,6 +781,12 @@ impl Model {
                 self.workspace_removal.settle(state, detail);
                 None
             }
+            Event::OperationChanged {
+                id, state, detail, ..
+            } if self.workspace_clone.owns(id) => {
+                self.workspace_clone.settle(id, state, detail);
+                None
+            }
             // A branch create or delete belongs to its dialog, not to the status bar.
             Event::OperationChanged {
                 id, state, detail, ..
@@ -1167,14 +1176,43 @@ impl Model {
                     .answered(id, Answer { path, members, problems });
                 None
             }
-            Event::WorkspaceCreated { id, path } => {
+            // Adding members ends the same dialog as a create does (D256 (4)).
+            Event::WorkspaceCreated { id, path } | Event::WorkspaceMembersAdded { id, path, .. } => {
                 let _ = self.workspace_making.created(id, path);
+                None
+            }
+            Event::ClonePlanned {
+                id,
+                url,
+                path,
+                problem,
+            } => {
+                let _ = self
+                    .workspace_clone
+                    .suggested(id, CloneSuggestion { url, path, problem });
+                None
+            }
+            Event::RepositoryCloned { id, path, .. } => {
+                let _ = self.workspace_clone.cloned(id, path);
                 None
             }
             // The inspection is kept for the dialog that asked it (D183 (4)).
             Event::WorkspaceRemovalInspected { id, path, blockers } => {
                 if self.workspace_removal.owns(id) {
                     self.workspace_removal.inspected(&path, blockers);
+                }
+                None
+            }
+            // The same dialog removes one member (D256 (5)).
+            Event::MemberRemovalInspected {
+                id,
+                workspace,
+                member,
+                blockers,
+            } => {
+                if self.workspace_removal.owns(id) {
+                    self.workspace_removal
+                        .inspected(&member_key(&workspace, &member), blockers);
                 }
                 None
             }
@@ -1617,6 +1655,8 @@ impl Model {
             | Event::ThreadsChanged
             // The removal's outcome is the settled operation's, which the dialog takes (D183).
             | Event::WorkspaceRemoved { .. }
+            // The member dialogs read these from the view as they come (D256).
+            | Event::WorkspaceMemberRemoved { .. }
         // The members of a workspace are read by the agent's tools; the app keeps none (D181).
         | Event::MembersListed { .. }
         // The delete preview is read by the Manage Contexts dialog from the view, which asks the
@@ -2029,6 +2069,7 @@ fn checkout_message(detail: Option<&str>) -> String {
 
 /// The operation an event answers; `None` for an event of a workflow run, which
 /// belongs to the run, not to an operation.
+#[allow(clippy::too_many_lines)] // one arm per event
 fn event_id(event: &Event) -> Option<OperationId> {
     match event {
         Event::StatusLoaded { id, .. }
@@ -2074,6 +2115,11 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkspaceCreated { id, .. }
         | Event::WorkspaceRemovalInspected { id, .. }
         | Event::WorkspaceRemoved { id, .. }
+        | Event::WorkspaceMembersAdded { id, .. }
+        | Event::ClonePlanned { id, .. }
+        | Event::RepositoryCloned { id, .. }
+        | Event::MemberRemovalInspected { id, .. }
+        | Event::WorkspaceMemberRemoved { id, .. }
         | Event::HookSectionsListed { id, .. }
         | Event::HooksConverted { id, .. }
         | Event::WorkflowsListed { id, .. }
@@ -4462,6 +4508,75 @@ mod workspace_tests {
             detail: None,
         });
         assert_eq!(model.workspace_making.take(), Some(Ok("/w/x".to_owned())));
+    }
+
+    #[test]
+    fn added_members_end_the_dialog_as_a_create_does() {
+        let mut model = Model::default();
+        model.workspace_making.start(OperationId(7));
+        let _ = model.apply(Event::WorkspaceMembersAdded {
+            id: OperationId(7),
+            path: "/w/x".to_owned(),
+            members: vec!["billing".to_owned()],
+        });
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(7),
+            actor: Actor::Human,
+            state: OperationState::Done,
+            detail: None,
+        });
+        assert_eq!(model.workspace_making.take(), Some(Ok("/w/x".to_owned())));
+    }
+
+    #[test]
+    fn a_member_inspection_is_kept_under_its_member_and_not_the_workspace() {
+        let mut model = Model::default();
+        let key = member_key("/w/x", "billing");
+        model
+            .workspace_removal
+            .begin_inspect(OperationId(8), key.clone());
+        let _ = model.apply(Event::MemberRemovalInspected {
+            id: OperationId(8),
+            workspace: "/w/x".to_owned(),
+            member: "billing".to_owned(),
+            blockers: Vec::new(),
+        });
+        assert_eq!(
+            model.workspace_removal.inspection(&key).map(<[_]>::len),
+            Some(0)
+        );
+        assert!(model.workspace_removal.inspection("/w/x").is_none());
+    }
+
+    #[test]
+    fn a_clone_and_its_suggestion_stay_out_of_the_status_bar() {
+        let mut model = Model::default();
+        model.workspace_clone.suggest(OperationId(4));
+        let _ = model.apply(Event::ClonePlanned {
+            id: OperationId(4),
+            url: "https://h/pay.git".to_owned(),
+            path: Some("/s/pay".to_owned()),
+            problem: None,
+        });
+        assert_eq!(
+            model
+                .workspace_clone
+                .take_suggestion()
+                .and_then(|suggestion| suggestion.path),
+            Some("/s/pay".to_owned())
+        );
+        model.workspace_clone.start(OperationId(5));
+        let _ = model.apply(Event::OperationChanged {
+            id: OperationId(5),
+            actor: Actor::Human,
+            state: OperationState::Failed,
+            detail: Some("repository not found".to_owned()),
+        });
+        assert_eq!(model.error, None);
+        assert_eq!(
+            model.workspace_clone.take_outcome(),
+            Some(Err("repository not found".to_owned()))
+        );
     }
 
     #[test]

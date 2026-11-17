@@ -1,4 +1,5 @@
-//! The New Workspace dialog (D183 (3); docs/guide/workspaces.md, "Create a workspace"). The rules
+//! The New Workspace dialog (D183 (3); docs/guide/workspaces.md, "Create a workspace"), which also
+//! adds repositories to a workspace that exists (D256 (4); "Add a repository"). The rules
 //! are pure and tested here: the form and what it asks the engine, which row an answer belongs to,
 //! the branch suggestions and when Create is enabled. The window side is the `impl StatusView` at
 //! the bottom: the layer, the fields, and the plan the engine answers after each edit.
@@ -21,6 +22,7 @@ use crate::text_search::DEBOUNCE_MS;
 use crate::theme;
 use crate::view::StatusView;
 use crate::workspace_branch::{Choice, Known, RepoBranches, choices};
+use crate::workspace_clone::CloneForm;
 use crate::worktree_create::move_pick;
 use crate::worktree_list::same_path;
 
@@ -397,6 +399,11 @@ pub(crate) struct WorkspaceDialog {
     /// then the first entry is the one Enter takes.
     pub(crate) pick: Option<usize>,
     pub(crate) error: Option<String>,
+    /// The workspace the rows are added to; `None` creates a new workspace (D256 (4)).
+    pub(crate) target: Option<String>,
+    /// The **Clone from URL…** form, while it is open.
+    pub(crate) clone: Option<CloneForm>,
+    pub(crate) clone_subscriptions: Vec<Subscription>,
     /// The form, the **Branch for all** text and the filter the observers last saw. A field
     /// notifies on every caret blink, so a change counts only when these differ.
     seen: Form,
@@ -420,14 +427,33 @@ impl WorkspaceDialog {
         }
     }
 
-    /// The fields in the order Tab visits them: the name, Branch for all, then the filter of an
-    /// open branch list.
+    /// The fields in the order Tab visits them: the clone form's, the name (when the dialog
+    /// creates a workspace), Branch for all, then the filter of an open branch list.
     fn fields(&self) -> Vec<&Entity<TextArea>> {
-        let mut fields = vec![&self.name, &self.branch_all];
+        let mut fields = Vec::new();
+        if let Some(form) = &self.clone {
+            fields.push(&form.url);
+            fields.push(&form.folder);
+        }
+        if self.target.is_none() {
+            fields.push(&self.name);
+        }
+        fields.push(&self.branch_all);
         if self.picking.is_some() {
             fields.push(&self.filter);
         }
         fields
+    }
+
+    /// Gives the focus to the first field the dialog shows: the name, or **Branch for all** when
+    /// the dialog adds to a workspace.
+    pub(crate) fn focus_first(&self, window: &mut Window, cx: &mut App) {
+        let first = if self.target.is_some() {
+            &self.branch_all
+        } else {
+            &self.name
+        };
+        first.update(cx, |area, cx| area.focus(window, cx));
     }
 }
 
@@ -435,15 +461,40 @@ impl StatusView {
     /// Opens the dialog. The first row starts with this window's repository and its branch, when
     /// it has them, and the plan follows. The repository's branches are asked for at once.
     pub(crate) fn open_workspace_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_member_dialog(None, window, cx);
+    }
+
+    /// Opens the dialog that adds repositories to the workspace at `path` (D256 (4)). Its rows start
+    /// empty: the window's repository is the workspace itself, or a member of it.
+    pub(crate) fn open_add_members_dialog(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_member_dialog(Some(path.to_owned()), window, cx);
+    }
+
+    fn open_member_dialog(
+        &mut self,
+        target: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.workspace_dialog.is_some() {
             return;
         }
-        let window_root = self.model.status().map(|status| status.root.clone());
-        let head = self
-            .model
-            .status()
-            .and_then(|status| status.branch.head.clone())
-            .unwrap_or_default();
+        let (window_root, head) = if target.is_some() {
+            (None, String::new())
+        } else {
+            (
+                self.model.status().map(|status| status.root.clone()),
+                self.model
+                    .status()
+                    .and_then(|status| status.branch.head.clone())
+                    .unwrap_or_default(),
+            )
+        };
         let field = |placeholder: &'static str, cx: &mut Context<Self>| {
             cx.new(|cx| TextArea::new(placeholder, cx).with_lines(1, 1))
         };
@@ -473,7 +524,12 @@ impl StatusView {
                 }
             },
         ));
-        let focus = name.clone();
+        // Adding to a workspace needs no name: the field holds the workspace's, so the form is
+        // complete without it, and is not shown.
+        if let Some(path) = &target {
+            let folder = crate::workspace_list::folder_name(path);
+            name.update(cx, |area, cx| area.set_text(&folder, cx));
+        }
         let first_repo = window_root.unwrap_or_default();
         let first = MemberRow {
             repo: first_repo.clone(),
@@ -488,18 +544,21 @@ impl StatusView {
             picking: None,
             pick: None,
             error: None,
+            target,
+            clone: None,
+            clone_subscriptions: Vec::new(),
             seen: Form::default(),
             seen_all: String::new(),
             seen_filter: String::new(),
             _subscriptions: subscriptions,
         };
         dialog.seen = dialog.form(cx);
+        dialog.focus_first(window, cx);
         self.workspace_dialog = Some(dialog);
         self.model.workspace_plan = Planning::default();
         self.model.workspace_branches = RepoBranches::default();
         self.request_workspaces();
         self.request_branches(&first_repo, cx);
-        focus.update(cx, |area, cx| area.focus(window, cx));
         self.plan_soon(cx);
     }
 
@@ -516,6 +575,10 @@ impl StatusView {
         let Some(dialog) = self.workspace_dialog.as_mut() else {
             return;
         };
+        if dialog.clone.is_some() {
+            self.close_clone_form(window, cx);
+            return;
+        }
         let list_was_open = dialog.picking.is_some();
         if escape_closes_dialog(&mut dialog.choosing, &mut dialog.picking) {
             self.close_workspace_dialog(window, cx);
@@ -593,15 +656,19 @@ impl StatusView {
         if !form.complete() {
             return;
         }
-        let id = self.engine.dispatch(
-            Actor::Human,
-            CommandKind::PlanWorkspace {
+        let kind = match &dialog.target {
+            Some(workspace) => CommandKind::PlanWorkspaceMembers {
+                workspace: workspace.clone(),
+                members: form.requests(),
+            },
+            None => CommandKind::PlanWorkspace {
                 name: form.name.trim().to_owned(),
                 members: form.requests(),
                 base: None,
                 root: None,
             },
-        );
+        };
+        let id = self.engine.dispatch(Actor::Human, kind);
         self.model.workspace_plan.sent(id);
         cx.notify();
     }
@@ -610,7 +677,7 @@ impl StatusView {
     /// focus: a focused field that is no longer shown takes no key.
     fn focus_name(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(dialog) = self.workspace_dialog.as_ref() {
-            dialog.name.update(cx, |area, cx| area.focus(window, cx));
+            dialog.focus_first(window, cx);
         }
     }
 
@@ -792,6 +859,14 @@ impl StatusView {
     /// Enter: takes the highlighted entry of an open branch list, or else sends the create. While
     /// a list is open Enter never sends the create, so a half-read list cannot create by accident.
     fn workspace_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .workspace_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.clone.is_some())
+        {
+            self.submit_clone(cx);
+            return;
+        }
         let Some(list) = self.workspace_branch_list(cx) else {
             self.submit_workspace(cx);
             return;
@@ -836,15 +911,19 @@ impl StatusView {
         ) {
             return;
         }
-        let id = self.engine.dispatch(
-            Actor::Human,
-            CommandKind::CreateWorkspace {
+        let kind = match &dialog.target {
+            Some(workspace) => CommandKind::AddWorkspaceMembers {
+                workspace: workspace.clone(),
+                members: form.requests(),
+            },
+            None => CommandKind::CreateWorkspace {
                 name: form.name.trim().to_owned(),
                 members: form.requests(),
                 base: None,
                 root: None,
             },
-        );
+        };
+        let id = self.engine.dispatch(Actor::Human, kind);
         self.model.workspace_making.start(id);
         if let Some(dialog) = self.workspace_dialog.as_mut() {
             dialog.error = None;
@@ -861,7 +940,19 @@ impl StatusView {
         cx: &mut Context<Self>,
     ) {
         self.request_workspaces();
+        let adding = self
+            .workspace_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.target.clone());
         match outcome {
+            // The repositories joined a workspace that exists: the window stays where it is, and the
+            // engine read its status again (D256 (4)).
+            Ok(path) if adding.is_some() => {
+                self.workspace_dialog = None;
+                self.list_focus.focus(window);
+                let name = crate::workspace_list::folder_name(&path);
+                self.notify_user(&format!("Added to workspace {name}"), cx);
+            }
             Ok(path) => {
                 self.workspace_dialog = None;
                 self.list_focus.focus(window);
@@ -968,16 +1059,33 @@ impl StatusView {
                 div()
                     .text_color(theme::text())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("New workspace"),
+                    .child(match &dialog.target {
+                        Some(path) => format!(
+                            "Add repositories to {}",
+                            crate::workspace_list::folder_name(path)
+                        ),
+                        None => "New workspace".to_owned(),
+                    }),
             )
-            .child(focus_field_row("NAME", dialog.name.clone(), cx))
+            .when(dialog.target.is_none(), |panel| {
+                panel.child(focus_field_row("NAME", dialog.name.clone(), cx))
+            })
             .child(self.workspace_members(dialog, cx))
+            .children(
+                dialog
+                    .clone
+                    .as_ref()
+                    .map(|form| self.clone_form_view(form, cx)),
+            )
             .child(focus_field_row(
                 "BRANCH FOR ALL",
                 dialog.branch_all.clone(),
                 cx,
             ))
-            .child(folder_line(&dialog.form(cx), self.model.workspaces.root()))
+            .child(match &dialog.target {
+                Some(path) => target_line(path),
+                None => folder_line(&dialog.form(cx), self.model.workspaces.root()),
+            })
             .children(self.workspace_problems(dialog, cx))
             .children(dialog.error.as_ref().map(|error| {
                 div()
@@ -986,6 +1094,7 @@ impl StatusView {
                     .child(error.clone())
             }))
             .child(buttons(
+                dialog.target.is_some(),
                 self.model.workspace_making.is_pending(),
                 may_create(
                     &dialog.form(cx),
@@ -1004,7 +1113,12 @@ impl StatusView {
             Some(answer) => outcomes(&form.members, answer).0,
             None => vec![None; dialog.rows.len()],
         };
-        let window_root = self.model.status().map(|status| status.root.clone());
+        // A workspace's own window is not a repository to add to it.
+        let window_root = self
+            .model
+            .status()
+            .map(|status| status.root.clone())
+            .filter(|_| dialog.target.is_none());
         let choices = repo_choices(window_root.as_deref(), self.recents.paths());
         let open = self.workspace_branch_list(cx);
         div()
@@ -1078,6 +1192,14 @@ fn focus_field_row(label: &'static str, field: Entity<TextArea>, cx: &Context<St
 }
 
 /// The FOLDER line: `<root>/<name>`, or a hint until the name is typed.
+/// The line that names the workspace the rows are added to.
+fn target_line(path: &str) -> Div {
+    div()
+        .text_sm()
+        .text_color(theme::muted())
+        .child(format!("Workspace: {path}"))
+}
+
 fn folder_line(form: &Form, root: Option<&str>) -> Div {
     let folder = form.folder(root);
     div()
@@ -1320,6 +1442,27 @@ fn chooser(index: usize, choices: &[String], cx: &Context<StatusView>) -> Div {
                     }),
                 ),
         )
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "workspace-choice-clone-{index}"
+                )))
+                .px_2()
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .text_sm()
+                .cursor_pointer()
+                .text_color(theme::accent())
+                .hover(|style| style.bg(theme::selected_row()))
+                .child("Clone from URL…")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.open_clone_form(index, window, cx);
+                    }),
+                ),
+        )
 }
 
 /// The branch list of row `index`: its filter, the notice while it loads or fails, and the
@@ -1534,7 +1677,7 @@ fn add_repo_button(cx: &Context<StatusView>) -> Stateful<Div> {
 }
 
 /// Cancel and Create workspace. The button stays disabled until the rules allow the create.
-fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
+fn buttons(adding: bool, pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
     let create = div()
         .id("workspace-create")
         .px_3()
@@ -1547,10 +1690,11 @@ fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .when(!allowed || pending, |this| this.opacity(0.5))
         .when(allowed && !pending, gpui::Styled::cursor_pointer)
-        .child(if pending {
-            "Creating…"
-        } else {
-            "Create workspace"
+        .child(match (pending, adding) {
+            (true, true) => "Adding…",
+            (true, false) => "Creating…",
+            (false, true) => "Add to workspace",
+            (false, false) => "Create workspace",
         })
         .on_mouse_down(
             MouseButton::Left,

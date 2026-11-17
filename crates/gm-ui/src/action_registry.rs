@@ -181,6 +181,10 @@ pub enum Effect {
     /// Opens the Remove Workspace dialog for the workspace at this path; the dialog inspects it
     /// and the removal is sent from there (D183 (4)).
     OpenRemoveWorkspaceDialog(String),
+    /// Opens the dialog that adds repositories to the workspace at this folder (D256).
+    OpenAddMembersDialog(String),
+    /// Opens the dialog that removes the member at this path of the open workspace (D256).
+    OpenRemoveMemberDialog(String),
     /// Opens the remove dialog for the worktree at this path; the dialog
     /// inspects it and the removal is sent from there.
     OpenRemoveDialog(String),
@@ -507,7 +511,7 @@ pub struct MemoryRef<'a> {
 }
 
 /// The specs, in the order of `Action`'s variants (a test keeps them in step).
-const SPECS: [Spec; 128] = [
+const SPECS: [Spec; 130] = [
     spec(
         "file.stage",
         "Stage File",
@@ -1273,6 +1277,20 @@ const SPECS: [Spec; 128] = [
         Category::WorkingCopy,
     ),
     spec(
+        "workspace.add_repository",
+        "Add Repository to Workspace…",
+        None,
+        ArgKind::Workspace,
+        Category::Workspaces,
+    ),
+    spec(
+        "workspace.remove_member",
+        "Remove from Workspace…",
+        None,
+        ArgKind::File,
+        Category::WorkingCopy,
+    ),
+    spec(
         "memories.show",
         "Show Memories",
         None,
@@ -1540,6 +1558,10 @@ pub enum Action {
     RemoveWorkspace,
     /// Checks out the branch a detached member of a workspace is meant to be on (D183).
     CheckOutMemberBranch,
+    /// Opens the dialog that adds repositories to a workspace that exists (D256).
+    AddToWorkspace,
+    /// Opens the dialog that removes one member of the open workspace (D256).
+    RemoveWorkspaceMember,
     /// Opens the Memories tab of the Threads page (D190).
     ShowMemories,
     /// Opens the New Memory dialog (D190).
@@ -2018,6 +2040,14 @@ fn workspace_rule(action: Action, args: &Args, ctx: &Context<'_>) -> Result<(), 
     if action == Action::CheckOutMemberBranch {
         return check_out_member_rule(args, ctx);
     }
+    // Remove from Workspace takes a member row of the window's workspace (D256); the engine
+    // refuses a submodule of a repository that is not a workspace.
+    if action == Action::RemoveWorkspaceMember {
+        let Args::File(path) = args else {
+            return Err("No target for this action");
+        };
+        return submodule_entry(path, ctx).map(|_| ()).ok_or(NOT_A_MEMBER);
+    }
     let row = workspace_entry(args, ctx)?;
     let here = ctx
         .root
@@ -2065,6 +2095,12 @@ fn workspace_effect(action: Action, args: &Args) -> Result<Effect, Reason> {
                 path: path.clone(),
             }])
         }
+        (Action::AddToWorkspace, Args::Workspace(path)) => {
+            Effect::OpenAddMembersDialog(path.clone())
+        }
+        (Action::RemoveWorkspaceMember, Args::File(path)) => {
+            Effect::OpenRemoveMemberDialog(path.clone())
+        }
         _ => return Err(NOT_AVAILABLE),
     })
 }
@@ -2076,7 +2112,7 @@ pub(crate) const NOT_AVAILABLE: Reason = "Not available yet";
 pub(crate) const PREVIEW_OFF: Reason = "This is a preview feature.";
 
 impl Action {
-    pub const ALL: [Action; 128] = [
+    pub const ALL: [Action; 130] = [
         Action::StageFile,
         Action::UnstageFile,
         Action::StageChunk,
@@ -2187,6 +2223,8 @@ impl Action {
         Action::RevealWorkspace,
         Action::RemoveWorkspace,
         Action::CheckOutMemberBranch,
+        Action::AddToWorkspace,
+        Action::RemoveWorkspaceMember,
         Action::ShowMemories,
         Action::NewMemory,
         Action::AcceptMemory,
@@ -2294,6 +2332,7 @@ impl Action {
                 | Action::DeleteMergedBranches
                 | Action::RemoveWorktree
                 | Action::RemoveWorkspace
+                | Action::RemoveWorkspaceMember
                 | Action::DiscardAllChanges
                 | Action::StashDrop
                 | Action::DeleteReviewComment
@@ -2381,6 +2420,8 @@ impl Action {
                 | Action::RevealWorkspace
                 | Action::RemoveWorkspace
                 | Action::CheckOutMemberBranch
+                | Action::AddToWorkspace
+                | Action::RemoveWorkspaceMember
         )
     }
 
@@ -2393,6 +2434,8 @@ impl Action {
                 | Action::RevealWorkspace
                 | Action::RemoveWorkspace
                 | Action::CheckOutMemberBranch
+                | Action::AddToWorkspace
+                | Action::RemoveWorkspaceMember
         )
     }
 
@@ -2506,6 +2549,8 @@ impl Action {
                 | Action::PruneWorktrees
                 | Action::NewWorkspace
                 | Action::RemoveWorkspace
+                | Action::AddToWorkspace
+                | Action::RemoveWorkspaceMember
                 | Action::NewBranch
                 | Action::Restack
                 | Action::NewChildBranch
@@ -4443,6 +4488,7 @@ mod tests {
                 Action::ThreadDelete,
                 Action::LabelDelete,
                 Action::RemoveWorkspace,
+                Action::RemoveWorkspaceMember,
             ]
         );
     }
@@ -7845,6 +7891,62 @@ mod tests {
             Action::RemoveWorkspace.spec().category,
             Category::Workspaces
         );
+    }
+
+    #[test]
+    fn add_to_workspace_opens_its_dialog_for_a_listed_workspace() {
+        let rows = [WorkspaceRow {
+            name: "billing".into(),
+            path: "/w/billing".into(),
+            members: 1,
+        }];
+        let context = Context {
+            workspaces: &rows,
+            ..ctx(&[], "")
+        };
+        let args = Args::Workspace("/w/billing".into());
+        assert_eq!(Action::AddToWorkspace.enabled(&args, &context), Ok(()));
+        assert_eq!(
+            Action::AddToWorkspace.plan(&args, &context),
+            Ok(Effect::OpenAddMembersDialog("/w/billing".into()))
+        );
+        assert_eq!(
+            Action::AddToWorkspace.enabled(&Args::Workspace("/w/gone".into()), &context),
+            Err("This workspace is not listed.")
+        );
+        assert_eq!(
+            Action::AddToWorkspace.spec().title,
+            "Add Repository to Workspace…"
+        );
+        assert!(Action::AddToWorkspace.opens_dialog());
+        assert!(!Action::AddToWorkspace.destructive());
+    }
+
+    #[test]
+    fn remove_from_workspace_takes_a_member_row_only() {
+        let entries = [
+            submodule_row("billing"),
+            entry("a.rs", None, Some(Change::Modified)),
+        ];
+        let context = ctx(&entries, "");
+        let member = Args::File("billing".into());
+        assert_eq!(
+            Action::RemoveWorkspaceMember.enabled(&member, &context),
+            Ok(())
+        );
+        assert_eq!(
+            Action::RemoveWorkspaceMember.plan(&member, &context),
+            Ok(Effect::OpenRemoveMemberDialog("billing".into()))
+        );
+        assert_eq!(
+            Action::RemoveWorkspaceMember.enabled(&Args::File("a.rs".into()), &context),
+            Err("Not a workspace member.")
+        );
+        assert_eq!(
+            Action::RemoveWorkspaceMember.spec().title,
+            "Remove from Workspace…"
+        );
+        assert!(Action::RemoveWorkspaceMember.opens_dialog());
     }
 
     #[test]

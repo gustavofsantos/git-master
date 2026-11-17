@@ -254,6 +254,51 @@ pub enum CommandKind {
         #[serde(default)]
         closing: bool,
     },
+    /// Checks the members `members` for the workspace at `workspace`, which exists, before
+    /// anything is written (D256 (3)): the plan of `PlanWorkspace`, checked against the members
+    /// the workspace has. Answers `WorkspacePlanned`. Never recorded in the command log (D28).
+    PlanWorkspaceMembers {
+        workspace: String,
+        members: Vec<MemberRequest>,
+    },
+    /// Adds the members `PlanWorkspaceMembers` plans to the workspace at `workspace`: a worktree
+    /// and a commit of the workspace's repository per member. It plans again first and refuses
+    /// with the problems when there are any, so nothing is added. Human only, and recorded in the
+    /// command log (D28). Answers `WorkspaceMembersAdded`.
+    AddWorkspaceMembers {
+        workspace: String,
+        members: Vec<MemberRequest>,
+    },
+    /// Suggests the folder a clone of `url` goes to (D256 (1)): `<root>/<name>`, the root from
+    /// `gitmaster.clone.root` or `~/src`. Answers `ClonePlanned`. Writes nothing, so it is not
+    /// recorded in the command log (D28).
+    PlanClone {
+        url: String,
+    },
+    /// Clones `url` into the folder `path`, which must not exist (D256 (1)). A remote operation:
+    /// human only, one at a time, run off the engine thread, and Git never prompts. Recorded in the
+    /// command log (D28). Answers `RepositoryCloned` when it succeeds.
+    CloneRepository {
+        url: String,
+        path: String,
+    },
+    /// Reads what removing the member `member` (its folder name) of the workspace at `workspace`
+    /// would refuse or lose (D256 (5)). Answers `MemberRemovalInspected`. Never recorded in the
+    /// command log (D28).
+    InspectMemberRemoval {
+        workspace: String,
+        member: String,
+    },
+    /// Removes the member `member` of the workspace at `workspace`: its worktree from its
+    /// repository, then the member from the workspace's repository, with a commit (D256 (5)). It
+    /// inspects again first and refuses a blocker that cannot be overridden, and the overridable
+    /// ones unless `force`. The branch stays. Human only, and recorded in the command log (D28).
+    /// Answers `WorkspaceMemberRemoved`.
+    RemoveWorkspaceMember {
+        workspace: String,
+        member: String,
+        force: bool,
+    },
     /// Checks out the branch the workspace's `.gitmodules` names for the member at `path`,
     /// relative to the open repository, which is the workspace (D183). Refused when the member
     /// has no branch or when another worktree holds it. Human only, and recorded in the command
@@ -1352,6 +1397,40 @@ pub enum Event {
     WorkspaceCreated {
         id: OperationId,
         path: String,
+    },
+    /// Answers `AddWorkspaceMembers`: the members, by folder name, are in the workspace at `path`.
+    WorkspaceMembersAdded {
+        id: OperationId,
+        path: String,
+        members: Vec<String>,
+    },
+    /// Answers `PlanClone`: the folder a clone of `url` would go to, and why it cannot, when it
+    /// cannot (the folder exists, or the URL names no folder).
+    ClonePlanned {
+        id: OperationId,
+        url: String,
+        path: Option<String>,
+        problem: Option<String>,
+    },
+    /// Answers `CloneRepository`: `url` is cloned into the folder `path`.
+    RepositoryCloned {
+        id: OperationId,
+        url: String,
+        path: String,
+    },
+    /// Answers `InspectMemberRemoval`: what would stop the removal of the member; none when it
+    /// would work.
+    MemberRemovalInspected {
+        id: OperationId,
+        workspace: String,
+        member: String,
+        blockers: Vec<RemovalBlocker>,
+    },
+    /// Answers `RemoveWorkspaceMember`: the member is out of the workspace; its branch is kept.
+    WorkspaceMemberRemoved {
+        id: OperationId,
+        workspace: String,
+        member: String,
     },
     /// Answers `InspectWorkspaceRemoval`: what would stop the removal; none when it would work.
     WorkspaceRemovalInspected {

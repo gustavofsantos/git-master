@@ -30,6 +30,8 @@ const MARKER_KEY: &str = "gitmaster.workspace";
 const OLD_KIND_KEY: &str = "gitmaster.workspace.kind";
 /// The Git key that sets the folder workspaces are created under.
 const ROOT_KEY: &str = "gitmaster.workspace.root";
+/// The Git key that sets the folder a repository cloned from a URL goes under (D256 (1)).
+const CLONE_ROOT_KEY: &str = "gitmaster.clone.root";
 /// The mode Git records for a submodule: a gitlink.
 const GITLINK: &str = "160000";
 
@@ -117,9 +119,58 @@ pub fn root_from(
     Ok(cwd.join(chosen))
 }
 
+/// Whether `value` reads as the URL of a repository rather than a folder (D256 (2)): it has `://`,
+/// or the `user@host:path` form of SSH. The caller checks first that no folder has that name.
+pub fn looks_like_url(value: &str) -> bool {
+    if value.contains("://") {
+        return true;
+    }
+    let Some((head, path)) = value.split_once(':') else {
+        return false;
+    };
+    match head.split_once('@') {
+        Some((user, host)) => {
+            !user.is_empty() && !host.is_empty() && !host.contains('/') && !path.is_empty()
+        }
+        None => false,
+    }
+}
+
+/// The folder name a clone of `url` gets: the last part of its path without `.git` (D256 (1)).
+/// `None` when that leaves no name a folder can have.
+pub fn clone_name(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let last = trimmed
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches(".git");
+    valid_name(last).then(|| last.to_owned())
+}
+
+/// The folder a clone of `url` goes to: `to` when given, else `<root>/<name>` (D256 (1)). The
+/// folder must not exist.
+pub fn clone_target(url: &str, to: Option<&Path>, root: &Path) -> Result<PathBuf, Error> {
+    if url.trim().is_empty() {
+        return Err(Error::Run("the URL is empty".into()));
+    }
+    let dir = match to {
+        Some(dir) => dir.to_path_buf(),
+        None => root.join(clone_name(url).ok_or_else(|| {
+            Error::Run(format!(
+                "cannot name a folder after '{url}'; choose the folder"
+            ))
+        })?),
+    };
+    ensure_absent(&dir)?;
+    Ok(dir)
+}
+
 /// A member as the workspace's `.gitmodules` records it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
+    /// The submodule's name, the `<name>` of its `submodule.<name>` section.
+    pub name: String,
     /// The folder name, relative to the workspace.
     pub path: String,
     /// The path of the main checkout the member belongs to.
@@ -538,6 +589,7 @@ impl<'a> Workspaces<'a> {
                     found.push((
                         name.to_owned(),
                         Member {
+                            name: name.to_owned(),
                             path: String::new(),
                             url: String::new(),
                             branch: None,
@@ -644,10 +696,35 @@ impl<'a> Workspaces<'a> {
         }
         let dir = request.root.join(&request.name);
         ensure_absent(&dir)?;
+        self.plan_in(
+            dir,
+            &request.members,
+            request.base.as_deref(),
+            request.existing,
+        )
+    }
+
+    /// Plans the members `members` for the workspace at `ws`, which exists (D256 (3)): the plan
+    /// of `plan`, checked against the members it has. Nothing is written.
+    pub fn plan_members(&self, ws: &Path, members: &[MemberRequest]) -> Result<CreatePlan, Error> {
+        if !self.is_workspace(ws) {
+            return Err(Error::Run(format!("'{}' is not a workspace", ws.display())));
+        }
+        self.plan_in(ws.to_path_buf(), members, None, false)
+    }
+
+    /// The plan of `members` in the workspace folder `dir`, which need not exist yet.
+    fn plan_in(
+        &self,
+        dir: PathBuf,
+        asked: &[MemberRequest],
+        base: Option<&str>,
+        existing: bool,
+    ) -> Result<CreatePlan, Error> {
         let mut plans: Vec<Plan> = Vec::new();
         let mut problems: Vec<WorkspaceProblem> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
-        for member in &request.members {
+        for member in asked {
             let (root, entries) =
                 match worktree_cli::worktrees_in(Path::new(&member.repo), self.git) {
                     Ok(found) => found,
@@ -662,7 +739,7 @@ impl<'a> Workspaces<'a> {
                 };
             let main = entries[0].path.clone();
             let known = self.git.branches(&root)?;
-            if request.existing && !has_branch(&known, &member.branch) {
+            if existing && !has_branch(&known, &member.branch) {
                 notes.push(format!(
                     "gitmaster: skipped {}: no branch '{}'",
                     project_of(&main),
@@ -672,7 +749,7 @@ impl<'a> Workspaces<'a> {
             }
             let choice = Choice {
                 branch: &member.branch,
-                base: request.base.as_deref(),
+                base,
                 member: None,
                 include: None,
             };
@@ -718,6 +795,57 @@ impl<'a> Workspaces<'a> {
             notes,
             plans,
         })
+    }
+
+    /// Adds the members of `plan` to the workspace it was planned for, which exists (D256 (3)).
+    /// Refuses a plan with problems before anything is written. Each member is added and committed
+    /// on its own, as `create` does; the result says which failed.
+    pub fn add_planned(&self, plan: &CreatePlan) -> Result<Vec<Added>, Error> {
+        if !plan.problems.is_empty() {
+            return Err(Error::Run(
+                "no repository was added: the plan has problems".into(),
+            ));
+        }
+        Ok(plan
+            .plans
+            .iter()
+            .map(|member| self.add_member(&plan.path, member))
+            .collect())
+    }
+
+    /// The root a repository cloned from a URL goes under: `gitmaster.clone.root` as Git reads it
+    /// from `cwd`, else `~/src` (D256 (1)). A relative root is taken from `cwd`.
+    pub fn clone_root(&self, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, Error> {
+        let configured = self
+            .sub
+            .text_if(cwd, &["config", "--includes", "--get", CLONE_ROOT_KEY])
+            .or_else(|| {
+                self.sub.text_if(
+                    cwd,
+                    &["config", "--global", "--includes", "--get", CLONE_ROOT_KEY],
+                )
+            })
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let chosen = match configured {
+            Some(value) => worktree_cli::expand(&value, home),
+            None => home
+                .ok_or_else(|| Error::Run("no home folder: give the folder of the clone".into()))?
+                .join("src"),
+        };
+        Ok(cwd.join(chosen))
+    }
+
+    /// Clones `url` into `dir`, which must not exist, creating its parent folders (D256 (1)). Git
+    /// may ask for credentials on the terminal: the command line runs it, not the app.
+    pub fn clone(&self, url: &str, dir: &Path) -> Result<(), Error> {
+        ensure_absent(dir)?;
+        let parent = dir.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let target = dir.to_string_lossy().into_owned();
+        self.sub
+            .text(parent, &["clone", "--quiet", "--", url, &target])?;
+        Ok(())
     }
 
     /// Creates the workspace of `plan`: its folder, its repository on `main`, its marker, and each
@@ -1050,29 +1178,180 @@ impl<'a> Workspaces<'a> {
             });
         }
         for member in &members {
-            let dir = ws.join(&member.path);
-            if !dir.exists() {
-                continue;
-            }
-            let state = self.git.status(&dir)?;
-            if state.entries.iter().any(is_change) {
-                blockers.push(RemovalBlocker {
-                    kind: RemovalBlockerKind::MemberDirty,
-                    member: Some(member.path.clone()),
-                    detail: "it has uncommitted or untracked files".into(),
-                    overridable: true,
-                });
-            }
-            if state.branch.head.is_none() && !self.held(&dir, state.branch.oid.as_deref()) {
-                blockers.push(RemovalBlocker {
-                    kind: RemovalBlockerKind::MemberDetached,
-                    member: Some(member.path.clone()),
-                    detail: "it is on a detached HEAD whose commits no branch has".into(),
-                    overridable: true,
-                });
-            }
+            blockers.extend(self.member_losses(ws, member)?);
         }
         Ok(RemovalInspection { blockers })
+    }
+
+    /// What removing the member `member` would lose: its changes, and a detached HEAD whose
+    /// commits no branch has. Both are overridable. A member whose folder is gone loses nothing.
+    fn member_losses(&self, ws: &Path, member: &Member) -> Result<Vec<RemovalBlocker>, Error> {
+        let dir = ws.join(&member.path);
+        let mut blockers = Vec::new();
+        if !dir.exists() {
+            return Ok(blockers);
+        }
+        let state = self.git.status(&dir)?;
+        if state.entries.iter().any(is_change) {
+            blockers.push(RemovalBlocker {
+                kind: RemovalBlockerKind::MemberDirty,
+                member: Some(member.path.clone()),
+                detail: "it has uncommitted or untracked files".into(),
+                overridable: true,
+            });
+        }
+        if state.branch.head.is_none() && !self.held(&dir, state.branch.oid.as_deref()) {
+            blockers.push(RemovalBlocker {
+                kind: RemovalBlockerKind::MemberDetached,
+                member: Some(member.path.clone()),
+                detail: "it is on a detached HEAD whose commits no branch has".into(),
+                overridable: true,
+            });
+        }
+        Ok(blockers)
+    }
+
+    /// The member of the workspace at `ws` whose folder name is `member`.
+    fn member_named(&self, ws: &Path, member: &str) -> Result<Member, Error> {
+        if !self.is_workspace(ws) {
+            return Err(Error::Run(format!("'{}' is not a workspace", ws.display())));
+        }
+        self.members(ws)?
+            .into_iter()
+            .find(|candidate| candidate.path == member)
+            .ok_or_else(|| Error::Run(format!("'{member}' is not a member of this workspace")))
+    }
+
+    /// What removing the member `member` of the workspace at `ws` would refuse or lose (D256 (5)),
+    /// read from the current state. `here` is the directory the command runs in: a member that
+    /// contains it cannot be removed, nor one whose repository is gone while its folder is there.
+    /// Reads only.
+    pub fn inspect_member_removal(
+        &self,
+        ws: &Path,
+        member: &str,
+        here: &Path,
+    ) -> Result<RemovalInspection, Error> {
+        let found = self.member_named(ws, member)?;
+        let dir = ws.join(&found.path);
+        let mut blockers = Vec::new();
+        if dir.exists() && canonical(here).starts_with(canonical(&dir)) {
+            blockers.push(RemovalBlocker {
+                kind: RemovalBlockerKind::Current,
+                member: Some(found.path.clone()),
+                detail: "it contains the current directory".into(),
+                overridable: false,
+            });
+        } else if dir.exists() && !Path::new(&found.url).is_dir() {
+            blockers.push(RemovalBlocker {
+                kind: RemovalBlockerKind::MemberRepositoryMissing,
+                member: Some(found.path.clone()),
+                detail: format!("its repository {} is not there", found.url),
+                overridable: false,
+            });
+        }
+        if blockers.is_empty() {
+            blockers = self.member_losses(ws, &found)?;
+        }
+        Ok(RemovalInspection { blockers })
+    }
+
+    /// Removes the member `member` of the workspace at `ws` (D256 (5)): its worktree from its
+    /// repository, its gitlink, `.gitmodules` entry and configuration from the workspace, the
+    /// workspace from the repository's pointer file, then a commit of the removal. The inspection
+    /// is taken again first. The branch stays. When the commit fails the removal stays staged and
+    /// the error says so.
+    pub fn remove_member(
+        &self,
+        ws: &Path,
+        member: &str,
+        here: &Path,
+        force: bool,
+    ) -> Result<Removed, Error> {
+        let inspection = self.inspect_member_removal(ws, member, here)?;
+        if let Some(blocker) = inspection.blockers.iter().find(|b| !b.overridable) {
+            return Err(Error::Run(format!(
+                "cannot remove {member}: {}",
+                blocker.detail
+            )));
+        }
+        if !force && !inspection.blockers.is_empty() {
+            let found: Vec<&str> = inspection
+                .blockers
+                .iter()
+                .map(|blocker| blocker.detail.as_str())
+                .collect();
+            return Err(Error::Run(format!(
+                "not removing {member}: {}; use --force to discard them",
+                found.join("; ")
+            )));
+        }
+        let found = self.member_named(ws, member)?;
+        let mut notes = Vec::new();
+        self.remove_members(
+            ws,
+            std::slice::from_ref(&found),
+            &canonical(ws),
+            force,
+            &mut notes,
+        )?;
+        // The folder is gone, so `git rm` takes the gitlink out of the index and the member's
+        // section out of `.gitmodules`, and stages both.
+        self.sub
+            .text(ws, &["rm", "-q", "--cached", "--", &found.path])?;
+        let section = format!("submodule.{}", found.name);
+        if ws.join(".gitmodules").is_file() {
+            let _ = self.sub.text(
+                ws,
+                &[
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    "--remove-section",
+                    &section,
+                ],
+            );
+            if self.members(ws)?.is_empty() {
+                self.sub
+                    .text(ws, &["rm", "-q", "--cached", "--", ".gitmodules"])?;
+                std::fs::remove_file(ws.join(".gitmodules"))?;
+            } else {
+                self.sub.text(ws, &["add", "--", ".gitmodules"])?;
+            }
+        }
+        // The workspace's own configuration names the member too; a missing section is fine.
+        let _ = self
+            .sub
+            .text(ws, &["config", "--local", "--remove-section", &section]);
+        let message = format!("Remove {}", found.path);
+        if let Err(error) = self.sub.text(
+            ws,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                &message,
+                "--",
+                ".gitmodules",
+                &found.path,
+            ],
+        ) {
+            return Err(Error::Run(format!(
+                "{} is removed and the removal is staged in {}, but not committed: {}; commit it with git -C {} commit",
+                found.path,
+                ws.display(),
+                error.message(),
+                ws.display()
+            )));
+        }
+        notes.push(format!(
+            "gitmaster: removed {} (the branch is kept in {})",
+            found.path, found.url
+        ));
+        Ok(Removed {
+            path: ws.join(&found.path),
+            notes,
+        })
     }
 
     /// Whether a local or a remote branch of the repository at `dir` contains `oid`, as D31 counts
@@ -1262,7 +1541,10 @@ mod tests {
 
     use gm_schema::{BranchHow, RemovalBlocker, RemovalBlockerKind};
 
-    use super::{Error, RemovalInspection, Source, root_from, valid_name};
+    use super::{
+        Error, RemovalInspection, Source, clone_name, clone_target, looks_like_url, root_from,
+        valid_name,
+    };
 
     /// The path of a successful `root_from`; the message of a failed one.
     fn chosen(result: Result<std::path::PathBuf, Error>) -> std::path::PathBuf {
@@ -1420,5 +1702,50 @@ mod tests {
                 "cannot remove billing: its repository /gone is not there".into()
             ))
         );
+    }
+
+    #[test]
+    fn a_url_has_a_scheme_or_the_ssh_form_and_a_folder_has_neither() {
+        assert!(looks_like_url("https://host/team/billing.git"));
+        assert!(looks_like_url("ssh://host/billing"));
+        assert!(looks_like_url("file:///srv/billing.git"));
+        assert!(looks_like_url("git@host:team/billing.git"));
+        assert!(!looks_like_url("../billing"));
+        assert!(!looks_like_url("/src/billing"));
+        assert!(!looks_like_url("c:dir"));
+        assert!(!looks_like_url("@host:x"));
+        assert!(!looks_like_url("me@host:"));
+    }
+
+    #[test]
+    fn a_clone_is_named_after_the_last_part_of_the_url_without_git() {
+        assert_eq!(
+            clone_name("https://host/team/billing.git").as_deref(),
+            Some("billing")
+        );
+        assert_eq!(clone_name("git@host:team/pay.git").as_deref(), Some("pay"));
+        assert_eq!(clone_name("git@host:pay").as_deref(), Some("pay"));
+        assert_eq!(
+            clone_name("ssh://host/billing/").as_deref(),
+            Some("billing")
+        );
+        assert_eq!(clone_name("https://host/.git"), None);
+        assert_eq!(clone_name("https://host/"), Some("host".to_owned()));
+    }
+
+    #[test]
+    fn a_clone_goes_to_the_folder_given_or_under_the_root_and_never_over_a_folder() {
+        let root = Path::new("/nowhere/src");
+        assert_eq!(
+            clone_target("https://h/x/pay.git", None, root),
+            Ok(root.join("pay"))
+        );
+        assert_eq!(
+            clone_target("https://h/x/pay.git", Some(Path::new("/nowhere/p")), root),
+            Ok(Path::new("/nowhere/p").to_path_buf())
+        );
+        assert!(clone_target("  ", None, root).is_err());
+        let here = std::env::temp_dir();
+        assert!(clone_target("https://h/x/pay.git", Some(&here), root).is_err());
     }
 }

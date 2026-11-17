@@ -1,4 +1,5 @@
-//! The Remove Workspace dialog (D183 (4); D31's dialog pattern). The engine inspects the workspace
+//! The Remove Workspace dialog (D183 (4); D31's dialog pattern), which also removes one member of
+//! a workspace (D256 (5)). The engine inspects the workspace
 //! when the dialog opens and checks the removal again when it is sent; this module only shows what
 //! the inspection says and sends what the user confirms. The rules are pure and tested here: which
 //! blockers the dialog lists, when Remove is enabled, what the checkbox names and what an outcome
@@ -68,6 +69,29 @@ pub(crate) fn confirmation_label(blockers: &[RemovalBlocker]) -> String {
         "I understand this discards the {} listed above",
         lost.join(" and ")
     )
+}
+
+/// The key the removal is kept under for the member `member` of the workspace at `workspace`. A
+/// workspace's own removal is kept under its path; a NUL never occurs in a path, so the two never
+/// meet.
+#[must_use]
+pub(crate) fn member_key(workspace: &str, member: &str) -> String {
+    format!("{workspace}\0{member}")
+}
+
+/// The lines the dialog shows for the removal of one member: one per blocker, or, when there are
+/// none, what the removal does.
+#[must_use]
+pub(crate) fn member_body_lines(member: &str, blockers: &[RemovalBlocker]) -> Vec<String> {
+    if blockers.is_empty() {
+        return vec![format!(
+            "The worktree of {member} is removed from its clone and the removal is committed in the workspace. Its branch stays in your clone."
+        )];
+    }
+    blockers
+        .iter()
+        .map(|blocker| blocker.detail.clone())
+        .collect()
 }
 
 /// The lines the dialog shows under its title: one per blocker, with the member's name in front of
@@ -182,6 +206,8 @@ impl WorkspaceRemoval {
 /// carries the keys, and the error it shows.
 pub(crate) struct RemoveWorkspaceDialog {
     pub(crate) path: String,
+    /// The member to remove, its folder name; `None` removes the whole workspace (D256 (5)).
+    pub(crate) member: Option<String>,
     /// The window shows this workspace: the removal runs with `closing` and closes the window
     /// (D186 (3)).
     pub(crate) closing: bool,
@@ -216,7 +242,43 @@ impl StatusView {
         focus.focus(window);
         self.workspace_removal_dialog = Some(RemoveWorkspaceDialog {
             path: path.to_owned(),
+            member: None,
             closing,
+            confirmed: false,
+            focus,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Opens the dialog for the member `member` of the workspace this window shows, and asks the
+    /// engine what removing it would lose (D256 (5)).
+    pub(crate) fn open_remove_member_dialog(
+        &mut self,
+        member: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.model.status().map(|status| status.root.clone()) else {
+            return;
+        };
+        let member = member.trim_end_matches('/').to_owned();
+        let id = self.engine.dispatch(
+            Actor::Human,
+            CommandKind::InspectMemberRemoval {
+                workspace: workspace.clone(),
+                member: member.clone(),
+            },
+        );
+        self.model
+            .workspace_removal
+            .begin_inspect(id, member_key(&workspace, &member));
+        let focus = cx.focus_handle();
+        focus.focus(window);
+        self.workspace_removal_dialog = Some(RemoveWorkspaceDialog {
+            path: workspace,
+            member: Some(member),
+            closing: false,
             confirmed: false,
             focus,
             error: None,
@@ -244,7 +306,7 @@ impl StatusView {
         let asks = self
             .workspace_removal_dialog
             .as_ref()
-            .and_then(|dialog| self.model.workspace_removal.inspection(&dialog.path))
+            .and_then(|dialog| self.model.workspace_removal.inspection(&dialog.key()))
             .is_some_and(asks_confirmation);
         if let Some(dialog) = self.workspace_removal_dialog.as_mut().filter(|_| asks) {
             dialog.confirmed = !dialog.confirmed;
@@ -264,7 +326,8 @@ impl StatusView {
         let confirmed = dialog.confirmed;
         let closing = dialog.closing;
         let path = dialog.path.clone();
-        let Some(blockers) = self.model.workspace_removal.inspection(&path) else {
+        let member = dialog.member.clone();
+        let Some(blockers) = self.model.workspace_removal.inspection(&dialog.key()) else {
             dialog.error = Some(CHECKING.to_owned());
             cx.notify();
             return;
@@ -276,14 +339,19 @@ impl StatusView {
             return;
         }
         // The checkbox is the force (D31): it is ticked only when blockers were listed.
-        let id = self.engine.dispatch(
-            Actor::Human,
-            CommandKind::RemoveWorkspace {
+        let kind = match member {
+            Some(member) => CommandKind::RemoveWorkspaceMember {
+                workspace: path,
+                member,
+                force: confirmed,
+            },
+            None => CommandKind::RemoveWorkspace {
                 path,
                 force: confirmed,
                 closing,
             },
-        );
+        };
+        let id = self.engine.dispatch(Actor::Human, kind);
         self.model.workspace_removal.begin_remove(id);
         cx.notify();
     }
@@ -296,8 +364,20 @@ impl StatusView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match outcome {
-            Ok(path) => {
+        let member = self
+            .workspace_removal_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.member.clone());
+        match (outcome, member) {
+            // A member's removal keeps the window on its workspace; the engine read its status
+            // again (D256 (5)).
+            (Ok(_), Some(member)) => {
+                self.workspace_removal_dialog = None;
+                self.list_focus.focus(window);
+                self.request_workspaces();
+                self.notify_user(&format!("Removed {member} from the workspace"), cx);
+            }
+            (Ok(path), None) => {
                 // The window's own repository went with its folder: the window goes back to the root
                 // it showed before, when that folder is still there (D234 (4)), and otherwise closes;
                 // the last window quits the app (D186 (3)). Another workspace keeps the window open.
@@ -327,7 +407,7 @@ impl StatusView {
                 self.request_workspaces();
                 self.notify_user(&format!("Removed workspace at {path}"), cx);
             }
-            Err(message) => match self.workspace_removal_dialog.as_mut() {
+            (Err(message), _) => match self.workspace_removal_dialog.as_mut() {
                 Some(dialog) => dialog.error = Some(message),
                 None => self.notify_user(&message, cx),
             },
@@ -362,15 +442,22 @@ impl StatusView {
         cx: &Context<Self>,
     ) -> Div {
         let pending = self.model.workspace_removal.is_removing();
-        let blockers = self.model.workspace_removal.inspection(&dialog.path);
+        let blockers = self.model.workspace_removal.inspection(&dialog.key());
         let name = crate::workspace_list::folder_name(&dialog.path);
         let allowed = blockers.is_some_and(|found| may_remove(found, dialog.confirmed));
         let forced = blockers.is_some_and(asks_confirmation);
         let label = blockers.map_or_default(confirmation_label);
         let body = blockers.map_or_else(
             || vec![CHECKING.to_owned()],
-            |found| body_lines(&dialog.path, found),
+            |found| match &dialog.member {
+                Some(member) => member_body_lines(member, found),
+                None => body_lines(&dialog.path, found),
+            },
         );
+        let title = match &dialog.member {
+            Some(member) => format!("Remove {member} from workspace {name}?"),
+            None => format!("Remove workspace {name}?"),
+        };
         let refused = blockers.is_some_and(|found| {
             !found.is_empty() && found.iter().any(|blocker| !blocker.overridable)
         });
@@ -402,7 +489,7 @@ impl StatusView {
                 div()
                     .text_color(theme::text())
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("Remove workspace {name}?")),
+                    .child(title),
             )
             .children(
                 body.into_iter()
@@ -416,7 +503,17 @@ impl StatusView {
                     .filter(|_| !refused)
                     .map(|error| div().text_sm().text_color(theme::error()).child(error)),
             )
-            .child(buttons(pending, allowed, cx))
+            .child(buttons(pending, allowed, dialog.member.is_some(), cx))
+    }
+}
+
+impl RemoveWorkspaceDialog {
+    /// The key the model keeps this dialog's inspection under.
+    fn key(&self) -> String {
+        match &self.member {
+            Some(member) => member_key(&self.path, member),
+            None => self.path.clone(),
+        }
     }
 }
 
@@ -442,7 +539,7 @@ fn confirm_row(confirmed: bool, label: String, cx: &Context<StatusView>) -> Stat
 }
 
 /// Cancel, and the destructive remove button, enabled only when the rules allow.
-fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
+fn buttons(pending: bool, allowed: bool, member: bool, cx: &Context<StatusView>) -> Div {
     let remove: Stateful<Div> = div()
         .id("workspace-remove-confirm")
         .px_3()
@@ -455,10 +552,10 @@ fn buttons(pending: bool, allowed: bool, cx: &Context<StatusView>) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .when(!allowed || pending, |this| this.opacity(0.5))
         .when(allowed && !pending, gpui::Styled::cursor_pointer)
-        .child(if pending {
-            "Removing…"
-        } else {
-            "Remove workspace"
+        .child(match (pending, member) {
+            (true, _) => "Removing…",
+            (false, true) => "Remove member",
+            (false, false) => "Remove workspace",
         })
         .on_mouse_down(
             MouseButton::Left,
@@ -637,5 +734,25 @@ mod tests {
             removal.take_outcome(),
             Some(Err("The workspace was not removed.".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_member_removal_says_what_it_does_or_what_it_would_lose() {
+        assert_eq!(
+            member_body_lines("billing", &[]),
+            vec![
+                "The worktree of billing is removed from its clone and the removal is committed in the workspace. Its branch stays in your clone."
+            ]
+        );
+        let dirty = [blocker(
+            RemovalBlockerKind::MemberDirty,
+            Some("billing"),
+            true,
+        )];
+        assert_eq!(
+            member_body_lines("billing", &dirty),
+            vec!["MemberDirty detail"]
+        );
+        assert_ne!(member_key("/w/x", "billing"), "/w/x");
     }
 }

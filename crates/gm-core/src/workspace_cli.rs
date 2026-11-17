@@ -15,7 +15,8 @@ use crate::workspace::{self, AddRequest, CreateRequest, Workspaces};
 use crate::worktree_cli::{self, Args, Env, Failure};
 
 const USAGE: &str = "usage: gitmaster workspace create <name> [--root <dir>] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
-       gitmaster workspace add <repo> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none]
+       gitmaster workspace add <repo|url> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none] [--clone-to <dir>]
+       gitmaster workspace remove-member <member> [--workspace <name|dir>] [--root <dir>] [--force]
        gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
        gitmaster workspace path <name> [--root <dir>]
        gitmaster workspace status [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
@@ -80,6 +81,7 @@ pub fn run_with(
         "path" => path(rest, &ctx, out),
         "status" => status(rest, &ctx, out),
         "remove" => remove(rest, &ctx, out, err),
+        "remove-member" => remove_member(rest, &ctx, out, err),
         _ => Err(Failure::Usage(format!("unknown subcommand '{name}'"))),
     };
     match result {
@@ -258,7 +260,11 @@ fn add(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), Failure> {
-    let args = Args::parse(words, &["workspace", "as", "include", "root"], &[])?;
+    let args = Args::parse(
+        words,
+        &["workspace", "as", "include", "root", "clone-to"],
+        &[],
+    )?;
     if args.positional.len() < 2 || args.positional.len() > 3 {
         return Err(Failure::Usage(
             "expected a repository, a branch and an optional base".into(),
@@ -266,7 +272,27 @@ fn add(
     }
     let branch = args.positional[1].as_str();
     let ws = target(ctx, args.option("workspace"), args.option("root"))?;
-    let repo = worktree_cli::resolve_repo(&args.positional[0], ctx.env)?;
+    let given = args.positional[0].as_str();
+    let is_url = !ctx.env.cwd.join(given).exists() && workspace::looks_like_url(given);
+    if args.option("clone-to").is_some() && !is_url {
+        return Err(Failure::Usage(format!(
+            "--clone-to needs a URL, and '{given}' is not one"
+        )));
+    }
+    let repo = if is_url {
+        let to = args.option("clone-to").map(|dir| {
+            ctx.env
+                .cwd
+                .join(worktree_cli::expand(dir, ctx.env.home.as_deref()))
+        });
+        let root = ctx.ws.clone_root(&ctx.env.cwd, ctx.env.home.as_deref())?;
+        let dir = workspace::clone_target(given, to.as_deref(), &root)?;
+        ctx.ws.clone(given, &dir)?;
+        writeln!(err, "gitmaster: cloned {given} into {}", dir.display())?;
+        dir
+    } else {
+        worktree_cli::resolve_repo(given, ctx.env)?
+    };
     let request = AddRequest {
         repo: repo.to_string_lossy().into_owned(),
         branch: branch.to_owned(),
@@ -274,12 +300,22 @@ fn add(
         member: args.option("as").map(str::to_owned),
         include: args.option("include").map(str::to_owned),
     };
-    let added = ctx.ws.add(&ws, &request)?;
+    let kept = |message: &str| {
+        if is_url {
+            format!("{message} (the clone stays at {})", repo.display())
+        } else {
+            message.to_owned()
+        }
+    };
+    let added = ctx
+        .ws
+        .add(&ws, &request)
+        .map_err(|error| Failure::Run(kept(error.message())))?;
     for note in &added.notes {
         writeln!(err, "{note}")?;
     }
     if let Some(failure) = added.failure {
-        return Err(Failure::Run(failure));
+        return Err(Failure::Run(kept(&failure)));
     }
     writeln!(out, "{}", added.dir.display())?;
     Ok(())
@@ -380,6 +416,28 @@ fn remove(
     let removed = ctx
         .ws
         .remove(&ws, &ctx.env.cwd, args.switch("force"), false)?;
+    writeln!(out, "{}", removed.path.display())?;
+    for note in &removed.notes {
+        writeln!(err, "{note}")?;
+    }
+    Ok(())
+}
+
+fn remove_member(
+    words: &[String],
+    ctx: &Ctx,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), Failure> {
+    let args = Args::parse(words, &["workspace", "root"], &["force"])?;
+    args.exactly(1, "a member")?;
+    let ws = target(ctx, args.option("workspace"), args.option("root"))?;
+    let removed = ctx.ws.remove_member(
+        &ws,
+        args.positional[0].trim_end_matches('/'),
+        &ctx.env.cwd,
+        args.switch("force"),
+    )?;
     writeln!(out, "{}", removed.path.display())?;
     for note in &removed.notes {
         writeln!(err, "{note}")?;

@@ -791,3 +791,404 @@ fn a_workspace_marked_with_the_old_kind_key_is_listed_and_removed_from_its_windo
         "reads are not logged"
     );
 }
+
+// Changing the members of a workspace that exists, and the clone that brings a repository for
+// one (D256).
+
+fn members_request(members: &[(&Path, &str)]) -> Vec<MemberRequest> {
+    members
+        .iter()
+        .map(|(repo, branch)| MemberRequest {
+            repo: text(repo),
+            branch: (*branch).into(),
+        })
+        .collect()
+}
+
+fn gitmodules(ws: &Path) -> String {
+    std::fs::read_to_string(ws.join(".gitmodules")).unwrap_or_default()
+}
+
+/// Handles a remote command and runs its job to the end, as the runner does.
+fn remote(harness: &mut Harness, kind: CommandKind) -> Vec<Event> {
+    let mut events = harness.human(kind);
+    for job in harness.engine.take_remote_jobs() {
+        events.extend(harness.engine.remote_report(job.run()));
+    }
+    events
+}
+
+#[test]
+fn members_are_planned_and_added_to_a_workspace_that_exists() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let d = scratch.repo("d");
+    let e = scratch.repo_with_remote_branch("e", "feat/x");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "grow",
+        &[(&c, "feat/x")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("grow");
+
+    let (members, problems) = planned(&harness.human(CommandKind::PlanWorkspaceMembers {
+        workspace: text(&ws),
+        members: members_request(&[(&d, "feat/x"), (&e, "feat/x")]),
+    }))
+    .expect("the plan");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(members.len(), 2);
+    assert_eq!(
+        members[0].how,
+        BranchHow::CreateFrom {
+            base: "main".into()
+        }
+    );
+    assert_eq!(
+        members[1].how,
+        BranchHow::TrackRemote {
+            remote: "origin/feat/x".into()
+        }
+    );
+    assert!(!ws.join("d").exists(), "planning writes nothing");
+
+    let events = harness.human(CommandKind::AddWorkspaceMembers {
+        workspace: text(&ws),
+        members: members_request(&[(&d, "feat/x"), (&e, "feat/x")]),
+    });
+    assert!(done(&events), "{events:?}");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::WorkspaceMembersAdded { members, .. } if *members == ["d", "e"]
+    )));
+    assert_eq!(
+        git_in(&ws.join("d"), &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/x"
+    );
+    assert!(gitmodules(&ws).contains("path = e"));
+    assert_eq!(
+        git_in(&ws, &["status", "--porcelain"]),
+        "",
+        "each member is committed"
+    );
+    assert!(git_in(&ws, &["log", "--format=%s"]).contains("Add e on feat/x"));
+}
+
+#[test]
+fn adding_a_repository_that_is_already_a_member_adds_nothing() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let d = scratch.repo("d");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "twice",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("twice");
+
+    let (_, problems) = planned(&harness.human(CommandKind::PlanWorkspaceMembers {
+        workspace: text(&ws),
+        members: members_request(&[(&d, "feat/d"), (&c, "feat/other")]),
+    }))
+    .expect("the plan");
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].message.contains("already a member"),
+        "{problems:?}"
+    );
+
+    let events = harness.human(CommandKind::AddWorkspaceMembers {
+        workspace: text(&ws),
+        members: members_request(&[(&d, "feat/d"), (&c, "feat/other")]),
+    });
+    assert!(!done(&events));
+    assert!(!ws.join("d").exists(), "one refused row adds none");
+}
+
+#[test]
+fn a_member_is_removed_with_a_commit_and_its_branch_is_kept() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let d = scratch.repo("d");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "shrink",
+        &[(&c, "feat/x"), (&d, "feat/x")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("shrink");
+    harness.open(&ws);
+
+    let blockers = harness.human(CommandKind::InspectMemberRemoval {
+        workspace: text(&ws),
+        member: "d".into(),
+    });
+    assert!(
+        blockers.iter().any(|event| matches!(
+            event,
+            Event::MemberRemovalInspected { blockers, .. } if blockers.is_empty()
+        )),
+        "{blockers:?}"
+    );
+
+    let events = harness.human(CommandKind::RemoveWorkspaceMember {
+        workspace: text(&ws),
+        member: "d".into(),
+        force: false,
+    });
+    assert!(done(&events), "{events:?}");
+    assert!(!ws.join("d").exists());
+    assert!(!gitmodules(&ws).contains("path = d"));
+    assert!(gitmodules(&ws).contains("path = c"));
+    assert_eq!(git_in(&ws, &["status", "--porcelain"]), "");
+    assert_eq!(git_in(&ws, &["log", "-1", "--format=%s"]), "Remove d");
+    assert!(git_in(&ws, &["ls-files", "-s", "d"]).is_empty());
+    assert!(!worktrees_of(&d).contains("shrink/d"));
+    assert!(!git_in(&d, &["branch", "--list", "feat/x"]).is_empty());
+    let pointer = d.join(".git/gitmaster/workspaces");
+    assert!(
+        !std::fs::read_to_string(pointer)
+            .unwrap_or_default()
+            .contains("shrink"),
+        "the member's repository no longer lists the workspace"
+    );
+
+    // The same repository can join again.
+    let again = harness.human(CommandKind::AddWorkspaceMembers {
+        workspace: text(&ws),
+        members: members_request(&[(&d, "feat/x")]),
+    });
+    assert!(done(&again), "{again:?}");
+    assert!(ws.join("d").exists());
+}
+
+#[test]
+fn removing_the_last_member_leaves_no_gitmodules() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "empty",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("empty");
+    let events = harness.human(CommandKind::RemoveWorkspaceMember {
+        workspace: text(&ws),
+        member: "c".into(),
+        force: false,
+    });
+    assert!(done(&events), "{events:?}");
+    assert!(!ws.join(".gitmodules").exists());
+    assert_eq!(git_in(&ws, &["status", "--porcelain"]), "");
+    assert!(git_in(&ws, &["ls-files"]).is_empty());
+}
+
+#[test]
+fn a_dirty_member_is_removed_only_when_forced() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "messy",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("messy");
+    std::fs::write(ws.join("c/notes.txt"), "draft\n").unwrap();
+
+    let inspected = harness.human(CommandKind::InspectMemberRemoval {
+        workspace: text(&ws),
+        member: "c".into(),
+    });
+    let blockers = inspected
+        .iter()
+        .find_map(|event| match event {
+            Event::MemberRemovalInspected { blockers, .. } => Some(blockers.clone()),
+            _ => None,
+        })
+        .expect("the inspection");
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].kind, RemovalBlockerKind::MemberDirty);
+    assert!(blockers[0].overridable);
+
+    let refused = harness.human(CommandKind::RemoveWorkspaceMember {
+        workspace: text(&ws),
+        member: "c".into(),
+        force: false,
+    });
+    assert!(refusal(&refused).is_some_and(|reason| reason.contains("--force")));
+    assert!(ws.join("c/notes.txt").exists());
+
+    let forced = harness.human(CommandKind::RemoveWorkspaceMember {
+        workspace: text(&ws),
+        member: "c".into(),
+        force: true,
+    });
+    assert!(done(&forced), "{forced:?}");
+    assert!(!ws.join("c").exists());
+}
+
+#[test]
+fn the_window_own_member_cannot_be_removed() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "inside",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("inside");
+    harness.open(&ws.join("c"));
+    let events = harness.human(CommandKind::RemoveWorkspaceMember {
+        workspace: text(&ws),
+        member: "c".into(),
+        force: true,
+    });
+    assert!(
+        refusal(&events).is_some_and(|reason| reason.contains("current directory")),
+        "{events:?}"
+    );
+    assert!(ws.join("c").exists());
+}
+
+#[test]
+fn an_agent_cannot_change_the_members() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let d = scratch.repo("d");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    assert!(done(&harness.human(create(
+        "guarded",
+        &[(&c, "feat/c")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("guarded");
+    let agent = Actor::Agent { name: "a".into() };
+    let add = harness.run(
+        agent.clone(),
+        CommandKind::AddWorkspaceMembers {
+            workspace: text(&ws),
+            members: members_request(&[(&d, "feat/d")]),
+        },
+    );
+    assert!(!done(&add));
+    let remove = harness.run(
+        agent,
+        CommandKind::RemoveWorkspaceMember {
+            workspace: text(&ws),
+            member: "c".into(),
+            force: true,
+        },
+    );
+    assert!(!done(&remove));
+    assert!(ws.join("c").exists() && !ws.join("d").exists());
+}
+
+#[test]
+fn a_repository_is_cloned_into_the_clone_root_and_can_join() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let origin = scratch.repo_with_remote_branch("up", "feat/x");
+    let url = text(&scratch.path().join("origin-up.git"));
+    let clone_root = scratch.path().join("clones");
+    let config = std::fs::read_to_string(&scratch.identity).unwrap();
+    let config = format!(
+        "{config}[gitmaster \"clone\"]\n\troot = {}\n",
+        text(&clone_root)
+    );
+    std::fs::write(&scratch.identity, config).unwrap();
+    let _ = origin;
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+
+    let planned = harness.human(CommandKind::PlanClone { url: url.clone() });
+    let target = planned
+        .iter()
+        .find_map(|event| match event {
+            Event::ClonePlanned { path, problem, .. } => {
+                assert_eq!(problem, &None);
+                path.clone()
+            }
+            _ => None,
+        })
+        .expect("the planned folder");
+    assert_eq!(target, text(&clone_root.join("origin-up")));
+
+    let events = remote(
+        &mut harness,
+        CommandKind::CloneRepository {
+            url: url.clone(),
+            path: target.clone(),
+        },
+    );
+    assert!(done(&events), "{events:?}");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::RepositoryCloned { path, .. } if *path == target
+    )));
+    let cloned = PathBuf::from(&target);
+    assert!(cloned.join(".git").is_dir());
+
+    let again = harness.human(CommandKind::PlanClone { url: url.clone() });
+    assert!(again.iter().any(|event| matches!(
+        event,
+        Event::ClonePlanned { path: None, problem: Some(problem), .. } if problem.contains("already exists")
+    )));
+
+    assert!(done(&harness.human(create(
+        "cloned",
+        &[(&c, "feat/x")],
+        &scratch.root()
+    ))));
+    let ws = scratch.ws("cloned");
+    let added = harness.human(CommandKind::AddWorkspaceMembers {
+        workspace: text(&ws),
+        members: members_request(&[(&cloned, "feat/x")]),
+    });
+    assert!(done(&added), "{added:?}");
+    assert_eq!(
+        git_in(
+            &ws.join("origin-up"),
+            &["rev-parse", "--abbrev-ref", "HEAD"]
+        ),
+        "feat/x"
+    );
+}
+
+#[test]
+fn a_clone_that_fails_creates_nothing_and_says_why() {
+    let scratch = Scratch::new();
+    let c = scratch.repo("c");
+    let mut harness = Harness::new(&scratch);
+    harness.open(&c);
+    let target = scratch.path().join("clones/nothing");
+    let events = remote(
+        &mut harness,
+        CommandKind::CloneRepository {
+            url: text(&scratch.path().join("no-such.git")),
+            path: text(&target),
+        },
+    );
+    assert!(!done(&events));
+    assert!(refusal(&events).is_some(), "{events:?}");
+    assert!(!target.exists());
+    let agent = harness.run(
+        Actor::Agent { name: "a".into() },
+        CommandKind::CloneRepository {
+            url: "x".into(),
+            path: text(&target),
+        },
+    );
+    assert!(!done(&agent));
+}

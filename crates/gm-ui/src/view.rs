@@ -848,6 +848,26 @@ impl StatusView {
         }
     }
 
+    /// Opens the worktree or workspace dialog an action asked for (D183, D256).
+    fn open_folder_effect(&mut self, effect: Effect, window: &mut Window, cx: &mut Context<Self>) {
+        match effect {
+            Effect::OpenWorktreeDialog { branch } => {
+                self.open_worktree_dialog(branch.as_deref(), window, cx);
+            }
+            Effect::OpenRemoveDialog(path) => self.open_remove_dialog(&path, window, cx),
+            Effect::OpenPruneDialog => self.open_prune_dialog(cx),
+            Effect::OpenWorkspaceDialog => self.open_workspace_dialog(window, cx),
+            Effect::OpenRemoveWorkspaceDialog(path) => {
+                self.open_remove_workspace_dialog(&path, window, cx);
+            }
+            Effect::OpenRemoveMemberDialog(member) => {
+                self.open_remove_member_dialog(&member, window, cx);
+            }
+            Effect::OpenAddMembersDialog(path) => self.open_add_members_dialog(&path, window, cx),
+            _ => {}
+        }
+    }
+
     /// Shows the outcome of each dialog's operation that the model settled.
     fn settle_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_pending_workflow_review(window, cx);
@@ -862,6 +882,12 @@ impl StatusView {
         }
         if let Some(outcome) = self.model.workspace_removal.take_outcome() {
             self.on_workspace_removal_settled(outcome, window, cx);
+        }
+        if let Some(suggestion) = self.model.workspace_clone.take_suggestion() {
+            self.on_clone_suggested(suggestion, cx);
+        }
+        if let Some(outcome) = self.model.workspace_clone.take_outcome() {
+            self.on_repository_cloned(outcome, window, cx);
         }
         if let Some(outcome) = self.model.pruning.take_outcome() {
             self.on_worktrees_pruned(outcome, window, cx);
@@ -1615,17 +1641,17 @@ impl StatusView {
             Ok(Effect::FocusCommitMessage) => self.focus_commit_message(window, cx),
             Ok(Effect::UseSuggestion(text)) => self.use_suggestion(&text, cx),
             Ok(Effect::DiscardSuggestion) => self.model.suggestion.drop_suggestion(),
-            Ok(Effect::OpenWorktreeDialog { branch }) => {
-                self.open_worktree_dialog(branch.as_deref(), window, cx);
-            }
             Ok(Effect::OpenWorktree(path)) => self.open_worktree(&path, cx),
             Ok(Effect::OpenInNewWindow(path)) => self.open_in_new_window(&path, cx),
-            Ok(Effect::OpenRemoveDialog(path)) => self.open_remove_dialog(&path, window, cx),
-            Ok(Effect::OpenWorkspaceDialog) => self.open_workspace_dialog(window, cx),
-            Ok(Effect::OpenRemoveWorkspaceDialog(path)) => {
-                self.open_remove_workspace_dialog(&path, window, cx);
-            }
-            Ok(Effect::OpenPruneDialog) => self.open_prune_dialog(cx),
+            Ok(
+                effect @ (Effect::OpenWorktreeDialog { .. }
+                | Effect::OpenRemoveDialog(_)
+                | Effect::OpenPruneDialog
+                | Effect::OpenWorkspaceDialog
+                | Effect::OpenRemoveWorkspaceDialog(_)
+                | Effect::OpenRemoveMemberDialog(_)
+                | Effect::OpenAddMembersDialog(_)),
+            ) => self.open_folder_effect(effect, window, cx),
             Ok(
                 effect @ (Effect::OpenNewBranchDialog { .. }
                 | Effect::OpenNewChildDialog { .. }

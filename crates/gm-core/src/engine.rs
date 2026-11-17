@@ -75,7 +75,7 @@ use crate::threads::members;
 use crate::threads::redact::Redactor;
 use crate::threads_session::{self, ProvenanceJob, ProvenanceReport, ThreadsSession, origin_of};
 use crate::workflow_session::{self, Effected};
-use crate::workspace::{CreateRequest, Workspaces};
+use crate::workspace::{self, CreateRequest, Workspaces};
 use crate::workspace_comments;
 use crate::worktree;
 
@@ -2070,6 +2070,15 @@ impl Engine {
                 events.extend(self.start_observers(report.id, phases, &active.op.kind, &[]));
             }
         }
+        if state == OperationState::Done
+            && let CommandKind::CloneRepository { url, path } = &active.op.kind
+        {
+            events.push(Event::RepositoryCloned {
+                id: report.id,
+                url: url.clone(),
+                path: path.clone(),
+            });
+        }
         // The end comes last: a status clears the error line, and a failure must stay on it.
         events.push(self.finish_op(&active.op, state, detail));
         events
@@ -2599,7 +2608,10 @@ impl Engine {
             }
             return;
         }
-        if matches!(command.kind, CommandKind::Fetch | CommandKind::Pull) {
+        if matches!(
+            command.kind,
+            CommandKind::Fetch | CommandKind::Pull | CommandKind::CloneRepository { .. }
+        ) {
             self.start_remote_op(op, None, events);
             return;
         }
@@ -2719,7 +2731,10 @@ impl Engine {
             CommandKind::LoadCommitDetail { .. } | CommandKind::LoadCommitStack { .. } => {
                 Err("commit reads are started by handle".to_owned())
             }
-            CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease => {
+            CommandKind::Fetch
+            | CommandKind::Pull
+            | CommandKind::PushWithLease
+            | CommandKind::CloneRepository { .. } => {
                 Err("remote operations are started by handle".to_owned())
             }
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
@@ -2855,6 +2870,7 @@ impl Engine {
         let what = match kind {
             CommandKind::Fetch => "fetch",
             CommandKind::Pull => "pull",
+            CommandKind::CloneRepository { .. } => "clone a repository",
             _ => "push with lease",
         };
         only_a_human(actor, what)?;
@@ -2875,10 +2891,25 @@ impl Engine {
         phases: Option<Phases>,
     ) -> Result<(), String> {
         self.remote_free(actor, kind)?;
-        let root = self.open_root()?;
+        // A clone needs no open repository; the status read after it is for the open one, if any.
+        let root = match kind {
+            CommandKind::CloneRepository { .. } => {
+                self.root.clone().unwrap_or_else(|| PathBuf::from("."))
+            }
+            _ => self.open_root()?,
+        };
         let run = match kind {
             CommandKind::Fetch => self.git.fetch(&root),
             CommandKind::Pull => self.git.pull(&root),
+            CommandKind::CloneRepository { url, path } => {
+                if url.trim().is_empty() {
+                    return Err("the URL is empty".to_owned());
+                }
+                if !Path::new(path).is_absolute() {
+                    return Err(format!("'{path}' is not an absolute folder"));
+                }
+                self.git.clone_repository(url.trim(), Path::new(path))
+            }
             _ => self.git.push_with_lease(&root),
         }
         .map_err(|e| e.0)?;
@@ -4809,8 +4840,123 @@ impl Engine {
                     .map_err(|e| e.to_string())?;
                 self.reload_status(id, &root)
             }
+            _ => self.workspace_member_command(id, actor, kind, &ws, &here),
+        }
+    }
+
+    /// The commands that change the members of a workspace that exists, and the clone that brings
+    /// a repository for one (D256). The reads write nothing; the writes are human only.
+    fn workspace_member_command(
+        &self,
+        id: OperationId,
+        actor: &Actor,
+        kind: &CommandKind,
+        ws: &Workspaces,
+        here: &Path,
+    ) -> Result<Vec<Event>, String> {
+        match kind {
+            CommandKind::PlanWorkspaceMembers { workspace, members } => {
+                let plan = ws
+                    .plan_members(Path::new(workspace), members)
+                    .map_err(|e| e.to_string())?;
+                Ok(vec![Event::WorkspacePlanned {
+                    id,
+                    path: plan.path.display().to_string(),
+                    members: plan.members,
+                    problems: plan.problems,
+                }])
+            }
+            CommandKind::AddWorkspaceMembers { workspace, members } => {
+                only_a_human(actor, "add a repository to a workspace")?;
+                self.add_workspace_members(id, ws, Path::new(workspace), members)
+            }
+            CommandKind::PlanClone { url } => {
+                let planned = ws
+                    .clone_root(here, self.workspace_home.as_deref())
+                    .and_then(|root| workspace::clone_target(url.trim(), None, &root));
+                let (path, problem) = match planned {
+                    Ok(path) => (Some(path.display().to_string()), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                Ok(vec![Event::ClonePlanned {
+                    id,
+                    url: url.clone(),
+                    path,
+                    problem,
+                }])
+            }
+            CommandKind::InspectMemberRemoval { workspace, member } => {
+                let inspection = ws
+                    .inspect_member_removal(Path::new(workspace), member, here)
+                    .map_err(|e| e.to_string())?;
+                Ok(vec![Event::MemberRemovalInspected {
+                    id,
+                    workspace: workspace.clone(),
+                    member: member.clone(),
+                    blockers: inspection.blockers,
+                }])
+            }
+            CommandKind::RemoveWorkspaceMember {
+                workspace,
+                member,
+                force,
+            } => {
+                only_a_human(actor, "remove a repository from a workspace")?;
+                ws.remove_member(Path::new(workspace), member, here, *force)
+                    .map_err(|e| e.to_string())?;
+                let mut events = self.refreshed(id)?;
+                events.push(Event::WorkspaceMemberRemoved {
+                    id,
+                    workspace: workspace.clone(),
+                    member: member.clone(),
+                });
+                Ok(events)
+            }
             _ => Err("not a workspace command".to_owned()),
         }
+    }
+
+    /// Adds `members` to the workspace at `path` (D256 (3)). It refuses a plan with problems, or
+    /// with no member, before anything is written. A member that failed is reported; the ones
+    /// added before it stay.
+    fn add_workspace_members(
+        &self,
+        id: OperationId,
+        ws: &Workspaces,
+        path: &Path,
+        members: &[MemberRequest],
+    ) -> Result<Vec<Event>, String> {
+        let plan = ws.plan_members(path, members).map_err(|e| e.to_string())?;
+        if !plan.problems.is_empty() {
+            let problems: Vec<String> = plan
+                .problems
+                .iter()
+                .map(|problem| problem.message.clone())
+                .collect();
+            return Err(format!("no repository was added: {}", problems.join("; ")));
+        }
+        if plan.members.is_empty() {
+            return Err("no repository to add".to_owned());
+        }
+        let added = ws.add_planned(&plan).map_err(|e| e.to_string())?;
+        let failed: Vec<String> = added
+            .iter()
+            .filter_map(|one| {
+                one.failure
+                    .as_ref()
+                    .map(|failure| format!("{}: {failure}", one.member))
+            })
+            .collect();
+        if !failed.is_empty() {
+            return Err(failed.join("; "));
+        }
+        let mut events = self.refreshed(id)?;
+        events.push(Event::WorkspaceMembersAdded {
+            id,
+            path: path.display().to_string(),
+            members: added.into_iter().map(|one| one.member).collect(),
+        });
+        Ok(events)
     }
 
     /// Creates the workspace `request` plans (D183). It refuses a plan with problems, or with no
@@ -6315,6 +6461,9 @@ impl Engine {
                 | CommandKind::ListWorkspaces { .. }
                 | CommandKind::PlanWorkspace { .. }
                 | CommandKind::InspectWorkspaceRemoval { .. }
+                | CommandKind::PlanWorkspaceMembers { .. }
+                | CommandKind::PlanClone { .. }
+                | CommandKind::InspectMemberRemoval { .. }
                 | CommandKind::ListWorkflowRuns { .. }
                 | CommandKind::LoadWorkflowRun { .. }
                 | CommandKind::DryRunWorkflow { .. }
@@ -6390,6 +6539,7 @@ fn success_message(kind: &CommandKind) -> &'static str {
     match kind {
         CommandKind::Fetch => "Fetched",
         CommandKind::Pull => "Pulled",
+        CommandKind::CloneRepository { .. } => "Cloned",
         _ => "Pushed",
     }
 }
@@ -6631,6 +6781,11 @@ fn is_workspace_command(kind: &CommandKind) -> bool {
             | CommandKind::InspectWorkspaceRemoval { .. }
             | CommandKind::RemoveWorkspace { .. }
             | CommandKind::CheckOutMemberBranch { .. }
+            | CommandKind::PlanWorkspaceMembers { .. }
+            | CommandKind::AddWorkspaceMembers { .. }
+            | CommandKind::PlanClone { .. }
+            | CommandKind::InspectMemberRemoval { .. }
+            | CommandKind::RemoveWorkspaceMember { .. }
     )
 }
 
