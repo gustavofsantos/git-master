@@ -95,6 +95,7 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 | `z R` `z M` | Unfold or fold every section. |
 | `/`, `n` `N` | Search the screen; the next or the previous match. |
 | `Enter` | Open what is at the cursor: a line in your editor, a thread, a commit's diff; on a section, fold or unfold it. |
+| `Space o` | Find a file of the worktree by its name and open it on the **File** screen; see [Open a file](#open-a-file). |
 | `g f` | Open the whole file of the line, file or thread at the cursor on the **File** screen. |
 | `Space d b` | Open the branch's changes on the **Diff** screen. |
 | `Space d s` | Switch the diffs between **Unified** and **Split**. |
@@ -129,13 +130,19 @@ These run as the app's own [Fetch, Pull and Push with lease](branches.md#fetch-p
 
 The companion runs no [workflow](../workflows/overview.md) on a commit or a push: it has no place to approve a run. Commit and push from the app when a workflow should gate them.
 
+## Open a file
+
+`Space o` opens the file picker at the bottom of the screen, over whatever screen you are on. Type part of a path: the files of the worktree that match it are listed best first, the letters that matched in bold, with how many files matched out of how many there are. The letters only have to appear in order, so `srcpar` finds `src/parser.rs`. Files are ranked as in the app's [Quick Open](code-navigation.md#how-results-are-ranked): a match in the file's name counts for more than one in its folder, and letters typed next to each other or at the start of a name rank higher. Up to 50 files are listed. The list holds tracked files and untracked files that `.gitignore` does not hide, and is read again each time the picker opens, so a file the agent just wrote is found.
+
+`↓` and `↑`, or `Ctrl+N` and `Ctrl+P` (`Ctrl+J` and `Ctrl+K` too), move through the list. `Enter`, or a click on a file, opens it on the **File** screen. End the query with `:` and a line number, such as `parser:120`, to open the file at that line. `Esc` closes the picker and leaves the screen as it was. While the picker is open every key types, so `q` and `Space` go into the query.
+
 ## Review threads
 
-Select lines, or put the cursor on one, open the menu and choose **comment**. A text box opens at the bottom with the screen still visible above. Choose the type: **change**, **question** or **nit**. Write the comment; `Enter` starts a new line, `Ctrl+S` sends it and `Esc` cancels, asking first when the box holds text.
+Select lines, or put the cursor on one, on **Status**, **Diff** or **File**, open the menu and choose **comment**. A text box opens at the bottom with the screen still visible above. Choose the type: **change**, **question** or **nit**. Write the comment; `Enter` starts a new line, `Ctrl+S` sends it and `Esc` cancels, asking first when the box holds text.
 
-The thread appears under its lines with the status **Open**. The agent reads it the next time it lists the review comments over MCP. The rules are those of [Local review](../agents/local-review.md): under **Unstaged** the lines are the file's own; elsewhere the companion finds the selected text in the file as it is now, exactly once, or says why not; removed lines cannot carry a thread.
+The thread appears under its lines with the status **Open**, on Status and on the File screen alike. The agent reads it the next time it lists the review comments over MCP. The rules are those of [Local review](../agents/local-review.md): under **Unstaged** the lines are the file's own; so are the lines of the **File** screen, which shows the working tree; elsewhere the companion finds the selected text in the file as it is now, exactly once, or says why not; removed lines cannot carry a thread. To comment on a file as a whole, comment on its first line.
 
-On a thread, the menu offers **reply**, **resolve** (or **reopen**) and **delete**, which asks first. Your reply on a handled thread reopens it.
+On a thread, the menu offers **reply** (`Space r`), **resolve** (`Space R`) or **reopen** (`Space O`), and **delete** (`Space D`), which asks first. Your reply on a handled thread reopens it.
 
 ## Questions wait a second
 
@@ -157,7 +164,7 @@ Diffs, on Status and on Diff, have two layouts, as in the app's [diff views](dif
 
 In Split, a row holds a line of each side, and selecting rows selects both of their lines: staging a selection stages the removed and the added lines of those rows and no others, and a comment covers the new lines from the first selected row to the last.
 
-**File** (`g f` on a line, a file or a thread) shows a whole file as it is in the working tree, colored, at the line you came from. Lines not yet committed are marked `+`: green when the change is not staged, cyan when it is. Long runs of unchanged lines are folded; `Tab` unfolds one. It follows the file as you or the agent edit it. One File screen is open at a time.
+**File** (`g f` on a line, a file or a thread, or `Space o` from anywhere) shows a whole file as it is in the working tree, colored, at the line you came from. Lines not yet committed are marked `+`: green when the change is not staged, cyan when it is. Review threads are drawn under their lines, as on Status, and a thread whose text is gone is listed above the file as outdated. Long runs of unchanged lines are folded, except around a thread; `Tab` unfolds one. Move with the usual keys, `/` searches the file, `V` selects lines to comment on, and `Space o` opens another file. It follows the file as you or the agent edit it. One File screen is open at a time.
 
 `Enter` on a line, on Status, Diff or File, opens the file at that line in `$VISUAL`, else `$EDITOR`, else `vi`. The companion hands the terminal to the editor and takes it back when the editor quits.
 
