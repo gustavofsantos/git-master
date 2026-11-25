@@ -168,10 +168,14 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let cursor = app.view().tree.cursor_index().unwrap_or(0);
     let selection = app.view().tree.selection();
     let width = usize::from(body.width);
-    // A File line may wrap over several terminal lines (D258 (10)); every other row is one.
+    // A line of code, of a file or a diff, may wrap over several terminal lines (D258 (10),
+    // D261); every other row is one.
     let wrap = app.wraps();
     let row_height = |row: &Row<'_, Item>| match &row.section.item {
         Item::FileLine { index, .. } if wrap => file_line_height(app, *index, width - 1),
+        Item::Line { .. } | Item::Pair { .. } if wrap => {
+            code_rows(app, row, width - 1, wrap).map_or(1, |lines| lines.len())
+        }
         _ => 1,
     };
     // Keep the cursor on screen: the lowest start that still shows the cursor's row whole.
@@ -217,7 +221,8 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
                 };
                 file_line_rows(app, *index, *mark, gutter, width.saturating_sub(1), wrap)
             }
-            _ => vec![row_line(app, row, width.saturating_sub(1))],
+            _ => code_rows(app, row, width.saturating_sub(1), wrap)
+                .unwrap_or_else(|| vec![row_line(app, row, width.saturating_sub(1))]),
         };
         drawn.truncate(height - lines.len());
         let tall = u16::try_from(drawn.len()).unwrap_or(1);
@@ -254,6 +259,31 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     }
     app.hits.extend(hits);
     app.view_mut().scroll = scroll;
+}
+
+/// The terminal lines of a diff line row, Unified or Split, wrapped or cut; `None` for any
+/// other row.
+fn code_rows(
+    app: &App,
+    row: &Row<'_, Item>,
+    width: usize,
+    wrap: bool,
+) -> Option<Vec<Line<'static>>> {
+    match &row.section.item {
+        Item::Line {
+            group,
+            path,
+            row: index,
+        } => Some(diff_lines(app, *group, path, *index, width, wrap)),
+        Item::Pair {
+            group,
+            path,
+            old,
+            new,
+            ..
+        } => Some(pair_lines(app, *group, path, (*old, *new), width, wrap)),
+        _ => None,
+    }
 }
 
 /// Whether a row is an added (`true`) or removed (`false`) line, with the columns of its
@@ -412,9 +442,17 @@ fn file_line(row: &Row<'_, Item>) -> Line<'static> {
 }
 
 /// A line of a file's diff with the colors of its code.
-fn diff_line(app: &App, group: Group, path: &str, index: usize, width: usize) -> Line<'static> {
+fn diff_lines(
+    app: &App,
+    group: Group,
+    path: &str,
+    index: usize,
+    width: usize,
+    wrap: bool,
+) -> Vec<Line<'static>> {
+    let none = || vec![Line::default()];
     let Some(file) = app.repo.files.get(&(group, path.to_owned())) else {
-        return Line::default();
+        return none();
     };
     let Some(DiffRow::Line {
         hunk_index,
@@ -422,12 +460,17 @@ fn diff_line(app: &App, group: Group, path: &str, index: usize, width: usize) ->
         ..
     }) = file.rows.get(index).copied()
     else {
-        return Line::default();
+        return none();
     };
     let Some(line) = status::line_of(&app.repo, group, path, index) else {
-        return Line::default();
+        return none();
     };
-    code_line(line, file.colors.get(&(hunk_index, line_index)), width)
+    code_lines(
+        line,
+        file.colors.get(&(hunk_index, line_index)),
+        width,
+        wrap,
+    )
 }
 
 /// The columns of a side's gutter in Split: the number, the sign and a space each side.
@@ -443,34 +486,47 @@ fn pair_sides(width: u16) -> (u16, u16) {
 
 /// A row of a file's diff in Split: the old line on the left, the new on the right, each
 /// with its number, sign and colors (D252).
-fn pair_line(
+/// With `wrap`, each side wraps within its half and the row is as tall as its taller side.
+fn pair_lines(
     app: &App,
     group: Group,
     path: &str,
     (old, new): (Option<usize>, Option<usize>),
     width: usize,
-) -> Line<'static> {
+    wrap: bool,
+) -> Vec<Line<'static>> {
     let (left, right) = pair_sides(u16::try_from(width + 1).unwrap_or(u16::MAX));
-    let mut spans = vec![Span::raw(" ")];
-    spans.extend(cell_spans(app, group, path, old, true, usize::from(left)));
-    spans.push(Span::styled("│", DIM));
-    spans.extend(cell_spans(app, group, path, new, false, usize::from(right)));
-    Line::from(spans)
+    let (left, right) = (usize::from(left), usize::from(right));
+    let old_rows = cell_rows(app, group, path, old, true, left, wrap);
+    let new_rows = cell_rows(app, group, path, new, false, right, wrap);
+    let count = old_rows.len().max(new_rows.len());
+    let blank = |width: usize| vec![Span::raw(" ".repeat(width))];
+    (0..count)
+        .map(|at| {
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(old_rows.get(at).cloned().unwrap_or_else(|| blank(left)));
+            spans.push(Span::styled("│", DIM));
+            spans.extend(new_rows.get(at).cloned().unwrap_or_else(|| blank(right)));
+            Line::from(spans)
+        })
+        .collect()
 }
 
-/// One side of a Split row, exactly `width` columns: blank when the side has no line.
-fn cell_spans(
+/// One side of a Split row, each row of it exactly `width` columns: blank when the side has
+/// no line; with `wrap`, its code continues on the next rows under the code.
+fn cell_rows(
     app: &App,
     group: Group,
     path: &str,
     row: Option<usize>,
     old_side: bool,
     width: usize,
-) -> Vec<Span<'static>> {
+    wrap: bool,
+) -> Vec<Vec<Span<'static>>> {
     let file = app.repo.files.get(&(group, path.to_owned()));
     let line = row.and_then(|row| status::line_of(&app.repo, group, path, row));
     let (Some(file), Some(row), Some(line)) = (file, row, line) else {
-        return vec![Span::raw(" ".repeat(width))];
+        return vec![vec![Span::raw(" ".repeat(width))]];
     };
     let colors = match file.rows.get(row) {
         Some(DiffRow::Line {
@@ -496,12 +552,34 @@ fn cell_spans(
         |no| format!("{no:>NUMBER_WIDTH$}"),
     );
     let gutter = usize::from(SIDE_GUTTER);
-    let mut spans = vec![Span::styled(format!("{number} {sign} "), sign_style)];
-    let code = code_spans(&line.text, colors, whole, width.saturating_sub(gutter));
-    let used: usize = code.iter().map(|span| span.content.chars().count()).sum();
-    spans.extend(code);
-    spans.push(Span::raw(" ".repeat(width.saturating_sub(gutter + used))));
-    spans
+    let room = width.saturating_sub(gutter).max(1);
+    let code = code_spans(
+        &line.text,
+        colors,
+        whole,
+        if wrap { usize::MAX } else { room },
+    );
+    let pieces = if wrap {
+        split_spans(code, room)
+    } else {
+        vec![code]
+    };
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(at, piece)| {
+            let head = if at == 0 {
+                format!("{number} {sign} ")
+            } else {
+                format!("{} {sign} ", " ".repeat(NUMBER_WIDTH))
+            };
+            let used: usize = piece.iter().map(|span| span.content.chars().count()).sum();
+            let mut spans = vec![Span::styled(head, sign_style)];
+            spans.extend(piece);
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(gutter + used))));
+            spans
+        })
+        .collect()
 }
 
 /// A row of the Commits and Stashes sections.
@@ -1012,14 +1090,14 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             group,
             path,
             row: index,
-        } => diff_line(app, *group, path, *index, width),
+        } => diff_lines(app, *group, path, *index, width, false).swap_remove(0),
         Item::Pair {
             group,
             path,
             old,
             new,
             ..
-        } => pair_line(app, *group, path, (*old, *new), width),
+        } => pair_lines(app, *group, path, (*old, *new), width, false).swap_remove(0),
         Item::Card { id, part } => card_line(app, *id, part),
         Item::Heading(Heading::Outdated { count, open }) => Line::styled(
             format!(
@@ -1084,7 +1162,14 @@ fn letter_color(letter: char, group: Group) -> Color {
     }
 }
 
-fn code_line(line: &DiffLine, colors: Option<&LineColors>, width: usize) -> Line<'static> {
+/// A Unified diff line: its number, its sign and its code, cut at `width`, or with `wrap`
+/// continued on the next rows under the code with the sign carried along.
+fn code_lines(
+    line: &DiffLine,
+    colors: Option<&LineColors>,
+    width: usize,
+    wrap: bool,
+) -> Vec<Line<'static>> {
     let (number, sign, sign_style, whole) = match line.kind {
         LineKind::Added => (line.new_no, "+", color(Color::Green), None),
         LineKind::Removed => {
@@ -1099,17 +1184,35 @@ fn code_line(line: &DiffLine, colors: Option<&LineColors>, width: usize) -> Line
         || " ".repeat(NUMBER_WIDTH),
         |no| format!("{no:>NUMBER_WIDTH$}"),
     );
-    let mut spans = vec![
-        Span::styled(format!("  {number}"), sign_style),
-        Span::styled(format!(" {sign} "), sign_style),
-    ];
-    spans.extend(code_spans(
+    let room = width.saturating_sub(NUMBER_WIDTH + 5).max(1);
+    let code = code_spans(
         &line.text,
         colors,
         whole,
-        width.saturating_sub(NUMBER_WIDTH + 5),
-    ));
-    Line::from(spans)
+        if wrap { usize::MAX } else { room },
+    );
+    let pieces = if wrap {
+        split_spans(code, room)
+    } else {
+        vec![code]
+    };
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(at, piece)| {
+            let shown = if at == 0 {
+                number.clone()
+            } else {
+                " ".repeat(NUMBER_WIDTH)
+            };
+            let mut spans = vec![
+                Span::styled(format!("  {shown}"), sign_style),
+                Span::styled(format!(" {sign} "), sign_style),
+            ];
+            spans.extend(piece);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// The spans of a line's code: its colored ranges in their role's color, the rest plain;

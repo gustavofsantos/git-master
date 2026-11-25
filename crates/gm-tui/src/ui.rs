@@ -472,9 +472,10 @@ impl App {
         self.dirty = true;
     }
 
-    /// Whether the top screen's long lines wrap: only the File screen's do.
+    /// Whether long lines of code wrap: those of the File screen and of the diffs, on Status
+    /// and Diff (D261).
     pub fn wraps(&self) -> bool {
-        self.wrap == LineWrap::Wrap && matches!(self.stack.top(), Screen::File { .. })
+        self.wrap == LineWrap::Wrap
     }
 
     /// What the top screen shows.
@@ -1430,7 +1431,10 @@ impl App {
             "go.branch" => self.repo.range.is_some(),
             "file.open" | "blame.open" => self.current_file().is_some(),
             "origin.open" => self.selected_lines().is_some(),
-            "view.wrap" => matches!(self.stack.top(), Screen::File { .. }),
+            "view.wrap" => matches!(
+                self.stack.top(),
+                Screen::File { .. } | Screen::Status(_) | Screen::Diff { .. }
+            ),
             _ => true,
         }
     }
@@ -2651,6 +2655,47 @@ mod tests {
             diff: diff(),
         });
         app.take_color_jobs();
+    }
+
+    #[test]
+    fn long_diff_lines_on_status_wrap_in_unified_and_split_and_space_d_w_cuts_them() {
+        let now = Instant::now();
+        let mut app = app();
+        app.tree_mut().move_to_id("file/Unstaged/src/lib.rs");
+        key(&mut app, "<tab>", now);
+        let asked = app.take_commands();
+        app.sent(OperationId(7), &asked[0]);
+        let mut long = diff();
+        long.hunks[0].lines[2].text = format!("    new({}end);", "x".repeat(120));
+        app.apply(&Event::DiffLoaded {
+            id: OperationId(7),
+            side: gm_schema::DiffSide::Unstaged,
+            diff: long,
+        });
+        // Unified at 100 columns: the code has 89 columns, so the added line takes two rows
+        // and its sign runs down the second.
+        let drawn = crate::draw::tests::screen(&mut app);
+        let lines: Vec<&str> = drawn.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("4 +     new(xxx"))
+            .unwrap_or_else(|| panic!("{drawn}"));
+        assert!(lines[at + 1].starts_with("         + xxx"), "{drawn}");
+        assert!(lines[at + 1].contains("xend);"), "{drawn}");
+        // Split: the new side wraps in its half; the row is as tall as that side.
+        key(&mut app, "<space> d s", now);
+        let split = crate::draw::tests::screen(&mut app);
+        let lines: Vec<&str> = split.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("4 +     new(x"))
+            .unwrap_or_else(|| panic!("{split}"));
+        assert!(lines[at + 1].contains("│      + xxx"), "{split}");
+        assert!(lines.iter().any(|l| l.contains("xend);")), "{split}");
+        // Cut: nothing past the edge shows.
+        key(&mut app, "<space> d w", now);
+        let cut = crate::draw::tests::screen(&mut app);
+        assert!(!cut.contains("xend);"), "{cut}");
     }
 
     #[test]

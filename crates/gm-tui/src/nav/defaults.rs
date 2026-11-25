@@ -404,7 +404,7 @@ const SPECS: &[Spec] = &[
     spec(
         "view.wrap",
         "wrap long lines",
-        "Wrap the File screen's long lines, or cut them at the edge.",
+        "Wrap long lines of code, in files and diffs, or cut them at the edge.",
         "Diff",
         MOVE,
         OneShot,
