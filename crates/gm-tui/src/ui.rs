@@ -2658,6 +2658,44 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_line_is_tinted_whole_gutter_and_code_in_its_tone() {
+        use crate::palette::{Palette, Rgb, Tints};
+        let now = Instant::now();
+        let mut app = app();
+        unfolded(&mut app, now);
+        let mut palette = Palette {
+            foreground: Some(Rgb(220, 220, 220)),
+            background: Some(Rgb(20, 20, 20)),
+            ..Palette::default()
+        };
+        palette.ansi[1] = Some(Rgb(255, 0, 0));
+        palette.ansi[2] = Some(Rgb(0, 255, 0));
+        palette.ansi[4] = Some(Rgb(0, 0, 255));
+        let tints = Tints::from_palette(&palette).unwrap();
+        let area = Rect::new(0, 3, 100, 1);
+        let rows = app.tree().rows();
+        let tinted = |text: &str| {
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row.section
+                        .item
+                        .diff_row()
+                        .is_some_and(|(group, path, at)| {
+                            line_of(&app.repo, group, path, at).is_some_and(|l| l.text == text)
+                        })
+                })
+                .unwrap();
+            crate::draw::row_backgrounds(&tints, &app, row, false, false, area)
+        };
+        // `old();` was replaced by `new();`: one red span and one blue span, each over the
+        // whole row, gutter included.
+        assert_eq!(tinted("    old();"), [(area, tints.removed)]);
+        assert_eq!(tinted("    new();"), [(area, tints.modified)]);
+        assert!(tinted("    let a = 1;").is_empty());
+    }
+
+    #[test]
     fn a_diff_line_under_a_thread_carries_its_bar_as_on_the_file_screen() {
         let now = Instant::now();
         let mut app = app();

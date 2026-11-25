@@ -292,32 +292,58 @@ fn code_rows(
     }
 }
 
-/// Whether a row is an added (`true`) or removed (`false`) line, with the columns of its
-/// gutter (the selection mark, number and sign).
-fn row_change(app: &App, row: &Row<'_, Item>) -> Option<(bool, u16)> {
+/// What a tinted row shows: an added, a modified or a removed line (D250, D263).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    Added,
+    Modified,
+    Removed,
+}
+
+/// The tone of row `index` of a file's diff: by its run, as its gutter sign (D262).
+fn line_tone(app: &App, group: Group, path: &str, index: usize) -> Option<Tone> {
+    let file = app.repo.files.get(&(group, path.to_owned()))?;
+    let DiffRow::Line {
+        hunk_index,
+        line_index,
+        ..
+    } = file.rows.get(index).copied()?
+    else {
+        return None;
+    };
+    let hunk = file.diff.as_ref()?.hunks.get(hunk_index)?;
+    match crate::diff_screen::run_change(hunk, line_index)? {
+        LineChange::Added => Some(Tone::Added),
+        LineChange::Modified => Some(Tone::Modified),
+        LineChange::Removed | LineChange::RemovedBelow | LineChange::RemovedAbove => {
+            Some(Tone::Removed)
+        }
+    }
+}
+
+/// Whether a row is a changed line, with its tone and the columns of a gutter tinted
+/// stronger (0 for one tone over the whole row: a diff line's gutter and code, D263).
+fn row_change(app: &App, row: &Row<'_, Item>) -> Option<(Tone, u16)> {
+    let tone = |added: bool| if added { Tone::Added } else { Tone::Removed };
     match &row.section.item {
         Item::Line {
             group,
             path,
             row: index,
-        } => match status::line_of(&app.repo, *group, path, *index)?.kind {
-            LineKind::Added => Some((true, 10)),
-            LineKind::Removed => Some((false, 10)),
-            LineKind::Context => None,
-        },
+        } => line_tone(app, *group, path, *index).map(|t| (t, 0)),
         Item::Text {
             version,
             marked: true,
             ..
-        } => Some((matches!(version, Version::After), 13)),
+        } => Some((tone(matches!(version, Version::After)), 13)),
         Item::Agent(AgentRow::Patch {
             kind: PatchKind::Added,
             ..
-        }) => Some((true, 0)),
+        }) => Some((Tone::Added, 0)),
         Item::Agent(AgentRow::Patch {
             kind: PatchKind::Removed,
             ..
-        }) => Some((false, 0)),
+        }) => Some((Tone::Removed, 0)),
         _ => None,
     }
 }
@@ -326,13 +352,13 @@ fn row_change(app: &App, row: &Row<'_, Item>) -> Option<(bool, u16)> {
 /// the selection.
 type RowTint = (Option<palette::Rgb>, Option<(u16, palette::Rgb)>);
 
-fn row_tint(tints: &Tints, change: Option<(bool, u16)>, on: bool, selected: bool) -> RowTint {
+fn row_tint(tints: &Tints, change: Option<(Tone, u16)>, on: bool, selected: bool) -> RowTint {
     match change {
-        Some((added, gutter)) => {
-            let (base, strong, cursor) = if added {
-                (tints.added, tints.added_gutter, tints.added_cursor)
-            } else {
-                (tints.removed, tints.removed_gutter, tints.removed_cursor)
+        Some((tone, gutter)) => {
+            let (base, strong, cursor) = match tone {
+                Tone::Added => (tints.added, tints.added_gutter, tints.added_cursor),
+                Tone::Modified => (tints.modified, tints.modified, tints.modified_cursor),
+                Tone::Removed => (tints.removed, tints.removed_gutter, tints.removed_cursor),
             };
             let whole = if on { cursor } else { base };
             (Some(whole), (gutter > 0).then_some((gutter, strong)))
@@ -345,7 +371,7 @@ fn row_tint(tints: &Tints, change: Option<(bool, u16)>, on: bool, selected: bool
 
 /// The tinted spans of a row in `area`: the whole row, or in Split each side on its own
 /// (D252 (5)).
-fn row_backgrounds(
+pub(crate) fn row_backgrounds(
     tints: &Tints,
     app: &App,
     row: &Row<'_, Item>,
@@ -386,15 +412,11 @@ fn row_backgrounds(
         return spans(area, row_tint(tints, row_change(app, row), on, selected));
     };
     let (left, right) = pair_sides(area.width);
-    let side = |index: Option<usize>, x: u16, width: u16, gutter: u16| {
-        let kind = index
-            .and_then(|i| status::line_of(&app.repo, *group, path, i))
-            .map(|line| line.kind);
-        let change = match kind {
-            Some(LineKind::Added) => Some((true, gutter)),
-            Some(LineKind::Removed) => Some((false, gutter)),
-            _ => None,
-        };
+    // Each side takes its line's tone over its gutter and its code (D263).
+    let side = |index: Option<usize>, x: u16, width: u16| {
+        let change = index
+            .and_then(|i| line_tone(app, *group, path, i))
+            .map(|tone| (tone, 0));
         let area = Rect {
             x: area.x + x,
             width,
@@ -403,8 +425,8 @@ fn row_backgrounds(
         spans(area, row_tint(tints, change, on, selected))
     };
     // The mark and the space before the left side take its tint.
-    let mut out = side(*old, 0, 2 + left, 2 + SIDE_GUTTER);
-    out.extend(side(*new, 3 + left, right, SIDE_GUTTER));
+    let mut out = side(*old, 0, 2 + left);
+    out.extend(side(*new, 3 + left, right));
     out
 }
 
@@ -517,9 +539,6 @@ fn diff_cell(
         mark, number, gutter, &line.text, colors, whole, fit,
     ))
 }
-
-/// The columns of a side's gutter in Split: the number, the sign and a space each side.
-const SIDE_GUTTER: u16 = 9;
 
 /// The widths of the two sides of a Split row `width` columns wide. The row is the
 /// selection mark, a space, the left side, a separator and the right side.

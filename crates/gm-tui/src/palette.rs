@@ -95,6 +95,9 @@ pub struct Tints {
     pub removed: Rgb,
     pub removed_gutter: Rgb,
     pub removed_cursor: Rgb,
+    /// A modified line of a diff, and under the cursor (D263).
+    pub modified: Rgb,
+    pub modified_cursor: Rgb,
     /// The mode chip's background.
     pub chip: Rgb,
 }
@@ -114,6 +117,7 @@ impl Tints {
         let blue = palette.ansi[BLUE]?;
         let added = background.mix(green, CHANGE);
         let removed = background.mix(red, CHANGE);
+        let modified = background.mix(blue, CHANGE);
         Some(Self {
             background,
             cursor: background.mix(foreground, CURSOR),
@@ -124,6 +128,8 @@ impl Tints {
             removed,
             removed_gutter: background.mix(red, CHANGE * 2),
             removed_cursor: removed.mix(foreground, CURSOR),
+            modified,
+            modified_cursor: modified.mix(foreground, CURSOR),
             chip: blue,
         })
     }
@@ -198,6 +204,8 @@ mod tests {
         // Green leads in the added tint, red in the removed one, and the gutter is stronger.
         assert!(tints.added.1 > tints.added.0 && tints.added_gutter.1 > tints.added.1);
         assert!(tints.removed.0 > tints.removed.1 && tints.removed_gutter.0 > tints.removed.0);
+        // Blue leads in the modified tint.
+        assert!(tints.modified.2 > tints.modified.0 && tints.modified.2 > tints.background.2);
         // The cursor is lighter than the background on a dark theme.
         assert!(tints.cursor.0 > tints.background.0);
         assert_eq!(tints.chip, Rgb(0x66, 0xbb, 0xff));
