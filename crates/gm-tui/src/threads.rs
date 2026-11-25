@@ -62,7 +62,11 @@ impl Composer {
     pub fn typed(&self) -> bool {
         matches!(
             self.target,
-            Target::Review(ReviewTarget::New { .. } | ReviewTarget::NewByText { .. })
+            Target::Review(
+                ReviewTarget::New { .. }
+                    | ReviewTarget::NewByText { .. }
+                    | ReviewTarget::NewOn { .. }
+            )
         )
     }
 

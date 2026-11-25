@@ -441,6 +441,104 @@ mod remote_real_git {
         );
     }
 
+    /// The row of the top screen showing line `new` (new side) or `old` (removed) of the
+    /// commit's `path`.
+    fn commit_row(app: &App, path: &str, new: Option<u32>, old: Option<u32>) -> usize {
+        use crate::data::Group;
+        let rows = app.view().tree.rows();
+        rows.iter()
+            .position(|row| match &row.section.item {
+                crate::status::Item::Line {
+                    group: Group::Commit,
+                    path: p,
+                    row,
+                } if p == path => crate::status::line_of(&app.repo, Group::Commit, p, *row)
+                    .is_some_and(|line| {
+                        line.new_no == new && (old.is_none() || line.old_no == old)
+                    }),
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!("no row for {new:?}/{old:?}"))
+    }
+
+    /// D259: on a commit's diff, lines whose text repeats in the file now take a comment,
+    /// placed by their context, and removed lines alone take one on the commit's parent.
+    #[test]
+    fn comments_on_a_commit_s_lines_whose_text_repeats_and_on_its_removed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("f.clj"), "(a)\n(old)\n(b)\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "first"]);
+        let parent = git(dir.path(), &["rev-parse", "HEAD"]);
+        let text = "(a)\n(fact 1\n  )\n(b)\n(fact 2\n  )\n";
+        std::fs::write(dir.path().join("f.clj"), text).unwrap();
+        git(dir.path(), &["commit", "-q", "-am", "second"]);
+        let head = git(dir.path(), &["rev-parse", "HEAD"]);
+
+        let opened = super::open(dir.path()).unwrap();
+        let mut app = App::new(opened.status.clone());
+        let later = || Instant::now() + Duration::from_secs(2);
+        app.open_diff(crate::diff_screen::DiffKind::Commit(head.clone()));
+        pump(&mut app, &opened, |app| {
+            app.repo
+                .files
+                .get(&(crate::data::Group::Commit, "f.clj".to_owned()))
+                .is_some_and(|file| file.diff.is_some())
+        });
+        app.run("fold.open_all", later());
+
+        // Line 6, "  )": the same text is line 3 too.
+        let at = commit_row(&app, "f.clj", Some(6), None);
+        app.view_mut().tree.move_to(at);
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, later());
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, later());
+        app.on_paste("Why a second fact?");
+        press(
+            &mut app,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            later() + Duration::from_secs(2),
+        );
+        pump(&mut app, &opened, |app| {
+            app.overlays.is_empty() && !app.repo.comments.is_empty()
+        });
+        let comment = &app.repo.comments[0];
+        assert_eq!(comment.anchor.text, "  )");
+        assert_eq!(comment.anchor.revision.as_deref(), Some(head.as_str()));
+        assert_eq!(
+            comment.location.map(|l| (l.start_line, l.end_line)),
+            Some((6, 6))
+        );
+
+        // The removed "(old)" alone: on the parent, gone from the working tree.
+        let at = commit_row(&app, "f.clj", None, Some(2));
+        app.view_mut().tree.move_to(at);
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, later());
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, later());
+        app.on_paste("Why was this removed?");
+        press(
+            &mut app,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            later() + Duration::from_secs(2),
+        );
+        pump(&mut app, &opened, |app| {
+            app.overlays.is_empty() && app.repo.comments.len() == 2
+        });
+        let removed = app
+            .repo
+            .comments
+            .iter()
+            .find(|c| c.anchor.text == "(old)")
+            .expect("the comment on the removed line");
+        assert_eq!(removed.anchor.revision.as_deref(), Some(parent.as_str()));
+        assert_eq!(removed.anchor.start_line, 2);
+        assert!(removed.location.is_none());
+    }
+
     #[test]
     fn commits_the_staged_change_and_pushes_it_to_the_upstream() {
         let remote = tempfile::tempdir().unwrap();

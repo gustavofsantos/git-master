@@ -8,9 +8,9 @@ use std::time::Instant;
 
 use gm_schema::{
     CommandKind, Event, HistoryScope, LineKind, OperationId, OperationState, RepoStatus,
-    ReviewAuthorFilter, ReviewStatus, StageTarget,
+    ReviewAuthorFilter, ReviewStatus, StageTarget, TextVersion,
 };
-use gm_view::compose::{self, ReviewTarget};
+use gm_view::compose::ReviewTarget;
 use gm_view::diff_rows::{Layout, Row as DiffRow};
 use gm_view::local_review::Filter;
 use gm_view::review::{self, Opened};
@@ -565,6 +565,7 @@ impl App {
             CommandKind::DeleteReviewComment { .. } => Pending::Write("Deleting"),
             CommandKind::AddReviewComment { .. }
             | CommandKind::AddReviewCommentByText { .. }
+            | CommandKind::AddReviewCommentOn { .. }
             | CommandKind::ReplyToReviewComment { .. } => Pending::Text,
             CommandKind::Commit { .. } => Pending::Commit,
             CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease => {
@@ -1666,36 +1667,49 @@ impl App {
             self.notice = Some("Select lines of one file to comment on.".to_owned());
             return;
         };
-        // A comment covers a range of new lines: from the first picked to the last. In Split
-        // a row's removed line may sit apart from its added one in the hunk, so the range is
-        // taken over the new lines only, else rows nobody picked would fall inside it.
-        let new: Vec<usize> = picked
+        // Any lines shown take a comment (D259): those of the new side, or with only removed
+        // lines picked, those of the version before the change.
+        let lines: Vec<&gm_schema::DiffLine> = picked
             .iter()
-            .copied()
-            .filter(|&row| {
-                line_of(&self.repo, group, &path, row).is_some_and(|l| l.new_no.is_some())
-            })
+            .filter_map(|&row| line_of(&self.repo, group, &path, row))
             .collect();
-        let picked = if new.is_empty() { picked } else { new };
-        let (from, to) = (picked[0], picked[picked.len() - 1]);
-        let Some(file) = self.repo.files.get(&(group, path.clone())) else {
+        let new: Vec<u32> = lines.iter().filter_map(|line| line.new_no).collect();
+        let old: Vec<u32> = lines
+            .iter()
+            .filter(|line| line.kind == LineKind::Removed)
+            .filter_map(|line| line.old_no)
+            .collect();
+        let (removed, numbers) = if new.is_empty() {
+            (true, old)
+        } else {
+            (false, new)
+        };
+        let (Some(&start_line), Some(&end_line)) = (numbers.iter().min(), numbers.iter().max())
+        else {
+            self.notice = Some("Select lines to comment on.".to_owned());
             return;
         };
-        let diffs = file.diffs(group.side());
-        let covered = review::covered(&file.rows, diffs, from, to);
-        let picked = review::picked(&file.rows, diffs, from, to);
-        let spot = compose::diff_spot(group.side(), covered, &picked, &path);
-        if let Err(reason) = compose::spot_refusal(spot) {
-            self.notice = Some(reason.to_owned());
+        let Some((path, version)) = self.version_of(group, &path, removed) else {
+            self.notice = Some("These lines cannot take a comment here.".to_owned());
             return;
-        }
-        let text = || (!picked.lines.is_empty()).then(|| picked.text());
-        if let Some(target) = ReviewTarget::for_spot(spot, text) {
-            self.overlays.push(Overlay::Text {
-                composer: Composer::new(target),
-                guard: Guard::new(now, true),
-            });
-        }
+        };
+        let target = match version {
+            TextVersion::WorkingTree => ReviewTarget::New {
+                path,
+                start_line,
+                end_line,
+            },
+            version => ReviewTarget::NewOn {
+                path,
+                version,
+                start_line,
+                end_line,
+            },
+        };
+        self.overlays.push(Overlay::Text {
+            composer: Composer::new(target),
+            guard: Guard::new(now, true),
+        });
     }
 
     /// On the File screen, folds or unfolds the threads of the line at the cursor: those
@@ -1737,6 +1751,34 @@ impl App {
         };
         self.tree_mut().toggle_id(&anchor);
         true
+    }
+
+    /// The version a diff of `group` shows on its new side, or with `removed` on its old side
+    /// (D259), and the path the file has there: the working tree and the index for the
+    /// working copy, `HEAD` under the staged changes, the commit and its parent, the branch's
+    /// tip and base.
+    fn version_of(&self, group: Group, path: &str, removed: bool) -> Option<(String, TextVersion)> {
+        let commit = |rev: String| TextVersion::Commit { rev };
+        let old_path = || {
+            self.repo
+                .files
+                .get(&(group, path.to_owned()))
+                .and_then(|file| file.diff.as_ref())
+                .and_then(|diff| diff.old_path.clone())
+                .unwrap_or_else(|| path.to_owned())
+        };
+        let version = match (group, removed) {
+            (Group::Unstaged | Group::Untracked, false) => TextVersion::WorkingTree,
+            (Group::Unstaged, true) | (Group::Staged, false) => TextVersion::Index,
+            (Group::Staged, true) => commit("HEAD".to_owned()),
+            (Group::Commit, false) => commit(self.repo.commit.as_ref()?.oid.clone()),
+            (Group::Commit, true) => commit(format!("{}^", self.repo.commit.as_ref()?.oid)),
+            (Group::Branch, false) => commit(self.repo.range.as_ref()?.tip.clone()),
+            (Group::Branch, true) => commit(self.repo.range.as_ref()?.base.clone()),
+            (Group::Untracked, true) => return None,
+        };
+        let path = if removed { old_path() } else { path.to_owned() };
+        Some((path, version))
     }
 
     /// The comment box for the lines selected on the File screen, or the line at the cursor:
@@ -1996,7 +2038,7 @@ impl App {
     }
 
     /// Opens a Diff screen; it replaces the one on the stack, whose reads it would supersede.
-    fn open_diff(&mut self, kind: DiffKind) {
+    pub(crate) fn open_diff(&mut self, kind: DiffKind) {
         self.close_screens("diff/");
         if let DiffKind::Commit(oid) = &kind
             && self.repo.commit.as_ref().is_none_or(|c| &c.oid != oid)
@@ -2919,6 +2961,7 @@ mod tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: 4,
+                revision: None,
             },
             created_at: 0,
             resolved_at: None,
@@ -3179,6 +3222,7 @@ mod tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: 4,
+                revision: None,
             },
             created_at,
             resolved_at: None,
