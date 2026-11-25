@@ -73,7 +73,7 @@ When you change a preference in the app, it is written to `~/.gitconfig` (`git c
 |---|---|---|---|
 | `gitmaster.diffLayout` | `unified`, `split` | `unified` | The layout of the diff, set by the **Unified** or **Split** selector. The choice applies to the Working Copy diff and to the commit diff, and is the layout the [terminal companion](../guide/terminal-companion.md) starts in. |
 | `gitmaster.authorPictures` | boolean | `false` | Whether author pictures are looked up on Gravatar. |
-| `gitmaster.lineWrap` | boolean | `true` | Whether the [terminal companion](../guide/terminal-companion.md)'s **File** screen wraps long lines. `false` cuts them at the edge of the terminal. `Space d w` switches it for the session without changing the setting. |
+| `gitmaster.lineWrap` | boolean | `true` | Whether the [terminal companion](../guide/terminal-companion.md) wraps long lines of code: on the **File** screen and in the diffs of **Status** and **Diff**. `false` cuts them at the edge of the terminal. `Space d w` switches it for the session without changing the setting. |
 | `gitmaster.threads.capture` | boolean | `true` | Turns [thread](../guide/threads.md) capture off when `false`. |
 | `gitmaster.threads.maxResultBytes` | integer | `65536` | The most bytes of one tool result that are stored. A longer result is cut, and the entry records its original size. |
 | `gitmaster.threads.redactBuiltin` | boolean | `true` | Turns the built-in redaction patterns on or off as a group. Leave it on unless you replace them with your own. |

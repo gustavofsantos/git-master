@@ -99,7 +99,7 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 | `g f` | Open the whole file of the line, file or thread at the cursor on the **File** screen. |
 | `Space d b` | Open the branch's changes on the **Diff** screen. |
 | `Space d s` | Switch the diffs between **Unified** and **Split**. |
-| `Space d w` | On the **File** screen, wrap long lines or cut them at the edge. |
+| `Space d w` | Wrap long lines of code, on **File** and in the diffs of **Status** and **Diff**, or cut them at the edge. |
 | `g b` | Open who last changed each line of the file at the cursor on the **Blame** screen. |
 | `Space w` | Show how the selected lines, or the line, got where they are on the **Origin** screen. |
 | `Space C` | Commit the staged changes, with a message written in a text box. |
@@ -181,7 +181,7 @@ In Split, a row holds a line of each side, and selecting rows selects both of th
 
 The thread is drawn under its last line, as on Status, and a thread whose text is gone is listed above the file as outdated. `Tab` on any line of a thread folds or unfolds it; while it is folded, its last line shows `▸` in the gutter instead of the bar.
 
-Long lines wrap: the rest of a line continues on the next rows, under the code, with the gutter's bars carried along. `Space d w` cuts them at the edge instead, for this session; set `gitmaster.lineWrap` to `false` to start that way (see [Configuration](../reference/configuration.md)). Move with the usual keys, `/` searches the file, `V` selects lines to comment on, and `Space o` opens another file. It follows the file as you or the agent edit it. One File screen is open at a time.
+Long lines wrap: the rest of a line continues on the next rows, under the code, with the gutter's bars carried along. The diffs on Status and Diff wrap the same way: the number shows on the first row only, and the `+` or `-` runs down every row of the line; in Split, each side wraps within its half, and the row is as tall as its taller side. `Space d w` cuts long lines at the edge instead, everywhere, for this session; set `gitmaster.lineWrap` to `false` to start that way (see [Configuration](../reference/configuration.md)). Move with the usual keys, `/` searches the file, `V` selects lines to comment on, and `Space o` opens another file. It follows the file as you or the agent edit it. One File screen is open at a time.
 
 `Enter` on a line, on Status, Diff or File, opens the file at that line in `$VISUAL`, else `$EDITOR`, else `vi`. The companion hands the terminal to the editor and takes it back when the editor quits.
 
