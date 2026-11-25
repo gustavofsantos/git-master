@@ -1,12 +1,12 @@
 //! The Diff and File screens (D241, M4). Diff shows the branch against its base (D237) or
 //! one commit, read-only, with the review threads under their lines as on Status. File
-//! shows a whole file of the working tree, colored, with the lines not yet committed marked
-//! and long unchanged runs folded.
+//! shows a whole file of the working tree, colored, with the lines not yet committed marked,
+//! the review threads under their lines (D258) and long unchanged runs folded.
 
 use std::collections::BTreeSet;
 
 use gm_schema::{FileDiff, LineKind};
-use gm_view::review::Opened;
+use gm_view::review::{self, Entry, Opened};
 
 use crate::data::{Group, Repo};
 use crate::nav::sections::Section;
@@ -168,8 +168,9 @@ fn marks(repo: &Repo, path: &str, count: usize) -> Vec<Mark> {
     marks
 }
 
-/// The File screen's sections. `keep` is a line (from 1) that must not be folded away.
-pub fn file(repo: &Repo, path: &str, keep: Option<u32>) -> Vec<Section<Item>> {
+/// The File screen's sections. `keep` is a line (from 1) that must not be folded away; nor
+/// is a line a thread sits under.
+pub fn file(repo: &Repo, path: &str, keep: Option<u32>, opened: Opened) -> Vec<Section<Item>> {
     let mut out = vec![Section::leaf(
         "head",
         Item::Header {
@@ -187,13 +188,33 @@ pub fn file(repo: &Repo, path: &str, keep: Option<u32>) -> Vec<Section<Item>> {
         return out;
     }
     let marks = marks(repo, path, file.lines.len());
-    // Lines near a change, or near the line to keep, stay unfolded; with no change, all do.
+    let notes = review::file_notes(file.lines.len(), &repo.comments, path, opened);
+    let mut cards = 0usize;
+    // A file's notes hold cards and headings only; a diff row has no place here.
+    let mut section = |entry: Entry| {
+        cards += 1;
+        match entry {
+            Entry::Card { id, part } => Some(Section::leaf(
+                format!("card/{id}/{cards}"),
+                Item::Card { id, part },
+            )),
+            Entry::Heading(heading) => Some(Section::leaf(
+                format!("heading/{heading:?}"),
+                Item::Heading(heading),
+            )),
+            Entry::Diff(_) => None,
+        }
+    };
+    out.extend(notes.top.into_iter().filter_map(&mut section));
+    // Lines near a change, near the line to keep or under a thread stay unfolded; with none,
+    // all do.
     let mut shown: BTreeSet<usize> = BTreeSet::new();
     let anchors = marks
         .iter()
         .enumerate()
         .filter(|(_, mark)| **mark != Mark::Same)
         .map(|(index, _)| index)
+        .chain(notes.after.keys().copied())
         .chain(keep.and_then(|n| (n as usize).checked_sub(1)));
     for at in anchors {
         shown.extend(at.saturating_sub(CONTEXT)..=at + CONTEXT);
@@ -212,6 +233,9 @@ pub fn file(repo: &Repo, path: &str, keep: Option<u32>) -> Vec<Section<Item>> {
     while index < file.lines.len() {
         if all || shown.contains(&index) {
             out.push(line(index));
+            if let Some(entries) = notes.after.get(&index) {
+                out.extend(entries.iter().cloned().filter_map(&mut section));
+            }
             index += 1;
             continue;
         }

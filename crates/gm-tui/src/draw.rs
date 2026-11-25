@@ -147,6 +147,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Text { .. }) => draw_text_box(frame, app, body, now),
         Some(Overlay::Confirm { .. }) => draw_question(frame, app, body, now),
         Some(Overlay::Search { .. }) => draw_search(frame, app, size),
+        Some(Overlay::Files { .. }) => draw_files(frame, app, body, now),
         None => draw_menu(frame, app, body),
     }
 }
@@ -1304,6 +1305,103 @@ fn draw_question(frame: &mut Frame, app: &mut App, body: Rect, now: Instant) {
     strip.render(frame, &mut app.hits);
 }
 
+/// The most files the picker lists at once.
+const PICKER_ROWS: usize = 12;
+
+/// The file picker (D258): the query with how many files it matched, the files best first with
+/// the matched letters bold, the one under the cursor reversed, and its keys.
+fn draw_files(frame: &mut Frame, app: &mut App, body: Rect, now: Instant) {
+    let Some(Overlay::Files { picker, guard }) = app.overlays.last() else {
+        return;
+    };
+    let rows = usize::from(body.height)
+        .saturating_sub(4)
+        .clamp(1, PICKER_ROWS);
+    let height = u16::try_from(rows + 3).unwrap_or(u16::MAX);
+    let cancel = guard.accepts(Answer::Cancel, now);
+    let mut lines: Vec<Line> = Vec::new();
+    let count = match (&picker.search, &picker.error) {
+        (_, Some(error)) => Span::styled(format!("  {error}"), color(Color::Red)),
+        (Some(search), None) => Span::styled(
+            format!(
+                "  {}/{}{}",
+                search.matched,
+                search.files,
+                if search.indexing {
+                    " · indexing…"
+                } else {
+                    ""
+                }
+            ),
+            DIM,
+        ),
+        (None, None) => Span::styled("  searching…", DIM),
+    };
+    lines.push(Line::from(vec![
+        Span::styled("› ", BOLD),
+        Span::raw(picker.query.clone()),
+        Span::styled(" ", ON),
+        count,
+    ]));
+    let hits = picker.hits();
+    let first = (picker.selected + 1).saturating_sub(rows);
+    let mut clicks: Vec<(usize, usize)> = Vec::new();
+    for (index, hit) in hits.iter().enumerate().skip(first).take(rows) {
+        clicks.push((lines.len(), index));
+        lines.push(hit_line(&hit.path, &hit.ranges, index == picker.selected));
+    }
+    if picker.query.trim().is_empty() {
+        lines.push(Line::styled(
+            "Type part of a path; :12 after it opens at line 12.",
+            DIM,
+        ));
+    } else if hits.is_empty() && picker.search.is_some() {
+        lines.push(Line::styled("No file matches.", DIM));
+    }
+    while lines.len() < rows + 1 {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("Enter ", color(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("open   ", DIM),
+        Span::styled("↑ ↓ ", BOLD),
+        Span::styled("move   ", DIM),
+        Span::styled("Esc ", guarded(cancel)),
+        Span::styled("close", DIM),
+    ]));
+    let inner = panel(frame, body, height, "Open a file");
+    app.hits.retain(|hit| !inner.intersects(hit.area));
+    for (row, index) in clicks {
+        let y = inner.y + u16::try_from(row).unwrap_or(u16::MAX);
+        if y < inner.y + inner.height {
+            app.hits.push(Hit {
+                area: Rect::new(inner.x, y, inner.width, 1),
+                click: Click::Pick(index),
+            });
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A file the picker lists: its icon and path, the byte `ranges` the query matched in bold.
+fn hit_line(path: &str, ranges: &[(usize, usize)], selected: bool) -> Line<'static> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut spans = vec![Span::raw(format!("{} ", icons::file(name)))];
+    let matched = color(Color::Yellow).add_modifier(Modifier::BOLD);
+    let mut at = 0;
+    for &(start, end) in ranges {
+        let (Some(before), Some(part)) = (path.get(at..start), path.get(start..end)) else {
+            continue;
+        };
+        spans.push(Span::raw(before.to_owned()));
+        spans.push(Span::styled(part.to_owned(), matched));
+        at = end;
+    }
+    spans.push(Span::raw(path.get(at..).unwrap_or_default().to_owned()));
+    let line = Line::from(spans);
+    if selected { line.patch_style(ON) } else { line }
+}
+
 /// The search line, at the bottom, as in less and vim.
 fn draw_search(frame: &mut Frame, app: &mut App, size: Rect) {
     let Some(Overlay::Search { text, .. }) = app.overlays.last() else {
@@ -1325,14 +1423,14 @@ fn draw_search(frame: &mut Frame, app: &mut App, size: Rect) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gm_schema::{BranchInfo, Change, RepoStatus, StatusEntry};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    fn screen(app: &mut App) -> String {
+    pub(crate) fn screen(app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
         let buffer = terminal.backend().buffer();

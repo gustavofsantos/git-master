@@ -710,6 +710,28 @@ pub fn notes(
             slot.extend(card);
         }
     }
+    let top = strips(&outdated, &outside, opened);
+    Notes {
+        unified: listing(rows.len(), &unified_after, &top),
+        split: listing(split.rows.len(), &split_after, &top),
+        marked,
+    }
+}
+
+/// The strips above a file: the outdated comments under their heading, open or
+/// closed, then the comments that are not on a line shown.
+fn strips(
+    outdated: &[&ReviewComment],
+    outside: &[&ReviewComment],
+    opened: Opened<'_>,
+) -> Vec<Entry> {
+    let cards = |comment: &&ReviewComment| {
+        card_entries(
+            comment,
+            opened.comments.contains(&comment.id),
+            opened.threads.contains(&comment.id),
+        )
+    };
     let mut top = Vec::new();
     if !outdated.is_empty() {
         top.push(Entry::Heading(Heading::Outdated {
@@ -717,29 +739,59 @@ pub fn notes(
             open: opened.outdated,
         }));
         if opened.outdated {
-            top.extend(outdated.iter().flat_map(|comment| {
-                card_entries(
-                    comment,
-                    opened.comments.contains(&comment.id),
-                    opened.threads.contains(&comment.id),
-                )
-            }));
+            top.extend(outdated.iter().flat_map(cards));
         }
     }
     if !outside.is_empty() {
         top.push(Entry::Heading(Heading::Outside));
-        top.extend(outside.iter().flat_map(|comment| {
-            card_entries(
-                comment,
-                opened.comments.contains(&comment.id),
-                opened.threads.contains(&comment.id),
-            )
-        }));
+        top.extend(outside.iter().flat_map(cards));
     }
-    Notes {
-        unified: listing(rows.len(), &unified_after, &top),
-        split: listing(split.rows.len(), &split_after, &top),
-        marked,
+    top
+}
+
+/// The cards of a whole file, as the terminal companion's File screen draws them
+/// (D258): the strips above the file, and under each line (by index from 0) the
+/// cards of the comments whose lines end on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FileNotes {
+    pub top: Vec<Entry>,
+    pub after: BTreeMap<usize, Vec<Entry>>,
+}
+
+/// Lays out the comments of `path` over a file of `line_count` lines. A comment
+/// whose place is not found is outdated; one whose lines end past the file's
+/// last line (a file shown cut) goes to the strip of comments outside.
+#[must_use]
+pub fn file_notes(
+    line_count: usize,
+    comments: &[ReviewComment],
+    path: &str,
+    opened: Opened<'_>,
+) -> FileNotes {
+    let mut mine: Vec<&ReviewComment> = group_by_path(comments).remove(path).unwrap_or_default();
+    mine.sort_by_key(|comment| (shown_range(comment).0, comment.id));
+    let mut after: BTreeMap<usize, Vec<Entry>> = BTreeMap::new();
+    let mut outdated = Vec::new();
+    let mut outside = Vec::new();
+    for comment in mine {
+        let Some(location) = comment.location else {
+            outdated.push(comment);
+            continue;
+        };
+        let index = (location.end_line as usize).checked_sub(1);
+        let Some(index) = index.filter(|&index| index < line_count) else {
+            outside.push(comment);
+            continue;
+        };
+        after.entry(index).or_default().extend(card_entries(
+            comment,
+            opened.comments.contains(&comment.id),
+            opened.threads.contains(&comment.id),
+        ));
+    }
+    FileNotes {
+        top: strips(&outdated, &outside, opened),
+        after,
     }
 }
 
@@ -1064,6 +1116,51 @@ mod tests {
             card[2],
             Entry::Card { part: Part::Text(text), .. } if text.is_empty()
         ));
+    }
+
+    #[test]
+    fn file_notes_put_each_card_under_its_last_line_and_the_rest_above() {
+        let on_lines = comment(1, "a.txt", Some((2, 3)), "two\nthree");
+        let gone = comment(2, "a.txt", None, "old");
+        let past_the_end = comment(3, "a.txt", Some((9, 9)), "nine");
+        let other_file = comment(4, "b.txt", Some((1, 1)), "one");
+        let notes = file_notes(
+            5,
+            &[on_lines, gone, past_the_end, other_file],
+            "a.txt",
+            Opened {
+                outdated: false,
+                comments: &none(),
+                threads: &none(),
+            },
+        );
+        assert_eq!(notes.after.keys().copied().collect::<Vec<_>>(), [2]);
+        assert!(matches!(
+            notes.after[&2].first(),
+            Some(Entry::Card {
+                id: 1,
+                part: Part::Head { .. }
+            })
+        ));
+        assert!(matches!(
+            notes.top.as_slice(),
+            [
+                Entry::Heading(Heading::Outdated {
+                    count: 1,
+                    open: false
+                }),
+                Entry::Heading(Heading::Outside),
+                Entry::Card { id: 3, .. },
+                ..
+            ]
+        ));
+        assert!(
+            !notes
+                .top
+                .iter()
+                .chain(notes.after.values().flatten())
+                .any(|entry| matches!(entry, Entry::Card { id: 4, .. }))
+        );
     }
 
     #[test]

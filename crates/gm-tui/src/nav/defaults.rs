@@ -322,6 +322,14 @@ const SPECS: &[Spec] = &[
         OneShot,
     ),
     spec(
+        "file.find",
+        "open a file",
+        "Find a file of the worktree by its name and open it on the File screen.",
+        "Go to",
+        MOVE,
+        OneShot,
+    ),
+    spec(
         "blame.open",
         "blame",
         "Show who last changed each line of the file on the Blame screen.",
@@ -489,6 +497,22 @@ const SPECS: &[Spec] = &[
         INSERT,
         OneShot,
     ),
+    spec(
+        "pick.down",
+        "next file",
+        "Move to the next file the search found.",
+        "Write",
+        INSERT,
+        OneShot,
+    ),
+    spec(
+        "pick.up",
+        "previous file",
+        "Move to the previous file the search found.",
+        "Write",
+        INSERT,
+        OneShot,
+    ),
 ];
 
 /// The registry of every action.
@@ -536,7 +560,8 @@ const NORMAL: &[(&str, &str)] = &[
     ("<space> c", "review.comment"),
     ("<space> r", "thread.reply"),
     ("<space> R", "thread.resolve"),
-    ("<space> o", "thread.reopen"),
+    ("<space> O", "thread.reopen"),
+    ("<space> o", "file.find"),
     ("<space> D", "thread.delete"),
     ("<space> y", "copy.reference"),
     ("<space> t", "go.threads"),
@@ -565,6 +590,12 @@ const INSERT_KEYS: &[(&str, &str)] = &[
     ("<cr>", "text.newline"),
     ("<bs>", "text.backspace"),
     ("<tab>", "text.type"),
+    ("<down>", "pick.down"),
+    ("<c-n>", "pick.down"),
+    ("<c-j>", "pick.down"),
+    ("<up>", "pick.up"),
+    ("<c-p>", "pick.up"),
+    ("<c-k>", "pick.up"),
 ];
 
 const LABELS: &[(&str, &str)] = &[

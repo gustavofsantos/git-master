@@ -12,6 +12,7 @@ mod help;
 mod icons;
 mod nav;
 mod palette;
+mod picker;
 mod review_screens;
 mod reviews;
 mod status;
@@ -347,6 +348,94 @@ mod remote_real_git {
 
     fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers, now: Instant) {
         app.on_key_at(KeyEvent::new(code, modifiers), now);
+    }
+
+    /// The files the open picker lists.
+    fn picked(app: &App) -> Vec<String> {
+        match app.overlays.last() {
+            Some(crate::ui::Overlay::Files { picker, .. }) => {
+                picker.hits().iter().map(|hit| hit.path.clone()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn finds_a_file_opens_it_at_the_line_and_comments_on_that_line() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let text = (1..=10)
+            .map(|n| format!("let line_{n} = {n};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("src/parser.rs"), text).unwrap();
+        std::fs::write(dir.path().join("README.md"), "read me\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "first"]);
+        // A file never committed is found too.
+        std::fs::write(dir.path().join("src/lexer.rs"), "fn lex() {}\n").unwrap();
+
+        let opened = super::open(dir.path()).unwrap();
+        let mut app = App::new(opened.status.clone());
+        let later = || Instant::now() + Duration::from_secs(2);
+
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, later());
+        press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, later());
+        app.on_paste("lexer");
+        pump(&mut app, &opened, |app| picked(app) == ["src/lexer.rs"]);
+        for _ in 0.."lexer".len() {
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, later());
+        }
+        app.on_paste("parser:3");
+        pump(&mut app, &opened, |app| picked(app) == ["src/parser.rs"]);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, later());
+        assert_eq!(app.stack.trail(), ["status", "file/src/parser.rs"]);
+        pump(&mut app, &opened, |app| {
+            app.view().tree.current().is_some_and(|section| {
+                matches!(section.item, crate::status::Item::FileLine { index: 2, .. })
+            })
+        });
+
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, later());
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, later());
+        app.on_paste("Name this better.");
+        press(
+            &mut app,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            later() + Duration::from_secs(2),
+        );
+        pump(&mut app, &opened, |app| {
+            app.overlays.is_empty()
+                && app.repo.comments.iter().any(|comment| {
+                    comment.path == "src/parser.rs"
+                        && comment
+                            .location
+                            .is_some_and(|l| (l.start_line, l.end_line) == (3, 3))
+                })
+        });
+        // The thread is drawn under line 3, on the File screen.
+        let rows = app.view().tree.rows();
+        let line = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.section.item,
+                    crate::status::Item::FileLine { index: 2, .. }
+                )
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                rows[line + 1].section.item,
+                crate::status::Item::Card { .. }
+            ),
+            "{:?}",
+            rows[line + 1].section.item
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ use crate::nav::keys::{Code, Key};
 use crate::nav::prompt::{Answer, Guard};
 use crate::nav::sections::Tree;
 use crate::nav::stack::{Addressed, Stack};
+use crate::picker::Picker;
 use crate::review_screens::{self, ThreadPage};
 use crate::status::{self, Item, line_of};
 use crate::threads::Composer;
@@ -164,6 +165,11 @@ pub enum Overlay {
         text: String,
         guard: Guard,
     },
+    /// The file picker (`Space o`, D258).
+    Files {
+        picker: Picker,
+        guard: Guard,
+    },
 }
 
 impl Overlay {
@@ -171,7 +177,8 @@ impl Overlay {
         match self {
             Overlay::Text { guard, .. }
             | Overlay::Confirm { guard, .. }
-            | Overlay::Search { guard, .. } => guard,
+            | Overlay::Search { guard, .. }
+            | Overlay::Files { guard, .. } => guard,
         }
     }
 }
@@ -187,6 +194,8 @@ pub enum Click {
     Trail(usize),
     /// An answer to the question on screen.
     Answer(Answer),
+    /// A file the picker lists, by its index among the hits: it opens.
+    Pick(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -480,7 +489,9 @@ impl App {
     /// The mode the keys are read in (D241 (2)).
     pub fn mode(&self) -> Mode {
         match self.overlays.last() {
-            Some(Overlay::Text { .. } | Overlay::Search { .. }) => Mode::Insert,
+            Some(Overlay::Text { .. } | Overlay::Search { .. } | Overlay::Files { .. }) => {
+                Mode::Insert
+            }
             _ if self.tree().selection().is_some() => Mode::Visual,
             _ => Mode::Normal,
         }
@@ -513,6 +524,12 @@ impl App {
             CommandKind::ReadFile { .. } => {
                 self.file_read = Some(id);
                 Pending::File
+            }
+            CommandKind::SearchFiles { .. } => {
+                if let Some(picker) = self.picker_mut() {
+                    picker.sent(id);
+                }
+                return;
             }
             CommandKind::LoadReviewChange { .. }
             | CommandKind::LoadReviewSnapshotText { .. }
@@ -702,11 +719,32 @@ impl App {
                 let short: String = oid.chars().take(7).collect();
                 self.notice = Some(format!("Committed {short}."));
             }
+            _ if self.apply_picker(event) => return,
             _ if self.apply_screen_read(event) => {}
             _ => return,
         }
         self.rebuild();
         self.dirty = true;
+    }
+
+    /// Takes an answer for the file picker; false when `event` is not one.
+    fn apply_picker(&mut self, event: &Event) -> bool {
+        match event {
+            Event::FilesFound { id, search } => {
+                if let Some(picker) = self.picker_mut() {
+                    picker.received(*id, search);
+                }
+                self.dirty = true;
+            }
+            // The list was read again: the open picker searches the new one.
+            Event::FilesIndexed { .. } => {
+                if let Some(command) = self.picker_mut().map(|picker| picker.command()) {
+                    self.commands.push(command);
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Takes an answer to a read of the Diff or File screen; false when `event` is not one.
@@ -804,6 +842,12 @@ impl App {
         }
         // The Origin panel takes only the end of its read: it reads any other state as one.
         self.repo.origin.ended(id, state, detail);
+        if failed
+            && state != OperationState::Cancelled
+            && let Some(picker) = self.picker_mut()
+        {
+            picker.failed(id, detail.unwrap_or("no reason given"));
+        }
         // A read on a job of its own reports Done before its answer: keep it until then.
         if !failed
             && matches!(
@@ -1015,7 +1059,7 @@ impl App {
                     );
                 }
                 Screen::File { view, path, keep } => {
-                    view.tree.set(diff_screen::file(repo, path, *keep));
+                    view.tree.set(diff_screen::file(repo, path, *keep, opened));
                     if let Some(line) =
                         keep.filter(|_| repo.file.as_ref().is_some_and(|f| &f.path == path))
                     {
@@ -1131,6 +1175,24 @@ impl App {
                 }
                 _ => {}
             },
+            Some(Overlay::Files { picker, .. }) => match self.input.feed(Mode::Insert, key) {
+                Outcome::Type(c) => {
+                    picker.type_text(c.encode_utf8(&mut [0; 4]));
+                    self.commands.push(picker.command());
+                }
+                Outcome::Action("text.backspace") => {
+                    if picker.backspace() {
+                        self.commands.push(picker.command());
+                    }
+                }
+                Outcome::Action("pick.down") => picker.move_by(1),
+                Outcome::Action("pick.up") => picker.move_by(-1),
+                Outcome::Action("text.newline" | "text.send") => self.pick(None),
+                Outcome::Action("text.cancel") if allowed(Answer::Cancel) => {
+                    self.overlays.pop();
+                }
+                _ => {}
+            },
             Some(Overlay::Text { composer, .. }) => match self.input.feed(Mode::Insert, key) {
                 Outcome::Type(c) => composer.type_text(c.encode_utf8(&mut [0; 4])),
                 Outcome::Action("text.newline") => composer.type_text("\n"),
@@ -1180,6 +1242,11 @@ impl App {
         match self.overlays.last_mut() {
             Some(Overlay::Text { composer, .. }) => composer.type_text(text),
             Some(Overlay::Search { text: search, .. }) => search.push_str(text),
+            Some(Overlay::Files { picker, .. }) => {
+                // A path pasted from elsewhere is one line.
+                picker.type_text(text.lines().next().unwrap_or_default());
+                self.commands.push(picker.command());
+            }
             _ => return,
         }
         self.dirty = true;
@@ -1218,6 +1285,7 @@ impl App {
                     }
                 }
                 Some(Click::Trail(depth)) => self.stack.back_to(depth + 1),
+                Some(Click::Pick(index)) => self.pick(Some(index)),
                 Some(Click::Answer(answer)) => {
                     let allowed = self
                         .overlays
@@ -1270,6 +1338,10 @@ impl App {
         {
             return false;
         }
+        // The picker opens over any screen.
+        if name == "file.find" {
+            return true;
+        }
         let spec = self.registry.get(name);
         let moves = name.starts_with("cursor.")
             || matches!(name, "screen.back" | "screen.close")
@@ -1281,6 +1353,8 @@ impl App {
             Screen::Threads { .. } => moves || threads || name.starts_with("filter."),
             Screen::Thread { .. } => moves || threads || name == "file.open",
             Screen::Diff { .. } | Screen::Status(_) => !name.starts_with("filter."),
+            // On File, the lines are the working tree's own: they take a thread (D258).
+            Screen::File { .. } if threads || name == "review.comment" => true,
             Screen::File { .. } | Screen::Blame { .. } => {
                 moves
                     || name.starts_with("select.")
@@ -1321,7 +1395,9 @@ impl App {
                 .and_then(Item::file)
                 .is_some_and(|(g, _)| g.stages() == Some(true)),
             "review.comment" => {
-                self.tree().selection().is_some() || current.and_then(Item::diff_row).is_some()
+                self.tree().selection().is_some()
+                    || current.and_then(Item::diff_row).is_some()
+                    || matches!(current, Some(Item::FileLine { .. }))
             }
             "thread.reply" => thread.is_some_and(|c| review::can_reply(c.status)),
             "thread.resolve" => thread.is_some_and(|c| c.status != ReviewStatus::Resolved),
@@ -1403,6 +1479,7 @@ impl App {
             }),
             "search.next" => self.find(true),
             "search.previous" => self.find(false),
+            "file.find" => self.open_picker(now),
             "stage" => self.stage(true),
             "unstage" => self.stage(false),
             "stage.file" => {
@@ -1560,6 +1637,10 @@ impl App {
     }
 
     fn open_comment(&mut self, now: Instant) {
+        if matches!(self.stack.top(), Screen::File { .. }) {
+            self.open_file_comment(now);
+            return;
+        }
         let Some((group, path, picked)) = self.picked_rows() else {
             self.notice = Some("Select lines of one file to comment on.".to_owned());
             return;
@@ -1594,6 +1675,60 @@ impl App {
                 guard: Guard::new(now, true),
             });
         }
+    }
+
+    /// The comment box for the lines selected on the File screen, or the line at the cursor:
+    /// the file is the working tree's, so its numbers are the comment's (D258).
+    fn open_file_comment(&mut self, now: Instant) {
+        let Some((path, start_line, end_line)) = self.selected_lines() else {
+            self.notice = Some("Select lines of the file to comment on.".to_owned());
+            return;
+        };
+        self.overlays.push(Overlay::Text {
+            composer: Composer::new(ReviewTarget::New {
+                path,
+                start_line,
+                end_line,
+            }),
+            guard: Guard::new(now, true),
+        });
+    }
+
+    /// Opens the file picker and lists the worktree's files; the list is read again, so a file
+    /// made since the last read is found.
+    fn open_picker(&mut self, now: Instant) {
+        let picker = Picker::default();
+        self.commands.push(CommandKind::IndexFiles);
+        self.commands.push(picker.command());
+        self.overlays.push(Overlay::Files {
+            picker,
+            guard: Guard::new(now, false),
+        });
+    }
+
+    fn picker_mut(&mut self) -> Option<&mut Picker> {
+        self.overlays.iter_mut().find_map(|overlay| match overlay {
+            Overlay::Files { picker, .. } => Some(picker),
+            _ => None,
+        })
+    }
+
+    /// Opens the picker's file, the one at `index` or else the one under its cursor, on the
+    /// File screen at the query's `:line`, and closes the picker.
+    fn pick(&mut self, index: Option<usize>) {
+        let Some(picker) = self.picker_mut() else {
+            return;
+        };
+        if let Some(index) = index {
+            picker.selected = index;
+        }
+        let Some((path, line)) = picker.chosen() else {
+            return;
+        };
+        self.overlays
+            .retain(|overlay| !matches!(overlay, Overlay::Files { .. }));
+        self.tree_mut().clear_selection();
+        self.open_file(path, line);
     }
 
     /// Runs an action that opens or changes a screen; false when `name` is not one.
@@ -2051,6 +2186,12 @@ impl App {
             Some(Item::Hunk { path, hunk, .. }) => format!("Hunk {} · {path}", hunk + 1),
             Some(Item::Line { path, .. } | Item::Pair { path, .. }) => format!("Line · {path}"),
             Some(Item::Card { id, .. } | Item::Thread { id }) => format!("Thread {id}"),
+            Some(item @ (Item::FileLine { .. } | Item::BlameLine { .. })) => {
+                self.numbered(item).map_or_else(
+                    || "Status".to_owned(),
+                    |(path, n)| format!("Line {n} · {path}"),
+                )
+            }
             _ => "Status".to_owned(),
         }
     }
@@ -3298,6 +3439,246 @@ mod tests {
                 path: "/repo/src/lib.rs".to_owned(),
                 line: 4
             }]
+        );
+    }
+
+    /// Sends what the app asked, numbering the operations from `first`, and answers its file
+    /// read with `lines` lines.
+    fn read_file_of(app: &mut App, first: u64, lines: usize) {
+        let mut read = None;
+        for (n, kind) in (first..).zip(app.take_commands()) {
+            app.sent(OperationId(n), &kind);
+            if let CommandKind::ReadFile { path } = kind {
+                read = Some((n, path));
+            }
+        }
+        let (n, path) = read.expect("the file is read");
+        let text = (1..=lines)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.apply(&Event::FileRead {
+            id: OperationId(n),
+            file: gm_schema::FileView {
+                path,
+                size: 0,
+                body: gm_schema::FileBody::Text { text },
+                truncated: false,
+            },
+        });
+    }
+
+    fn found(query: &str, paths: &[&str], line: Option<u32>) -> gm_schema::FileSearch {
+        gm_schema::FileSearch {
+            query: query.to_owned(),
+            hits: paths
+                .iter()
+                .map(|path| gm_schema::FileHit {
+                    path: (*path).to_owned(),
+                    ranges: vec![(0, 1)],
+                })
+                .collect(),
+            matched: paths.len(),
+            files: 40,
+            indexing: false,
+            line,
+        }
+    }
+
+    #[test]
+    fn space_o_finds_a_file_and_opens_it_at_the_line_of_the_query() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<space> o", now);
+        assert_eq!(app.mode(), Mode::Insert);
+        assert_eq!(
+            app.take_commands(),
+            [
+                CommandKind::IndexFiles,
+                CommandKind::SearchFiles {
+                    query: String::new()
+                }
+            ]
+        );
+        // `q` types: the picker takes every key.
+        key(&mut app, "q", now);
+        key(&mut app, "<bs> l i b : 4", now);
+        let asked = app.take_commands();
+        assert_eq!(
+            asked.last(),
+            Some(&CommandKind::SearchFiles {
+                query: "lib:4".to_owned()
+            })
+        );
+        for (n, kind) in (1..).zip(&asked) {
+            app.sent(OperationId(n), kind);
+        }
+        let newest = u64::try_from(asked.len()).unwrap();
+        // A late answer to an older query is dropped.
+        app.apply(&Event::FilesFound {
+            id: OperationId(1),
+            search: found("q", &["q.rs"], None),
+        });
+        let late = crate::draw::tests::screen(&mut app);
+        assert!(!late.contains("q.rs"), "{late}");
+        app.apply(&Event::FilesFound {
+            id: OperationId(newest),
+            search: found("lib:4", &["src/lib.rs", "lib/other.rs"], Some(4)),
+        });
+        let listed = crate::draw::tests::screen(&mut app);
+        assert!(listed.contains("Open a file"), "{listed}");
+        assert!(listed.contains("› lib:4"), "{listed}");
+        assert!(listed.contains("2/40"), "{listed}");
+        assert!(listed.contains("lib/other.rs"), "{listed}");
+        // The list read again: the picker searches it.
+        app.apply(&Event::FilesIndexed {
+            id: OperationId(99),
+            files: 41,
+        });
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::SearchFiles {
+                query: "lib:4".to_owned()
+            }]
+        );
+        key(&mut app, "<down> <down>", now);
+        assert_eq!(app.picker_mut().map(|p| p.selected), Some(0));
+        key(&mut app, "<cr>", now);
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.stack.trail(), ["status", "file/src/lib.rs"]);
+        read_file_of(&mut app, 200, 30);
+        assert!(matches!(
+            app.tree().current().map(|s| &s.item),
+            Some(Item::FileLine { index: 3, .. })
+        ));
+        // Over the File screen it opens again; `Esc` closes it and leaves the screen as it was.
+        let later = now + Duration::from_secs(2);
+        key(&mut app, "<space> o", later);
+        key(&mut app, "<esc>", later + Duration::from_secs(2));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.stack.trail(), ["status", "file/src/lib.rs"]);
+    }
+
+    #[test]
+    fn a_click_on_a_listed_file_opens_it() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<space> o", now);
+        for (n, kind) in (1..).zip(app.take_commands()) {
+            app.sent(OperationId(n), &kind);
+        }
+        app.apply(&Event::FilesFound {
+            id: OperationId(2),
+            search: found("", &["a.rs", "docs/b.md"], None),
+        });
+        crate::draw::tests::screen(&mut app);
+        let area = app
+            .hits
+            .iter()
+            .find(|hit| hit.click == Click::Pick(1))
+            .map(|hit| hit.area)
+            .expect("the second file is clickable");
+        app.on_mouse_at(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + 2,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            now,
+        );
+        assert_eq!(app.stack.trail(), ["status", "file/docs/b.md"]);
+    }
+
+    #[test]
+    fn a_failed_search_says_why_in_the_picker() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<space> o", now);
+        for (n, kind) in (1..).zip(app.take_commands()) {
+            app.sent(OperationId(n), &kind);
+        }
+        ended(
+            &mut app,
+            2,
+            OperationState::Failed,
+            Some("git ls-files failed"),
+        );
+        let shown = crate::draw::tests::screen(&mut app);
+        assert!(shown.contains("git ls-files failed"), "{shown}");
+        // `Enter` with nothing listed keeps the picker open.
+        key(&mut app, "<cr>", now);
+        assert!(matches!(app.overlays.last(), Some(Overlay::Files { .. })));
+    }
+
+    #[test]
+    fn lines_of_the_file_screen_take_a_thread_drawn_under_them() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(2);
+        let mut app = app();
+        app.open_file("src/lib.rs".to_owned(), Some(4));
+        read_file_of(&mut app, 1, 30);
+        // The cursor's line alone; the menu names it.
+        assert_eq!(app.target_title(), "Line 4 · src/lib.rs");
+        key(&mut app, "<space> c", now);
+        let Some(Overlay::Text { composer, .. }) = app.overlays.last() else {
+            panic!("the comment box opens");
+        };
+        assert_eq!(
+            composer.target,
+            crate::threads::Target::Review(ReviewTarget::New {
+                path: "src/lib.rs".to_owned(),
+                start_line: 4,
+                end_line: 4,
+            })
+        );
+        key(&mut app, "<esc>", later);
+        assert!(app.overlays.is_empty());
+        // A VISUAL selection over three lines.
+        key(&mut app, "V j j <space> c", later);
+        key(&mut app, "f i x", later);
+        key(&mut app, "<c-s>", later + Duration::from_secs(2));
+        let asked = app.take_commands();
+        assert!(
+            matches!(
+                asked.as_slice(),
+                [CommandKind::AddReviewComment { path, start_line: 4, end_line: 6, body, .. }]
+                    if path == "src/lib.rs" && body == "fix"
+            ),
+            "{asked:?}"
+        );
+        app.sent(OperationId(40), &asked[0]);
+        ended(&mut app, 40, OperationState::Done, None);
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.mode(), Mode::Normal);
+        // A listed thread sits under its last line, and the thread actions reach it there.
+        let mut resolved = thread(7, ReviewStatus::Resolved, 1);
+        resolved.location = Some(ReviewLocation {
+            start_line: 5,
+            end_line: 6,
+        });
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(50),
+            comments: vec![resolved],
+        });
+        let rows = shown(&app);
+        let line = rows
+            .iter()
+            .position(|r| r.starts_with("FileLine { index: 5"))
+            .expect("line 6 is shown");
+        assert!(rows[line + 1].starts_with("Card { id: 7"), "{rows:?}");
+        let card = app
+            .tree()
+            .rows()
+            .iter()
+            .position(|row| matches!(row.section.item, Item::Card { id: 7, .. }))
+            .unwrap();
+        app.tree_mut().move_to(card);
+        assert!(app.applies("thread.reopen"));
+        key(&mut app, "<space> O", later + Duration::from_secs(4));
+        assert_eq!(
+            app.take_commands(),
+            [CommandKind::ReopenReviewComment { id: 7 }]
         );
     }
 
