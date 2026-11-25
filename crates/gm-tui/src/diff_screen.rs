@@ -232,10 +232,12 @@ pub fn file(repo: &Repo, path: &str, keep: Option<u32>, opened: Opened) -> Vec<S
     let mut index = 0;
     while index < file.lines.len() {
         if all || shown.contains(&index) {
-            out.push(line(index));
+            // The threads ending on a line are its children, so `Tab` folds them (D258 (7)).
+            let mut row = line(index);
             if let Some(entries) = notes.after.get(&index) {
-                out.extend(entries.iter().cloned().filter_map(&mut section));
+                row.children = entries.iter().cloned().filter_map(&mut section).collect();
             }
+            out.push(row);
             index += 1;
             continue;
         }

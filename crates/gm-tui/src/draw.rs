@@ -35,6 +35,8 @@ use crate::ui::{App, Click, Hit, MIN_HEIGHT, MIN_WIDTH, Overlay};
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
+/// The mark of a line a review thread covers.
+const THREAD_BAR: &str = "┃";
 /// Columns of a diff line's number.
 const NUMBER_WIDTH: usize = 5;
 
@@ -171,6 +173,7 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let mut hits = Vec::new();
     // The tinted spans of each row (D250), when the terminal gave tints.
     let mut backgrounds: Vec<(Rect, palette::Rgb)> = Vec::new();
+    let covered = covered_lines(app);
     for (index, row) in rows.iter().enumerate().skip(scroll).take(height) {
         let y = body.y + u16::try_from(index - scroll).unwrap_or(u16::MAX);
         hits.push(Hit {
@@ -183,9 +186,19 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
         } else {
             Span::raw(" ")
         };
-        let mut line = row_line(app, row, width.saturating_sub(1));
-        line.spans.insert(0, mark);
         let on = index == cursor;
+        let mut line = match &row.section.item {
+            Item::FileLine { index, mark } => {
+                let gutter = Gutter {
+                    on,
+                    thread: covered.get(index).copied(),
+                    folded: row.folded && !row.section.children.is_empty(),
+                };
+                file_line_row(app, *index, *mark, gutter, width.saturating_sub(1))
+            }
+            _ => row_line(app, row, width.saturating_sub(1)),
+        };
+        line.spans.insert(0, mark);
         match palette::tints() {
             Some(tints) => {
                 let area = Rect::new(body.x, y, body.width, 1);
@@ -554,8 +567,66 @@ fn screen_line(row: &Row<'_, Item>) -> Line<'static> {
     }
 }
 
-/// A line of the File screen: its number, its mark and its colored code.
-fn file_line_row(app: &App, index: usize, mark: Mark, width: usize) -> Line<'static> {
+/// What the File screen's gutter shows beside a line's number (D258 (7)).
+#[derive(Clone, Copy)]
+struct Gutter {
+    /// The cursor is on the line: its number stands out, as in an editor.
+    on: bool,
+    /// The state of the strongest thread that covers the line.
+    thread: Option<Badge>,
+    /// The threads under the line are folded.
+    folded: bool,
+}
+
+const NO_GUTTER: Gutter = Gutter {
+    on: false,
+    thread: None,
+    folded: false,
+};
+
+/// The threads of the File screen's file, by line index (from 0): the strongest state of
+/// the threads covering each line, an open thread over a handled one over a resolved one.
+fn covered_lines(app: &App) -> std::collections::HashMap<usize, Badge> {
+    let mut covered = std::collections::HashMap::new();
+    if !matches!(app.stack.top(), crate::ui::Screen::File { .. }) {
+        return covered;
+    }
+    let Some(file) = app.repo.file.as_ref() else {
+        return covered;
+    };
+    let rank = |badge: Badge| match badge {
+        Badge::Open => 3,
+        Badge::Handled => 2,
+        Badge::Outdated => 1,
+        Badge::Resolved => 0,
+    };
+    for comment in app.repo.comments.iter().filter(|c| c.path == file.path) {
+        let Some(location) = comment.location else {
+            continue;
+        };
+        let state = review::badge(comment);
+        for line in location.start_line..=location.end_line {
+            let Some(index) = (line as usize).checked_sub(1) else {
+                continue;
+            };
+            let slot = covered.entry(index).or_insert(state);
+            if rank(state) > rank(*slot) {
+                *slot = state;
+            }
+        }
+    }
+    covered
+}
+
+/// A line of the File screen: its number, the thread mark, its change mark and its colored
+/// code.
+fn file_line_row(
+    app: &App,
+    index: usize,
+    mark: Mark,
+    gutter: Gutter,
+    width: usize,
+) -> Line<'static> {
     let Some(file) = app.repo.file.as_ref() else {
         return Line::default();
     };
@@ -565,8 +636,21 @@ fn file_line_row(app: &App, index: usize, mark: Mark, width: usize) -> Line<'sta
         Mark::Unstaged => ("+", color(Color::Green)),
         Mark::Staged => ("+", color(Color::Cyan)),
     };
+    let number_style = match (gutter.on, gutter.thread) {
+        (true, _) => BOLD,
+        (false, Some(state)) => color(badge(state).2),
+        (false, None) => DIM,
+    };
+    // A thread's lines carry a bar in its color; the line its cards hang from shows a
+    // chevron while they are folded.
+    let thread = match gutter.thread {
+        Some(state) if gutter.folded => Span::styled(icons::FOLDED, color(badge(state).2)),
+        Some(state) => Span::styled(THREAD_BAR, color(badge(state).2)),
+        None => Span::raw(" "),
+    };
     let mut spans = vec![
-        Span::styled(format!("{:>6} ", index + 1), DIM),
+        Span::styled(format!("{:>5} ", index + 1), number_style),
+        thread,
         Span::styled(format!("{sign} "), style),
     ];
     spans.extend(code_spans(
@@ -864,7 +948,7 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
         Item::Commits { .. } | Item::Commit { .. } | Item::Stashes { .. } | Item::Stash { .. } => {
             history_line(app, row)
         }
-        Item::FileLine { index, mark } => file_line_row(app, *index, *mark, width),
+        Item::FileLine { index, mark } => file_line_row(app, *index, *mark, NO_GUTTER, width),
         Item::BlameRun { .. } | Item::BlameLine { .. } | Item::Origin(_) => {
             blame_row(app, row, width)
         }

@@ -1442,6 +1442,7 @@ impl App {
             "select.down" => self.tree_mut().extend(1),
             "select.up" => self.tree_mut().extend(-1),
             _ if self.run_screen_action(name) => {}
+            "fold.toggle" if self.toggle_file_threads() => self.rebuild(),
             "fold.toggle" | "open"
                 if name == "fold.toggle"
                     || self
@@ -1675,6 +1676,47 @@ impl App {
                 guard: Guard::new(now, true),
             });
         }
+    }
+
+    /// On the File screen, folds or unfolds the threads of the line at the cursor: those
+    /// hanging under it, or else under the last line of a thread that covers it (D258 (7)).
+    /// False when the cursor is on no such line.
+    fn toggle_file_threads(&mut self) -> bool {
+        if !matches!(self.stack.top(), Screen::File { .. }) {
+            return false;
+        }
+        let Some(section) = self.tree().current() else {
+            return false;
+        };
+        let Item::FileLine { index, .. } = section.item else {
+            return false;
+        };
+        if !section.children.is_empty() {
+            return false;
+        }
+        let Some(path) = self.repo.file.as_ref().map(|file| file.path.clone()) else {
+            return false;
+        };
+        let line = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        let anchor = self
+            .repo
+            .comments
+            .iter()
+            .filter(|comment| comment.path == path)
+            .filter_map(|comment| comment.location)
+            .filter(|location| (location.start_line..=location.end_line).contains(&line))
+            .map(|location| format!("line/{}", location.end_line))
+            .find(|id| {
+                self.tree()
+                    .rows()
+                    .iter()
+                    .any(|row| &row.section.id == id && !row.section.children.is_empty())
+            });
+        let Some(anchor) = anchor else {
+            return false;
+        };
+        self.tree_mut().toggle_id(&anchor);
+        true
     }
 
     /// The comment box for the lines selected on the File screen, or the line at the cursor:
@@ -3666,13 +3708,33 @@ mod tests {
             .iter()
             .position(|r| r.starts_with("FileLine { index: 5"))
             .expect("line 6 is shown");
-        assert!(rows[line + 1].starts_with("Card { id: 7"), "{rows:?}");
+        assert!(rows[line + 1].starts_with("  Card { id: 7"), "{rows:?}");
+        // The gutter marks the thread's lines with its bar; `Tab` on its first line, which
+        // has no card under it, folds the thread, and the last line shows the chevron.
+        let drawn = crate::draw::tests::screen(&mut app);
+        assert!(drawn.contains("    5 ┃  line 5"), "{drawn}");
+        assert!(drawn.contains("    6 ┃  line 6"), "{drawn}");
+        assert!(drawn.contains("    7    line 7"), "{drawn}");
+        app.tree_mut().move_to_id("line/5");
+        key(&mut app, "<tab>", later);
+        assert!(!shown(&app).iter().any(|r| r.starts_with("Card")));
+        let folded = crate::draw::tests::screen(&mut app);
+        assert!(
+            folded.contains(&format!("    6 {}  line 6", crate::icons::FOLDED)),
+            "{folded}"
+        );
+        assert_eq!(
+            app.tree().current().map(|s| s.id.as_str()),
+            Some("line/5"),
+            "the cursor stays"
+        );
+        key(&mut app, "<tab>", later);
         let card = app
             .tree()
             .rows()
             .iter()
             .position(|row| matches!(row.section.item, Item::Card { id: 7, .. }))
-            .unwrap();
+            .expect("unfolded again");
         app.tree_mut().move_to(card);
         assert!(app.applies("thread.reopen"));
         key(&mut app, "<space> O", later + Duration::from_secs(4));

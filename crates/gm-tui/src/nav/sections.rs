@@ -184,6 +184,13 @@ impl<T> Tree<T> {
         }
     }
 
+    /// Folds or unfolds the section `id`, wherever the cursor is.
+    pub fn toggle_id(&mut self, id: &str) {
+        if !self.toggled.remove(id) {
+            self.toggled.insert(id.to_owned());
+        }
+    }
+
     /// Folds (`true`) or unfolds the section at the cursor.
     pub fn set_fold(&mut self, fold: bool) {
         let Some(section) = self.current().filter(|s| !s.children.is_empty()) else {
