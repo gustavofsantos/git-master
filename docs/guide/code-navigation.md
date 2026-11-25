@@ -138,8 +138,11 @@ The viewer colours code by language. The text appears first, and the colours fol
 | CSS | `.css` |
 | Clojure | `.clj`, `.cljs`, `.cljc`, `.cljd`, `.edn`, `.bb` |
 | Lua | `.lua`, `.luau` |
+| Markdown | `.md`, `.markdown`, `.mdown`, `.mkd` |
 
 A header with the `.h` extension is read as C, which also reads most C++ headers.
+
+In Markdown, headings are coloured as keywords, the code of a code span and of a fenced or indented code block as strings, a fence's language name as an attribute, link text as a function and its address as a constant, emphasis as a parameter and strong emphasis as a constant, and list markers, quote markers, rules and the delimiters of emphasis, code and links as punctuation. The code inside a fenced block is not coloured by its own language.
 
 Files in other languages stay plain, and so do binary files.
 
