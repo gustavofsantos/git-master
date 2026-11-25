@@ -52,7 +52,7 @@ Every screen is made of sections you can fold. `Tab` folds or unfolds the sectio
 
 Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream, with how far ahead and behind it is; **Stack**, when the branch is in a [stack](stacks.md): the branches from the root to yours, how far ahead and behind its parent it is, whether a restack is due and how many branches sit on it; **Base**, the default branch it is compared with. Then come its sections, each with a count:
 
-- **Untracked files**, **Unstaged changes** and **Staged changes**. A file unfolds into its hunks, with line numbers, `+` and `-` in your terminal's green and red, and code colored by its language. Review threads are drawn under the lines they are about.
+- **Untracked files**, **Unstaged changes** and **Staged changes**. A file unfolds into its hunks, its lines in the same gutter as the [File](#diff-file-blame-and-origin) screen: the change sign (a removed line has a red bar of its own and no number), the number, the bar of a review thread on the line, then the code colored by its language. In Split, each side has that gutter, with the old numbers on the left. Review threads are drawn under the lines they are about.
 - **Review threads**, by who acts next: waiting for you, waiting for the agent.
 - **Commits** on the branch that are not on its base, newest first, with when each was written. In a stack, the base is the default branch, so the commits of the branches below yours are listed too.
 - **Stashes**, newest first.
@@ -175,13 +175,13 @@ In Split, a row holds a line of each side, and selecting rows selects both of th
   | Lines removed after this line | `▁` | `_` |
   | Lines removed before the first line | `▔` | `‾` |
 
-  A line changed again after it was staged shows its unstaged sign;
+  A line changed again after it was staged shows its unstaged sign. The diffs use the same signs: the staged changes with the open glyph, the unstaged ones and the changes of a commit or of the branch with the solid glyph, and a removed line, which a diff shows, with a red bar;
 - the line's number, in bold on the line under the cursor;
 - a bar `┃` on a line a review thread covers, in the color of the thread's state: yellow while it is open, cyan once the agent handled it, green when it is resolved. A line under several threads takes the color of the one that waits the most, open before handled before resolved, and its number takes that color too.
 
 The thread is drawn under its last line, as on Status, and a thread whose text is gone is listed above the file as outdated. `Tab` on any line of a thread folds or unfolds it; while it is folded, its last line shows `▸` in the gutter instead of the bar.
 
-Long lines wrap: the rest of a line continues on the next rows, under the code, with the gutter's bars carried along. The diffs on Status and Diff wrap the same way: the number shows on the first row only, and the `+` or `-` runs down every row of the line; in Split, each side wraps within its half, and the row is as tall as its taller side. `Space d w` cuts long lines at the edge instead, everywhere, for this session; set `gitmaster.lineWrap` to `false` to start that way (see [Configuration](../reference/configuration.md)). Move with the usual keys, `/` searches the file, `V` selects lines to comment on, and `Space o` opens another file. It follows the file as you or the agent edit it. One File screen is open at a time.
+Long lines wrap: the rest of a line continues on the next rows, under the code, with the gutter's bars carried along. The diffs on Status and Diff wrap the same way: the number shows on the first row only, and the change bar runs down every row of the line; in Split, each side wraps within its half, and the row is as tall as its taller side. `Space d w` cuts long lines at the edge instead, everywhere, for this session; set `gitmaster.lineWrap` to `false` to start that way (see [Configuration](../reference/configuration.md)). Move with the usual keys, `/` searches the file, `V` selects lines to comment on, and `Space o` opens another file. It follows the file as you or the agent edit it. One File screen is open at a time.
 
 `Enter` on a line, on Status, Diff or File, opens the file at that line in `$VISUAL`, else `$EDITOR`, else `vi`. The companion hands the terminal to the editor and takes it back when the editor quits.
 
