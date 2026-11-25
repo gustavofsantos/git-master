@@ -18,14 +18,25 @@ use crate::icons;
 use crate::nav::sections::Section;
 use crate::reviews::{self, Turn};
 
-/// How a line of the File screen differs from the last commit.
+/// How a line of the File screen differs from the last commit (D258 (11)): what changed, and
+/// whether the change is staged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     Same,
-    /// Added or changed in the working tree, not staged.
-    Unstaged,
-    /// Added or changed, and staged.
-    Staged,
+    Changed { kind: LineChange, staged: bool },
+}
+
+/// What a change did at a line of the File screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineChange {
+    /// The line is new.
+    Added,
+    /// The line replaces a removed one.
+    Modified,
+    /// Lines were removed right after this one.
+    RemovedBelow,
+    /// Lines were removed right before this one, at the top of the file.
+    RemovedAbove,
 }
 
 /// What a row of Status is about.

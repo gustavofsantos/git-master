@@ -8,7 +8,7 @@ use gm_view::review::{self, Entry, Opened};
 
 use crate::data::{Group, Repo};
 use crate::nav::sections::Section;
-use crate::status::{Item, Mark, file_children, files_of};
+use crate::status::{Item, LineChange, Mark, file_children, files_of};
 
 /// What a Diff screen shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,8 +124,63 @@ fn index_to_worktree(n: u32, unstaged: Option<&FileDiff>) -> Option<u32> {
     u32::try_from(i64::from(n) + offset).ok()
 }
 
-/// The marks of the lines of the working tree file `path`: unstaged additions, and staged
-/// ones carried through the unstaged diff.
+/// What `diff` changed, by line of its new side: in each run of removed and added lines, the
+/// first added lines replace the removed ones (modified) and the rest are new (added), as an
+/// editor's sign column counts them; a run that only removes marks the line before it, or the
+/// line after it at the top of the file.
+fn line_changes(diff: &FileDiff) -> Vec<(u32, LineChange)> {
+    let mut out = Vec::new();
+    for hunk in &diff.hunks {
+        let mut before: Option<u32> = None;
+        let mut removed = 0usize;
+        let mut added: Vec<u32> = Vec::new();
+        let mut flush =
+            |removed: &mut usize, added: &mut Vec<u32>, before: Option<u32>, after: Option<u32>| {
+                if added.is_empty() {
+                    if *removed > 0 {
+                        match (before, after) {
+                            (Some(line), _) => out.push((line, LineChange::RemovedBelow)),
+                            (None, Some(line)) => out.push((line, LineChange::RemovedAbove)),
+                            // A hunk with no line left on the new side: the line before it.
+                            (None, None) if hunk.new_start > 0 => {
+                                out.push((hunk.new_start, LineChange::RemovedBelow));
+                            }
+                            (None, None) => {}
+                        }
+                    }
+                } else {
+                    for (at, &line) in added.iter().enumerate() {
+                        let kind = if at < *removed {
+                            LineChange::Modified
+                        } else {
+                            LineChange::Added
+                        };
+                        out.push((line, kind));
+                    }
+                }
+                *removed = 0;
+                added.clear();
+            };
+        for line in &hunk.lines {
+            match line.kind {
+                LineKind::Removed => removed += 1,
+                LineKind::Added => added.extend(line.new_no),
+                LineKind::Context => {
+                    let after = line.new_no;
+                    let last = added.last().copied();
+                    flush(&mut removed, &mut added, before, after);
+                    before = after.or(last.or(before));
+                }
+            }
+        }
+        flush(&mut removed, &mut added, before, None);
+    }
+    out
+}
+
+/// The marks of the File screen's lines: the staged changes, carried from the index through
+/// the unstaged hunks, then the unstaged ones over them. A removal only marks a line nothing
+/// else marks.
 fn marks(repo: &Repo, path: &str, count: usize) -> Vec<Mark> {
     let mut marks = vec![Mark::Same; count];
     let diff = |group| {
@@ -134,29 +189,32 @@ fn marks(repo: &Repo, path: &str, count: usize) -> Vec<Mark> {
             .and_then(|file| file.diff.as_ref())
     };
     let unstaged = diff(Group::Unstaged);
-    let added = |diff: Option<&FileDiff>| -> Vec<u32> {
-        diff.map_or(&[][..], |d| d.hunks.as_slice())
-            .iter()
-            .flat_map(|hunk| &hunk.lines)
-            .filter(|line| line.kind == LineKind::Added)
-            .filter_map(|line| line.new_no)
-            .collect()
-    };
-    let mut set = |number: u32, mark| {
-        if let Some(slot) = (number as usize)
+    let mut set = |number: u32, kind: LineChange, staged: bool| {
+        let Some(slot) = (number as usize)
             .checked_sub(1)
             .and_then(|i| marks.get_mut(i))
-        {
-            *slot = mark;
+        else {
+            return;
+        };
+        let removal = matches!(kind, LineChange::RemovedBelow | LineChange::RemovedAbove);
+        let taken = matches!(
+            slot,
+            Mark::Changed {
+                kind: LineChange::Added | LineChange::Modified,
+                ..
+            }
+        );
+        if !(removal && taken) {
+            *slot = Mark::Changed { kind, staged };
         }
     };
-    for number in added(diff(Group::Staged)) {
+    for (number, kind) in diff(Group::Staged).map_or_default(line_changes) {
         if let Some(at) = index_to_worktree(number, unstaged) {
-            set(at, Mark::Staged);
+            set(at, kind, true);
         }
     }
-    for number in added(unstaged) {
-        set(number, Mark::Unstaged);
+    for (number, kind) in unstaged.map_or_default(line_changes) {
+        set(number, kind, false);
     }
     marks
 }
@@ -236,6 +294,105 @@ mod tests {
             text: String::new(),
             no_newline: false,
         }
+    }
+
+    #[test]
+    fn a_run_counts_its_first_added_lines_as_modified_and_a_removal_marks_its_edge() {
+        use LineChange::{Added, Modified, RemovedAbove, RemovedBelow};
+        use LineKind::{Added as A, Context as C, Removed as R};
+        let diff = FileDiff {
+            path: "a".to_owned(),
+            old_path: None,
+            binary: false,
+            hunks: vec![
+                // Line 1 removed at the top: line 1 now is the old line 2.
+                hunk(
+                    (1, 2),
+                    (1, 1),
+                    vec![line(R, Some(1), None), line(C, Some(2), Some(1))],
+                ),
+                // Two lines replaced by three: two modified, one added.
+                hunk(
+                    (5, 3),
+                    (4, 4),
+                    vec![
+                        line(C, Some(5), Some(4)),
+                        line(R, Some(6), None),
+                        line(R, Some(7), None),
+                        line(A, None, Some(5)),
+                        line(A, None, Some(6)),
+                        line(A, None, Some(7)),
+                    ],
+                ),
+                // A line removed after line 20.
+                hunk(
+                    (22, 2),
+                    (20, 1),
+                    vec![line(C, Some(22), Some(20)), line(R, Some(23), None)],
+                ),
+            ],
+        };
+        assert_eq!(
+            line_changes(&diff),
+            [
+                (1, RemovedAbove),
+                (5, Modified),
+                (6, Modified),
+                (7, Added),
+                (20, RemovedBelow)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unstaged_change_wins_over_a_staged_one_and_a_removal_marks_only_a_free_line() {
+        use crate::data::FileData;
+        use LineKind::{Added as A, Context as C, Removed as R};
+        let mut repo = Repo::default();
+        let mut put = |group: Group, hunks: Vec<Hunk>| {
+            let mut file = FileData::default();
+            file.load(
+                FileDiff {
+                    path: "a".to_owned(),
+                    old_path: None,
+                    binary: false,
+                    hunks,
+                },
+                group.side(),
+            );
+            repo.files.insert((group, "a".to_owned()), file);
+        };
+        // Staged: line 2 added; a line removed after line 4.
+        put(
+            Group::Staged,
+            vec![
+                hunk(
+                    (1, 1),
+                    (1, 2),
+                    vec![line(C, Some(1), Some(1)), line(A, None, Some(2))],
+                ),
+                hunk(
+                    (4, 2),
+                    (5, 1),
+                    vec![line(C, Some(4), Some(5)), line(R, Some(5), None)],
+                ),
+            ],
+        );
+        // Unstaged: line 2 changed again; a line removed after line 2.
+        put(
+            Group::Unstaged,
+            vec![hunk(
+                (2, 1),
+                (2, 1),
+                vec![line(R, Some(2), None), line(A, None, Some(2))],
+            )],
+        );
+        let marks = marks(&repo, "a", 6);
+        let changed = |kind, staged| Mark::Changed { kind, staged };
+        assert_eq!(marks[0], Mark::Same);
+        assert_eq!(marks[1], changed(LineChange::Modified, false));
+        assert_eq!(marks[4], changed(LineChange::RemovedBelow, true));
+        assert_eq!(marks[5], Mark::Same);
     }
 
     #[test]

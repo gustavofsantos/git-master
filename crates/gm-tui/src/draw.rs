@@ -28,7 +28,7 @@ use crate::nav::prompt::Answer;
 use crate::nav::sections::Row;
 use crate::palette::{self, Tints};
 use crate::reviews::Turn;
-use crate::status::{self, Item, Mark};
+use crate::status::{self, Item, LineChange, Mark};
 use crate::threads::TYPES;
 use crate::ui::{App, Click, Hit, MIN_HEIGHT, MIN_WIDTH, Overlay};
 
@@ -37,8 +37,12 @@ const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
 /// The mark of a line a review thread covers.
 const THREAD_BAR: &str = "┃";
-/// The mark of a line not yet committed, in the File screen's gutter.
-const CHANGE_BAR: &str = "▎";
+/// The File screen's change signs (D258 (11)), (not staged, staged): a bar for an added or
+/// modified line, and an edge for lines removed after or before it. The staged glyph is
+/// open, so the background shows through it.
+const SIGN_BAR: (&str, &str) = ("▎", "░");
+const SIGN_BELOW: (&str, &str) = ("▁", "_");
+const SIGN_ABOVE: (&str, &str) = ("▔", "‾");
 /// Columns of a diff line's number.
 const NUMBER_WIDTH: usize = 5;
 
@@ -685,12 +689,6 @@ fn file_line_rows(
         return vec![Line::default()];
     };
     let text = file.lines.get(index).map_or("", String::as_str);
-    // Not committed: a bar, green while the change is not staged, cyan once it is.
-    let change = match mark {
-        Mark::Same => Span::raw(" "),
-        Mark::Unstaged => Span::styled(CHANGE_BAR, color(Color::Green)),
-        Mark::Staged => Span::styled(CHANGE_BAR, color(Color::Cyan)),
-    };
     let number_style = match (gutter.on, gutter.thread) {
         (true, _) => BOLD,
         (false, Some(state)) => color(badge(state).2),
@@ -715,10 +713,12 @@ fn file_line_rows(
     } else {
         vec![code]
     };
+    let count = pieces.len();
     pieces
         .into_iter()
         .enumerate()
         .map(|(at, piece)| {
+            let change = change_sign(mark, at == 0, at + 1 == count);
             let number = if at == 0 {
                 Span::styled(format!("{:>5} ", index + 1), number_style)
             } else {
@@ -729,6 +729,25 @@ fn file_line_rows(
             Line::from(spans)
         })
         .collect()
+}
+
+/// The change column of one row of a File line (D258 (11)): the color says what changed (green
+/// added, blue modified, red removed) and the glyph whether it is staged: solid while it is
+/// not, open once it is, so the background shows through. A bar runs down every row of a
+/// wrapped line; a removal sits on the edge it happened at.
+fn change_sign(mark: Mark, first: bool, last: bool) -> Span<'static> {
+    let Mark::Changed { kind, staged } = mark else {
+        return Span::raw(" ");
+    };
+    let (glyphs, tint) = match kind {
+        LineChange::Added => (SIGN_BAR, Color::Green),
+        LineChange::Modified => (SIGN_BAR, Color::Blue),
+        LineChange::RemovedBelow if last => (SIGN_BELOW, Color::Red),
+        LineChange::RemovedAbove if first => (SIGN_ABOVE, Color::Red),
+        LineChange::RemovedBelow | LineChange::RemovedAbove => return Span::raw(" "),
+    };
+    let (solid, open) = glyphs;
+    Span::styled(if staged { open } else { solid }, color(tint))
 }
 
 /// Cuts `spans` into lines of at most `room` characters each, keeping each piece's style.

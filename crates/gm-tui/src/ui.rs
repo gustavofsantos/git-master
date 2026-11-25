@@ -3493,7 +3493,10 @@ mod tests {
             app.tree().current().map(|s| &s.item),
             Some(Item::FileLine {
                 index: 3,
-                mark: crate::status::Mark::Unstaged
+                mark: crate::status::Mark::Changed {
+                    kind: crate::status::LineChange::Modified,
+                    staged: false
+                }
             })
         ));
         let rows = shown(&app);
