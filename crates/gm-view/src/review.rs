@@ -937,6 +937,7 @@ mod tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: location.map_or(1, |(start, _)| start),
+                revision: None,
             },
             created_at: 1_000_000,
             resolved_at: None,

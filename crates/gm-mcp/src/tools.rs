@@ -1468,6 +1468,9 @@ fn comment_json(comment: &ReviewComment) -> Value {
     if let Some(workspace) = &comment.workspace {
         value["workspace"] = json!(workspace);
     }
+    if let Some(revision) = &comment.anchor.revision {
+        value["revision"] = json!(revision);
+    }
     untrusted(value)
 }
 

@@ -584,6 +584,7 @@ mod tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: line.unwrap_or(1),
+                revision: None,
             },
             created_at: 1_000 * id,
             resolved_at: None,

@@ -106,6 +106,7 @@ impl StatusView {
                 .map_or_default(|comment| comment.body.clone()),
             ReviewTarget::New { .. }
             | ReviewTarget::NewByText { .. }
+            | ReviewTarget::NewOn { .. }
             | ReviewTarget::Reply { .. } => String::new(),
         };
         let body = cx.new(|cx| TextArea::new("Comment", cx).with_lines(4, 12));

@@ -1109,6 +1109,7 @@ mod tests {
             before: vec!["above".to_owned()],
             after: Vec::new(),
             start_line,
+            revision: None,
         }
     }
 

@@ -13,7 +13,9 @@ use crate::history::{BlameEntry, CommitDetail, CommitFile, History, HistoryScope
 use crate::move_changes::{MoveOutcome, MovePreview, MoveTarget};
 use crate::reflog::ReflogEntry;
 use crate::restack::{RestackPlan, RestackRecord, RestackResolution};
-use crate::review::{ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewSeverity};
+use crate::review::{
+    ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewSeverity, TextVersion,
+};
 use crate::scorecard::{
     CommentLabel, Scorecard, ScorecardCommentInput, ScorecardStatus, ScorecardSummary,
 };
@@ -707,6 +709,18 @@ pub enum CommandKind {
         body: String,
         /// The conventional-comment label the person chose, such as `issue` (D236 (7));
         /// `None` for none. A person's comment has no kind, whatever its label.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<CommentLabel>,
+    },
+    /// Comments on lines `start_line` to `end_line` of `path` as `version` holds them
+    /// (D259), placed in the working tree by their text and context. Never refused for a
+    /// text that repeats or is gone from the working tree.
+    AddReviewCommentOn {
+        path: String,
+        version: TextVersion,
+        start_line: u32,
+        end_line: u32,
+        body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<CommentLabel>,
     },

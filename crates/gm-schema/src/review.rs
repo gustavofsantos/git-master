@@ -44,9 +44,9 @@ pub enum ReviewAuthorFilter {
     Any,
 }
 
-/// What a comment is attached to, as it was when the comment was made. The
-/// text is matched exactly, as whole lines; the context is kept for display
-/// only and never breaks a tie (D97).
+/// What a comment is attached to, as it was in the version it was made on. The
+/// text is matched exactly, as whole lines; when it appears more than once, the
+/// context, then the start line, tell the copies apart (D259).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewAnchor {
     /// The commented lines, joined with `\n`, without their line endings.
@@ -55,8 +55,25 @@ pub struct ReviewAnchor {
     pub before: Vec<String>,
     /// Up to three lines below the selection, nearest first.
     pub after: Vec<String>,
-    /// The first commented line, 1-based, when the comment was made.
+    /// The first commented line, 1-based, in the version the comment was made on.
     pub start_line: u32,
+    /// The version the comment was made on (D259): the full id of a commit, or
+    /// `index`; `None` for the working tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+/// The version of a file whose lines a comment is made on (D259).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TextVersion {
+    WorkingTree,
+    /// What is staged.
+    Index,
+    /// A commit, by any revision Git reads (`HEAD`, an id, `<id>^`, `stash@{0}`).
+    Commit {
+        rev: String,
+    },
 }
 
 /// Where an anchor's text is in the file now, as 1-based lines (inclusive).
@@ -260,6 +277,7 @@ mod tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: 1,
+                revision: None,
             },
             created_at: 5,
             resolved_at: None,

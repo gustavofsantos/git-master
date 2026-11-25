@@ -12,6 +12,7 @@ use gm_core::{Engine, GitPort, ReviewSide};
 use gm_schema::{
     Actor, Command, CommandKind, Event, OperationId, OperationState, ReviewAuthorFilter,
     ReviewChange, ReviewComment, ReviewKind, ReviewLocation, ReviewSeverity, ReviewStatus,
+    TextVersion,
 };
 
 fn git_output(dir: &Path, args: &[&str]) -> std::process::Output {
@@ -415,7 +416,7 @@ fn a_location_moves_when_lines_are_inserted_above_it() {
 }
 
 #[test]
-fn a_comment_is_outdated_when_its_text_is_edited_or_duplicated() {
+fn a_comment_is_outdated_when_its_text_is_edited_and_kept_when_it_is_duplicated() {
     let dir = repo();
     let log = CommandLog::default();
     let mut engine = engine_on(dir.path(), &log);
@@ -429,10 +430,11 @@ fn a_comment_is_outdated_when_its_text_is_edited_or_duplicated() {
     write(dir.path(), "f.txt", "a\nb\nc\nd\nc\ne\n");
     let duplicated = only(&mut engine);
     assert_eq!(
-        duplicated.location, None,
-        "two copies of the text is not a match"
+        duplicated.location,
+        Some(location(3, 3)),
+        "the copy whose lines around it match stays (D259)"
     );
-    assert!(duplicated.outdated);
+    assert!(!duplicated.outdated);
 
     write(dir.path(), "f.txt", "a\nb\nc\nd\ne\n");
     let back = only(&mut engine);
@@ -2075,4 +2077,87 @@ fn a_persons_comment_keeps_its_label_and_has_no_kind() {
     assert_eq!(comment.label, Some(gm_schema::CommentLabel::Nitpick));
     assert_eq!(comment.kind, None);
     assert_eq!(comment.author, None);
+}
+
+fn add_on(path: &str, version: TextVersion, lines: (u32, u32), body: &str) -> CommandKind {
+    CommandKind::AddReviewCommentOn {
+        path: path.to_owned(),
+        version,
+        start_line: lines.0,
+        end_line: lines.1,
+        body: body.to_owned(),
+        label: None,
+    }
+}
+
+/// D259: lines of a commit take a comment even when their text repeats in the file now,
+/// and the copy whose context matches is the one the comment is placed on.
+#[test]
+fn a_commit_line_whose_text_repeats_now_is_placed_by_its_context() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    let head = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+    // Now "c" appears twice; the committed one keeps "b" above and "d" below.
+    write(dir.path(), "f.txt", "c\nx\na\nb\nc\nd\ne\n");
+    let rev = TextVersion::Commit {
+        rev: "HEAD".to_owned(),
+    };
+    let events = engine.handle(
+        OperationId(10),
+        &human(add_on("f.txt", rev, (3, 3), "why?")),
+    );
+    assert_eq!(failure(&events), String::new());
+    let comment = only(&mut engine);
+    assert_eq!(comment.location, Some(location(5, 5)));
+    assert_eq!(comment.anchor.revision.as_deref(), Some(head.as_str()));
+    assert_eq!(comment.anchor.start_line, 3);
+}
+
+/// D259: a comment on a commit's lines that are gone from the working tree is kept,
+/// outdated, with the commit it was made on.
+#[test]
+fn a_commit_line_gone_from_the_working_tree_is_kept_outdated() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    write(dir.path(), "f.txt", "a\nb\nC\nd\ne\n");
+    let rev = TextVersion::Commit {
+        rev: "HEAD".to_owned(),
+    };
+    let events = engine.handle(
+        OperationId(10),
+        &human(add_on("f.txt", rev, (2, 3), "here")),
+    );
+    assert_eq!(failure(&events), String::new());
+    let comment = only(&mut engine);
+    assert_eq!(comment.anchor.text, "b\nc");
+    assert!(comment.outdated);
+    assert_eq!(comment.location, None);
+    assert!(comment.anchor.revision.is_some());
+}
+
+/// D259: staged lines are read from the index, and a selection of blank lines is still refused.
+#[test]
+fn staged_lines_are_read_from_the_index() {
+    let dir = repo();
+    let log = CommandLog::default();
+    let mut engine = engine_on(dir.path(), &log);
+    write(dir.path(), "f.txt", "a\nb\nstaged\nd\ne\n\n");
+    git(dir.path(), &["add", "f.txt"]);
+    write(dir.path(), "f.txt", "top\na\nb\nstaged\nd\ne\n\n");
+    let events = engine.handle(
+        OperationId(10),
+        &human(add_on("f.txt", TextVersion::Index, (3, 3), "on the index")),
+    );
+    assert_eq!(failure(&events), String::new());
+    let comment = only(&mut engine);
+    assert_eq!(comment.anchor.text, "staged");
+    assert_eq!(comment.anchor.revision.as_deref(), Some("index"));
+    assert_eq!(comment.location, Some(location(4, 4)));
+    let blank = engine.handle(
+        OperationId(11),
+        &human(add_on("f.txt", TextVersion::Index, (6, 6), "blank")),
+    );
+    assert_eq!(failure(&blank), "the selection has only blank lines");
 }

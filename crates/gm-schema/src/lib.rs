@@ -59,7 +59,7 @@ pub use restack::{
 };
 pub use review::{
     ReviewAnchor, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewKind, ReviewLocation,
-    ReviewReply, ReviewSeverity, ReviewStatus,
+    ReviewReply, ReviewSeverity, ReviewStatus, TextVersion,
 };
 pub use scorecard::{
     BODY_MAX_CHARS, COMMENT_BODY_MAX_CHARS, COMMENTS_MAX, CommentLabel, LIST_DEFAULT, LIST_MAX,

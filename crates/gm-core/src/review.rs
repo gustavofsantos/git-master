@@ -3,6 +3,7 @@
 //! repository. A match is exact, as whole lines, and only a unique one counts;
 //! anything else is outdated, never a guess.
 
+use std::cmp::Reverse;
 use std::ops::Range;
 
 use gm_schema::{
@@ -131,6 +132,7 @@ pub fn anchor_for(file_text: &str, start_line: u32, end_line: u32) -> Result<Rev
             .map(|line| (*line).to_owned())
             .collect(),
         start_line,
+        revision: None,
     })
 }
 
@@ -143,6 +145,7 @@ pub fn lines_of_text(file_text: &str, text: &str) -> Result<ReviewLocation, Stri
         before: Vec::new(),
         after: Vec::new(),
         start_line: 0,
+        revision: None,
     };
     if text.trim().is_empty() {
         return Err("the selection has only blank lines".to_owned());
@@ -160,29 +163,60 @@ pub fn lines_of_text(file_text: &str, text: &str) -> Result<ReviewLocation, Stri
     }
 }
 
-/// Where `anchor` is in `file_text` now. The commented lines must appear
-/// exactly once as a run of whole lines; no match, or more than one, is `None`
-/// (outdated). The context lines and the recorded start line never decide.
+/// Where `anchor` is in `file_text` now (D259): a run of whole lines equal to
+/// its text. When the text appears more than once, the run whose surrounding
+/// lines match the most context lines wins, then the one nearest the anchor's
+/// start line; a tie, or no run, is `None` (outdated). The lines found are always
+/// exactly the commented text.
 pub fn locate(file_text: &str, anchor: &ReviewAnchor) -> Option<ReviewLocation> {
     if anchor.text.trim().is_empty() {
         return None;
     }
     let needle: Vec<&str> = anchor.text.split('\n').collect();
     let lines = lines_of(file_text);
-    let mut found = None;
-    for (at, window) in lines.windows(needle.len()).enumerate() {
-        if window == needle.as_slice() {
-            if found.is_some() {
-                return None;
-            }
-            found = Some(at);
-        }
-    }
-    let at = found?;
+    let runs: Vec<usize> = lines
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, window)| *window == needle.as_slice())
+        .map(|(at, _)| at)
+        .collect();
+    let at = match runs.as_slice() {
+        [] => return None,
+        [one] => *one,
+        many => pick_run(&lines, many, needle.len(), anchor)?,
+    };
     Some(ReviewLocation {
         start_line: line_number(at)?,
         end_line: line_number(at + needle.len() - 1)?,
     })
+}
+
+/// Of several runs equal to the anchor's text, the one whose context matches best, then the
+/// one nearest its start line; `None` when two still tie.
+fn pick_run(lines: &[&str], runs: &[usize], len: usize, anchor: &ReviewAnchor) -> Option<usize> {
+    // Context lines that match, counted outward from the run until the first that differs.
+    let context = |at: usize| {
+        let above = anchor
+            .before
+            .iter()
+            .rev()
+            .zip(lines[..at].iter().rev())
+            .take_while(|(want, have)| want.as_str() == **have)
+            .count();
+        let below = anchor
+            .after
+            .iter()
+            .zip(&lines[at + len..])
+            .take_while(|(want, have)| want.as_str() == **have)
+            .count();
+        above + below
+    };
+    let start = usize::try_from(anchor.start_line).unwrap_or(usize::MAX);
+    let rank = |at: usize| (Reverse(context(at)), (at + 1).abs_diff(start));
+    let best = runs.iter().map(|&at| rank(at)).min()?;
+    let mut winners = runs.iter().filter(|&&at| rank(at) == best);
+    let first = *winners.next()?;
+    winners.next().is_none().then_some(first)
 }
 
 /// The lines the anchor covered in `file_text`, as a snapshot of the file holds
@@ -377,6 +411,13 @@ mod tests {
         anchor_for(text, start, end).expect("a valid selection")
     }
 
+    fn at(start_line: u32, end_line: u32) -> ReviewLocation {
+        ReviewLocation {
+            start_line,
+            end_line,
+        }
+    }
+
     #[test]
     fn the_anchor_holds_the_selection_and_its_context() {
         let text = file(&["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
@@ -440,6 +481,7 @@ mod tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: 1,
+                revision: None,
             },
             created_at: 1,
             resolved_at: None,
@@ -595,17 +637,37 @@ mod tests {
     }
 
     #[test]
-    fn a_text_that_appears_twice_is_outdated_whatever_the_context() {
-        let anchor = anchored(&file(&["x", "}", "y", "}", "z"]), 2, 2);
-        assert_eq!(anchor.before, vec!["x"]);
-        assert_eq!(locate(&file(&["x", "}", "y", "}", "z"]), &anchor), None);
+    fn a_text_that_appears_twice_is_told_apart_by_its_context() {
+        let text = file(&["x", "}", "y", "}", "z"]);
+        let first = anchored(&text, 2, 2);
+        assert_eq!(first.before, vec!["x"]);
+        assert_eq!(locate(&text, &first), Some(at(2, 2)));
+        let second = anchored(&text, 4, 4);
+        assert_eq!(locate(&text, &second), Some(at(4, 4)));
+        // Lines added above move both copies; the context still finds the second.
+        let moved = file(&["new", "new", "x", "}", "y", "}", "z"]);
+        assert_eq!(locate(&moved, &second), Some(at(6, 6)));
     }
 
     #[test]
-    fn overlapping_occurrences_count_as_several() {
+    fn copies_with_the_same_context_go_to_the_nearest_and_an_even_tie_is_outdated() {
+        // Made on another version: its context matches neither copy here.
+        let mut elsewhere = anchored(&file(&["q", "}", "q"]), 2, 2);
+        let text = file(&["a", "}", "b", "}", "c"]);
+        elsewhere.start_line = 2;
+        assert_eq!(locate(&text, &elsewhere), Some(at(2, 2)));
+        elsewhere.start_line = 5;
+        assert_eq!(locate(&text, &elsewhere), Some(at(4, 4)));
+        // Recorded at line 3, as far from either copy.
+        elsewhere.start_line = 3;
+        assert_eq!(locate(&text, &elsewhere), None);
+    }
+
+    #[test]
+    fn overlapping_occurrences_go_to_the_one_nearest_the_start_line() {
         let anchor = anchored(&file(&["a", "a"]), 1, 2);
         assert_eq!(anchor.text, "a\na");
-        assert_eq!(locate(&file(&["a", "a", "a"]), &anchor), None);
+        assert_eq!(locate(&file(&["a", "a", "a"]), &anchor), Some(at(1, 2)));
     }
 
     #[test]
@@ -661,6 +723,7 @@ mod tests {
             before: Vec::new(),
             after: Vec::new(),
             start_line: 1,
+            revision: None,
         };
         assert_eq!(locate(&file(&["", "x"]), &anchor), None);
     }
@@ -670,8 +733,11 @@ mod tests {
         let text = file(&["x", "}", "y", "}", "z"]);
         let anchor = anchored(&text, 4, 4);
         assert_eq!(snapshot_region(&text, &anchor), vec!["}"]);
-        // A recorded line that is ambiguous is not guessed at.
-        assert!(snapshot_region(&file(&["new", "x", "}", "y", "}", "z"]), &anchor).is_empty());
+        // The recorded line moved; the context tells the two copies apart (D259).
+        assert_eq!(
+            snapshot_region(&file(&["new", "x", "}", "y", "}", "z"]), &anchor),
+            vec!["}"]
+        );
         assert!(snapshot_region(&file(&["gone"]), &anchor).is_empty());
     }
 
@@ -696,7 +762,10 @@ mod tests {
             current_region(&file(&["n", "b", "c"]), &anchor),
             vec!["b", "c"]
         );
-        assert!(current_region(&file(&["b", "c", "x", "b", "c"]), &anchor).is_empty());
+        // Two copies with nothing to tell them apart, as far from the start line: outdated.
+        let mut far = anchored(&file(&["q", "b", "c", "q"]), 2, 3);
+        far.start_line = 3;
+        assert!(current_region(&file(&["b", "c", "x", "x", "b", "c"]), &far).is_empty());
         assert!(current_region(&file(&["b", "x"]), &anchor).is_empty());
     }
 
@@ -953,7 +1022,7 @@ mod tests {
         }
 
         #[test]
-        fn duplicating_the_commented_lines_makes_the_anchor_outdated(
+        fn duplicating_the_commented_lines_keeps_the_anchor_on_the_original(
             words in prop::collection::vec("[a-z]{1,8}", 2..40),
             pick in (0usize..40, 0usize..40),
         ) {
@@ -964,12 +1033,19 @@ mod tests {
             let anchor = anchored(&text, u32::try_from(first + 1).unwrap(), u32::try_from(last + 1).unwrap());
             let mut edited = lines.clone();
             let copy: Vec<String> = lines[first..=last].to_vec();
-            let at = (last + 1).min(edited.len());
+            let insert = (last + 1).min(edited.len());
             for (n, line) in copy.into_iter().enumerate() {
-                edited.insert(at + n, line);
+                edited.insert(insert + n, line);
             }
             let text = file(&edited.iter().map(String::as_str).collect::<Vec<_>>());
-            prop_assert_eq!(locate(&text, &anchor), None);
+            // On one of the two copies, and always on the commented text itself.
+            let found = locate(&text, &anchor);
+            prop_assert!(found.is_some());
+            let found = found.unwrap();
+            let lines = lines_of(&text);
+            let start = usize::try_from(found.start_line).unwrap() - 1;
+            let end = usize::try_from(found.end_line).unwrap();
+            prop_assert_eq!(lines[start..end].join("\n"), anchor.text.clone());
         }
     }
 }

@@ -3563,6 +3563,7 @@ mod stash_tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: 2,
+                revision: None,
             },
             created_at: 0,
             resolved_at: None,

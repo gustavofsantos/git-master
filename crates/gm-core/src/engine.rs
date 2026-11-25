@@ -5175,6 +5175,18 @@ impl Engine {
                 let lines = (*start_line, *end_line);
                 self.add_review_comment(id, path, lines, body, *label)
             }
+            CommandKind::AddReviewCommentOn {
+                path,
+                version,
+                start_line,
+                end_line,
+                body,
+                label,
+            } => {
+                only_a_human(actor, "comment on the code")?;
+                let lines = (*start_line, *end_line);
+                self.add_review_comment_on(id, path, version, lines, body, *label)
+            }
             CommandKind::AddReviewCommentByText {
                 path,
                 text,
@@ -5304,20 +5316,12 @@ impl Engine {
         &mut self,
         id: OperationId,
         path: &str,
-        (start_line, end_line): (u32, u32),
+        lines: (u32, u32),
         body: &str,
         label: Option<gm_schema::CommentLabel>,
     ) -> Result<Vec<Event>, String> {
-        let body = review_body(body)?;
-        let root = self.open_root()?;
-        let text = review_session::read_text(&root, path)?;
-        let anchor = review::anchor_for(&text, start_line, end_line)?;
-        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
-        let comment = store
-            .add_with_label(path, body, &anchor, label, now_ms())
-            .map_err(|e| e.0)?;
-        snapshot_before(self.git.as_ref(), store, &root, comment, path)?;
-        self.review_listed(id, &root)
+        let version = gm_schema::TextVersion::WorkingTree;
+        self.add_review_comment_on(id, path, &version, lines, body, label)
     }
 
     /// Starts an agent's thread on the text `anchor_text` of `path` (D200). The text is found
@@ -5513,6 +5517,53 @@ impl Engine {
     }
 
     /// Comments on `text` where it is in `path` now (D141): found exactly once, or refused.
+    /// Comments on lines of `path` as `version` holds them (D259): the anchor is built from
+    /// that version's text and keeps the version, and the comment is placed in the working
+    /// tree when it is listed. Never refused because the text repeats or is gone.
+    fn add_review_comment_on(
+        &mut self,
+        id: OperationId,
+        path: &str,
+        version: &gm_schema::TextVersion,
+        (start_line, end_line): (u32, u32),
+        body: &str,
+        label: Option<gm_schema::CommentLabel>,
+    ) -> Result<Vec<Event>, String> {
+        let body = review_body(body)?;
+        let root = self.open_root()?;
+        let utf8 = |bytes: Vec<u8>| {
+            String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8 text"))
+        };
+        let (text, revision) = match version {
+            gm_schema::TextVersion::WorkingTree => (review_session::read_text(&root, path)?, None),
+            gm_schema::TextVersion::Index => {
+                let bytes = self
+                    .git
+                    .file_in_index(&root, path)
+                    .map_err(|e| e.0)?
+                    .ok_or_else(|| format!("{path} is not in the index"))?;
+                (utf8(bytes)?, Some("index".to_owned()))
+            }
+            gm_schema::TextVersion::Commit { rev } => {
+                let oid = self.git.resolve_commit(&root, rev).map_err(|e| e.0)?;
+                let bytes = self
+                    .git
+                    .file_at_commit(&root, &oid, path)
+                    .map_err(|e| e.0)?
+                    .ok_or_else(|| format!("{path} is not in commit {}", short_id(&oid)))?;
+                (utf8(bytes)?, Some(oid))
+            }
+        };
+        let mut anchor = review::anchor_for(&text, start_line, end_line)?;
+        anchor.revision = revision;
+        let store = review_store(&mut self.review, self.git.as_ref(), &root)?;
+        let comment = store
+            .add_with_label(path, body, &anchor, label, now_ms())
+            .map_err(|e| e.0)?;
+        snapshot_before(self.git.as_ref(), store, &root, comment, path)?;
+        self.review_listed(id, &root)
+    }
+
     fn add_review_comment_by_text(
         &mut self,
         id: OperationId,
@@ -6797,6 +6848,7 @@ fn is_review_command(kind: &CommandKind) -> bool {
             kind,
             CommandKind::AddReviewComment { .. }
                 | CommandKind::AddReviewCommentByText { .. }
+                | CommandKind::AddReviewCommentOn { .. }
                 | CommandKind::ListReviewComments { .. }
                 | CommandKind::CreateAgentReviewComment { .. }
                 | CommandKind::EditReviewComment { .. }

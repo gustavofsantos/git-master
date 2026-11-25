@@ -1684,6 +1684,12 @@ impl GitPort for SubprocessGit {
         Ok(found)
     }
 
+    fn file_in_index(&self, root: &Path, path: &str) -> Result<Option<Vec<u8>>, GitError> {
+        let repo = open(root)?;
+        let index = repo.index().map_err(|e| git_err(&e))?;
+        Ok(index_content(&repo, &index, path)?.map(|(_, content)| content))
+    }
+
     fn file_at_commit(
         &self,
         root: &Path,

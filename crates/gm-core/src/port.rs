@@ -687,6 +687,14 @@ pub trait GitPort: Send {
         ))
     }
 
+    /// The content of `path` as the index holds it, or `None` when the index has no
+    /// such file. A conflicted path is an error. Never records anything (D28).
+    fn file_in_index(&self, _root: &Path, _path: &str) -> Result<Option<Vec<u8>>, GitError> {
+        Err(GitError(
+            "reading the index is not supported by this adapter".into(),
+        ))
+    }
+
     /// The commit id that `rev` names, such as `HEAD` or `refs/heads/main`; an
     /// error when it names no commit. Never records anything.
     fn resolve_commit(&self, _root: &Path, _rev: &str) -> Result<String, GitError> {

@@ -2,7 +2,7 @@
 //! writes, and the command it sends. Shared by the app's composer and the terminal
 //! companion's (D235 (3)); moved here from `gm-ui` without a change of rule.
 
-use gm_schema::{CommandKind, CommentLabel};
+use gm_schema::{CommandKind, CommentLabel, TextVersion};
 
 use crate::diff_rows::Side;
 use crate::review::{Covered, Picked, range_label};
@@ -74,6 +74,14 @@ pub enum ReviewTarget {
     /// A new comment on text picked in a surface that is not the working tree
     /// (D141): the engine looks for the text in the file now.
     NewByText { path: String, text: String },
+    /// A new comment on lines of `path` as `version` holds them (D259): never refused for
+    /// text that repeats or is gone from the working tree.
+    NewOn {
+        path: String,
+        version: TextVersion,
+        start_line: u32,
+        end_line: u32,
+    },
     Edit {
         id: i64,
         path: String,
@@ -116,6 +124,7 @@ impl ReviewTarget {
         match self {
             ReviewTarget::New { path, .. }
             | ReviewTarget::NewByText { path, .. }
+            | ReviewTarget::NewOn { path, .. }
             | ReviewTarget::Edit { path, .. }
             | ReviewTarget::Reply { path, .. } => path,
         }
@@ -130,6 +139,11 @@ impl ReviewTarget {
                 u32::try_from(text.lines().count().max(1)).unwrap_or(u32::MAX),
             ),
             ReviewTarget::New {
+                start_line,
+                end_line,
+                ..
+            }
+            | ReviewTarget::NewOn {
                 start_line,
                 end_line,
                 ..
@@ -189,6 +203,19 @@ pub fn command(
             body,
             label,
         },
+        ReviewTarget::NewOn {
+            path,
+            version,
+            start_line,
+            end_line,
+        } => CommandKind::AddReviewCommentOn {
+            path: path.clone(),
+            version: version.clone(),
+            start_line: *start_line,
+            end_line: *end_line,
+            body,
+            label,
+        },
         ReviewTarget::Edit { id, .. } => CommandKind::EditReviewComment { id: *id, body },
         ReviewTarget::Reply { id, .. } => CommandKind::ReplyToReviewComment { id: *id, body },
     })
@@ -205,6 +232,14 @@ pub fn title(target: &ReviewTarget) -> String {
     };
     match target {
         ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => format!("Comment on {range}"),
+        ReviewTarget::NewOn { version, .. } => match version {
+            TextVersion::WorkingTree => format!("Comment on {range}"),
+            TextVersion::Index => format!("Comment on {range} of the index"),
+            TextVersion::Commit { rev } => {
+                let short: String = rev.chars().take(7).collect();
+                format!("Comment on {range} of {short}")
+            }
+        },
         ReviewTarget::Edit { .. } => format!("Edit comment on {range}"),
         ReviewTarget::Reply { .. } => format!("Reply on {range}"),
     }
@@ -214,7 +249,9 @@ pub fn title(target: &ReviewTarget) -> String {
 #[must_use]
 pub fn save_label(target: &ReviewTarget) -> &'static str {
     match target {
-        ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } => "Comment",
+        ReviewTarget::New { .. } | ReviewTarget::NewByText { .. } | ReviewTarget::NewOn { .. } => {
+            "Comment"
+        }
         ReviewTarget::Edit { .. } => "Save",
         ReviewTarget::Reply { .. } => "Reply",
     }
@@ -223,6 +260,33 @@ pub fn save_label(target: &ReviewTarget) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_comment_on_a_version_sends_its_lines_and_names_the_version() {
+        let target = ReviewTarget::NewOn {
+            path: "f.clj".to_owned(),
+            version: TextVersion::Commit {
+                rev: "4d66dfec09d003af".to_owned(),
+            },
+            start_line: 6,
+            end_line: 6,
+        };
+        assert_eq!(title(&target), "Comment on line 6 of 4d66dfe");
+        assert_eq!(save_label(&target), "Comment");
+        assert_eq!(
+            command(&target, " why? ", None),
+            Some(CommandKind::AddReviewCommentOn {
+                path: "f.clj".to_owned(),
+                version: TextVersion::Commit {
+                    rev: "4d66dfec09d003af".to_owned()
+                },
+                start_line: 6,
+                end_line: 6,
+                body: "why?".to_owned(),
+                label: None,
+            })
+        );
+    }
 
     fn covered(working: Option<(u32, u32)>) -> Covered {
         Covered {

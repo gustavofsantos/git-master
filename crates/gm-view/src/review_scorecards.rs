@@ -366,6 +366,7 @@ mod tests {
                 before: Vec::new(),
                 after: Vec::new(),
                 start_line: 1,
+                revision: None,
             },
             created_at: 0,
             resolved_at: None,
