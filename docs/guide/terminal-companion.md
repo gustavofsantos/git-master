@@ -167,7 +167,15 @@ In Split, a row holds a line of each side, and selecting rows selects both of th
 
 **File** (`g f` on a line, a file or a thread, or `Space o` from anywhere) shows a whole file as it is in the working tree, every line of it, colored, at the line you came from. The line at the bottom names the file, so the screen has no header. At the left of each line is a gutter, as in an editor's sign column:
 
-- a bar `▎` on a line not yet committed: green when the change is not staged, cyan when it is;
+- a sign on a line not yet committed. Its color says what changed: green for an added line, blue for a modified one (a line that replaces a removed one), red for lines removed next to it. Its shape says whether the change is staged: solid while it is not, open once it is, so the background shows through:
+
+  | Change | Not staged | Staged |
+  |---|---|---|
+  | Added or modified line | `▎` | `░` |
+  | Lines removed after this line | `▁` | `_` |
+  | Lines removed before the first line | `▔` | `‾` |
+
+  A line changed again after it was staged shows its unstaged sign;
 - the line's number, in bold on the line under the cursor;
 - a bar `┃` on a line a review thread covers, in the color of the thread's state: yellow while it is open, cyan once the agent handled it, green when it is resolved. A line under several threads takes the color of the one that waits the most, open before handled before resolved, and its number takes that color too.
 
