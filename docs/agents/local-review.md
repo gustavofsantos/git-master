@@ -29,7 +29,13 @@ Where you can select:
 - a file in the **Code** viewer, changed or not;
 - a **commit** or **stash** diff.
 
-A comment is always about text in the working tree. In the Working Copy diff (unstaged side) and in the Code viewer the lines are the file's own, so the comment is anchored at once. In a staged, commit or stash diff GitMaster looks for the selected text in the file as it is now: if it appears exactly once, the comment is anchored there; if it is gone or appears more than once, GitMaster says so and writes nothing. Lines a diff shows as removed are not in the working tree, so a selection of only removed lines cannot be commented.
+Any lines you can see take a comment. GitMaster never refuses a selection because its text repeats in the file or because the file changed since: only an empty selection, one of blank lines only, or one longer than the limit is refused.
+
+A comment is made on a version of the file: the one the lines you selected belong to. In the Working Copy diff (unstaged side) and in the Code viewer that is the working tree. In a staged diff it is the index; in a commit diff, that commit; in a stash diff, that stash. A selection of only removed lines is on the version before the change: the index for the unstaged side, `HEAD` for the staged side, the parent for a commit. GitMaster keeps the version with the comment, with the selected text, a few lines around it and the line it started on in that version.
+
+GitMaster then places the comment in the working tree, as described in [Anchors](#anchors). A comment whose text is not in the working tree any more, for example on a commit's line that was changed since, is kept all the same: it is listed as **Outdated**, with the commit it was made on, and an agent reads it with its text and that commit.
+
+> **Planned.** In the app's window, a staged, commit or stash diff still looks for the selected text in the file now and refuses when it is gone or appears more than once, and a selection of only removed lines cannot be commented; the [terminal companion](../guide/terminal-companion.md) already comments on any lines it shows.
 
 > **Planned.** Comments already written are drawn inline in the Code viewer and in commit and stash diffs; today they show in the Working Copy diff and on the Local review page.
 
@@ -57,7 +63,7 @@ The app shows each comment with one of these badges:
 | **Open** | Waiting for the agent. |
 | **Handled** | The agent has worked on it and left a summary. The agent sets this state. |
 | **Resolved** | You confirmed it. Only you set this state. An agent cannot mark a resolved comment handled again. |
-| **Outdated** | The text the comment is anchored to no longer appears exactly once, so GitMaster does not place it. |
+| **Outdated** | The text the comment is anchored to is not in the working tree, or appears there more than once with nothing to tell the copies apart, so GitMaster does not place it. |
 
 **Outdated** is a flag on a comment rather than a state of its own: an open, handled or resolved comment becomes outdated when its text is no longer found.
 
@@ -132,12 +138,14 @@ An agent has at most 20 open threads in a repository and 5 on one file, and a fu
 
 ## Anchors
 
-Each comment is anchored to its file, the text you selected and a few lines of context around that text.
+Each comment is anchored to its file, the text you selected, up to three lines of context above and below that text, and the line it started on, all from the version it was made on.
 
-- If the selected text still appears exactly once in the file, the comment stays on it.
-- If the selected text appears more than once, or not at all, the comment becomes **Outdated**.
+- GitMaster looks for the selected text in the working tree as whole lines, exactly as written.
+- If it appears once, the comment is on it.
+- If it appears more than once, the copy whose lines around it match the most context lines wins, counting outward from the text. If copies tie, the one nearest the line the comment started on wins.
+- If it does not appear, or copies still tie, the comment is **Outdated**.
 
-GitMaster never moves a comment to a position it estimated. A comment is either on its exact text or **Outdated**.
+GitMaster never places a comment on text that differs from what you selected: the lines it is on are always exactly those lines.
 
 ## Before and after
 
