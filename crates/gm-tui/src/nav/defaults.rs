@@ -402,6 +402,14 @@ const SPECS: &[Spec] = &[
         OneShot,
     ),
     spec(
+        "view.wrap",
+        "wrap long lines",
+        "Wrap the File screen's long lines, or cut them at the edge.",
+        "Diff",
+        MOVE,
+        OneShot,
+    ),
+    spec(
         "diff.layout",
         "split / unified",
         "Switch the diffs between Unified and Split.",
@@ -581,6 +589,7 @@ const NORMAL: &[(&str, &str)] = &[
     ("<space> f A", "filter.all"),
     ("<space> d b", "go.branch"),
     ("<space> d s", "diff.layout"),
+    ("<space> d w", "view.wrap"),
     ("<space> ?", "help.keys"),
 ];
 

@@ -9,6 +9,7 @@
 //! |---|---|
 //! | `gitmaster.diffLayout` | `unified` (default) or `split` |
 //! | `gitmaster.authorPictures` | boolean, default off |
+//! | `gitmaster.lineWrap` | boolean, default on: the terminal companion's File screen wraps long lines |
 //! | `gitmaster.threads.capture` | boolean, default on |
 //! | `gitmaster.threads.maxResultBytes` | integer |
 //! | `gitmaster.threads.redactBuiltin` | boolean, default on |
@@ -47,6 +48,9 @@ pub struct Settings {
     /// Whether author pictures are looked up on Gravatar. Off until chosen, because a lookup
     /// sends a hash of the author's email to a third party.
     pub author_pictures: bool,
+    /// Whether the terminal companion's File screen wraps long lines; `None` when no layer
+    /// sets it, which wraps. Read only: the app has no control that writes it.
+    pub line_wrap: Option<bool>,
     pub threads: ThreadsConfig,
 }
 
@@ -108,6 +112,9 @@ impl Settings {
                 }
                 "gitmaster.authorpictures" => {
                     settings.author_pictures = boolean(value, settings.author_pictures);
+                }
+                "gitmaster.linewrap" => {
+                    settings.line_wrap = Some(boolean(value, settings.line_wrap.unwrap_or(true)));
                 }
                 "gitmaster.threads.capture" => {
                     settings.threads.capture = boolean(value, settings.threads.capture);
@@ -181,6 +188,7 @@ impl Settings {
                 .get("author_pictures")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            line_wrap: None,
             threads: ThreadsConfig::from_settings(&document),
         }
     }
@@ -493,6 +501,17 @@ mod tests {
         assert!(!s.threads.capture);
         assert_eq!(s.threads.max_result_bytes, 1024);
         assert!(!s.threads.redact.builtin);
+    }
+
+    #[test]
+    fn line_wrap_is_unset_until_a_layer_sets_it_and_the_last_one_wins() {
+        assert_eq!(Settings::default().line_wrap, None);
+        let off = Settings::from_entries(&entries("gitmaster.linewrap=false"));
+        assert_eq!(off.line_wrap, Some(false));
+        let on = Settings::from_entries(&entries(
+            "gitmaster.linewrap=false\ngitmaster.linewrap=true",
+        ));
+        assert_eq!(on.line_wrap, Some(true));
     }
 
     #[test]

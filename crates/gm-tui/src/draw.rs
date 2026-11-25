@@ -37,6 +37,8 @@ const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
 /// The mark of a line a review thread covers.
 const THREAD_BAR: &str = "┃";
+/// The mark of a line not yet committed, in the File screen's gutter.
+const CHANGE_BAR: &str = "▎";
 /// Columns of a diff line's number.
 const NUMBER_WIDTH: usize = 5;
 
@@ -161,25 +163,40 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let rows = app.view().tree.rows();
     let cursor = app.view().tree.cursor_index().unwrap_or(0);
     let selection = app.view().tree.selection();
-    // Keep the cursor on screen.
-    let mut scroll = app.view().scroll.min(rows.len().saturating_sub(height));
+    let width = usize::from(body.width);
+    // A File line may wrap over several terminal lines (D258 (10)); every other row is one.
+    let wrap = app.wraps();
+    let row_height = |row: &Row<'_, Item>| match &row.section.item {
+        Item::FileLine { index, .. } if wrap => file_line_height(app, *index, width - 1),
+        _ => 1,
+    };
+    // Keep the cursor on screen: the lowest start that still shows the cursor's row whole.
+    let mut scroll = app.view().scroll.min(rows.len().saturating_sub(1));
     if cursor < scroll {
         scroll = cursor;
-    } else if cursor >= scroll + height {
-        scroll = cursor + 1 - height;
+    } else if let Some(cursor_row) = rows.get(cursor) {
+        let mut lowest = cursor;
+        let mut used = row_height(cursor_row);
+        while lowest > 0 {
+            let above = row_height(&rows[lowest - 1]);
+            if used + above > height {
+                break;
+            }
+            used += above;
+            lowest -= 1;
+        }
+        scroll = scroll.max(lowest);
     }
-    let width = usize::from(body.width);
-    let mut lines = Vec::with_capacity(height);
+    let mut lines: Vec<Line> = Vec::with_capacity(height);
     let mut hits = Vec::new();
     // The tinted spans of each row (D250), when the terminal gave tints.
     let mut backgrounds: Vec<(Rect, palette::Rgb)> = Vec::new();
     let covered = covered_lines(app);
-    for (index, row) in rows.iter().enumerate().skip(scroll).take(height) {
-        let y = body.y + u16::try_from(index - scroll).unwrap_or(u16::MAX);
-        hits.push(Hit {
-            area: Rect::new(body.x, y, body.width, 1),
-            click: Click::Row(index),
-        });
+    for (index, row) in rows.iter().enumerate().skip(scroll) {
+        if lines.len() >= height {
+            break;
+        }
+        let y = body.y + u16::try_from(lines.len()).unwrap_or(u16::MAX);
         let selected = selection.is_some_and(|(a, b)| (a..=b).contains(&index));
         let mark = if selected {
             Span::styled(icons::SELECTED, color(Color::Blue))
@@ -187,27 +204,44 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
             Span::raw(" ")
         };
         let on = index == cursor;
-        let mut line = match &row.section.item {
+        let mut drawn = match &row.section.item {
             Item::FileLine { index, mark } => {
                 let gutter = Gutter {
                     on,
                     thread: covered.get(index).copied(),
                     folded: row.folded && !row.section.children.is_empty(),
                 };
-                file_line_row(app, *index, *mark, gutter, width.saturating_sub(1))
+                file_line_rows(app, *index, *mark, gutter, width.saturating_sub(1), wrap)
             }
-            _ => row_line(app, row, width.saturating_sub(1)),
+            _ => vec![row_line(app, row, width.saturating_sub(1))],
         };
-        line.spans.insert(0, mark);
+        drawn.truncate(height - lines.len());
+        let tall = u16::try_from(drawn.len()).unwrap_or(1);
+        let area = Rect::new(body.x, y, body.width, tall);
+        hits.push(Hit {
+            area,
+            click: Click::Row(index),
+        });
+        for (at, line) in drawn.iter_mut().enumerate() {
+            let first = if at == 0 {
+                mark.clone()
+            } else {
+                Span::raw(" ")
+            };
+            line.spans.insert(0, first);
+        }
         match palette::tints() {
             Some(tints) => {
-                let area = Rect::new(body.x, y, body.width, 1);
                 backgrounds.extend(row_backgrounds(tints, app, row, on, selected, area));
             }
-            None if on => line = line.patch_style(ON),
+            None if on => {
+                for line in &mut drawn {
+                    *line = std::mem::take(line).patch_style(ON);
+                }
+            }
             None => {}
         }
-        lines.push(line);
+        lines.extend(drawn);
     }
     frame.render_widget(Paragraph::new(lines), body);
     let buffer = frame.buffer_mut();
@@ -618,23 +652,44 @@ fn covered_lines(app: &App) -> std::collections::HashMap<usize, Badge> {
     covered
 }
 
-/// A line of the File screen: its number, the thread mark, its change mark and its colored
-/// code.
-fn file_line_row(
+/// Columns of the File screen's gutter: the change bar, the number, the thread mark.
+const FILE_GUTTER: usize = 9;
+
+/// How many terminal lines File line `index` takes when long lines wrap in `width` columns.
+fn file_line_height(app: &App, index: usize, width: usize) -> usize {
+    let room = width.saturating_sub(FILE_GUTTER).max(1);
+    let columns = app
+        .repo
+        .file
+        .as_ref()
+        .and_then(|file| file.lines.get(index))
+        .map_or(0, |text| {
+            text.chars()
+                .map(|c| if c == '\t' { 4 } else { 1 })
+                .sum::<usize>()
+        });
+    columns.div_ceil(room).max(1)
+}
+
+/// A line of the File screen (D258 (9)): the change bar, its number, the thread mark and
+/// its colored code; cut at `width`, or wrapped over several lines with the bars carried on.
+fn file_line_rows(
     app: &App,
     index: usize,
     mark: Mark,
     gutter: Gutter,
     width: usize,
-) -> Line<'static> {
+    wrap: bool,
+) -> Vec<Line<'static>> {
     let Some(file) = app.repo.file.as_ref() else {
-        return Line::default();
+        return vec![Line::default()];
     };
     let text = file.lines.get(index).map_or("", String::as_str);
-    let (sign, style) = match mark {
-        Mark::Same => (" ", DIM),
-        Mark::Unstaged => ("+", color(Color::Green)),
-        Mark::Staged => ("+", color(Color::Cyan)),
+    // Not committed: a bar, green while the change is not staged, cyan once it is.
+    let change = match mark {
+        Mark::Same => Span::raw(" "),
+        Mark::Unstaged => Span::styled(CHANGE_BAR, color(Color::Green)),
+        Mark::Staged => Span::styled(CHANGE_BAR, color(Color::Cyan)),
     };
     let number_style = match (gutter.on, gutter.thread) {
         (true, _) => BOLD,
@@ -648,18 +703,55 @@ fn file_line_row(
         Some(state) => Span::styled(THREAD_BAR, color(badge(state).2)),
         None => Span::raw(" "),
     };
-    let mut spans = vec![
-        Span::styled(format!("{:>5} ", index + 1), number_style),
-        thread,
-        Span::styled(format!("{sign} "), style),
-    ];
-    spans.extend(code_spans(
+    let room = width.saturating_sub(FILE_GUTTER).max(1);
+    let code = code_spans(
         text,
         file.colors.get(&index),
         None,
-        width.saturating_sub(9),
-    ));
-    Line::from(spans)
+        if wrap { usize::MAX } else { room },
+    );
+    let pieces = if wrap {
+        split_spans(code, room)
+    } else {
+        vec![code]
+    };
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(at, piece)| {
+            let number = if at == 0 {
+                Span::styled(format!("{:>5} ", index + 1), number_style)
+            } else {
+                Span::raw("      ")
+            };
+            let mut spans = vec![change.clone(), number, thread.clone(), Span::raw(" ")];
+            spans.extend(piece);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Cuts `spans` into lines of at most `room` characters each, keeping each piece's style.
+/// No span is empty; an empty input gives one empty line.
+fn split_spans(spans: Vec<Span<'static>>, room: usize) -> Vec<Vec<Span<'static>>> {
+    let mut out: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut left = room;
+    for span in spans {
+        let style = span.style;
+        let mut chars = span.content.chars().peekable();
+        while chars.peek().is_some() {
+            if left == 0 {
+                out.push(Vec::new());
+                left = room;
+            }
+            let piece: String = chars.by_ref().take(left).collect();
+            left -= piece.chars().count();
+            if let Some(line) = out.last_mut() {
+                line.push(Span::styled(piece, style));
+            }
+        }
+    }
+    out
 }
 
 /// A row of the Blame and Origin screens.
@@ -948,14 +1040,13 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
         Item::Commits { .. } | Item::Commit { .. } | Item::Stashes { .. } | Item::Stash { .. } => {
             history_line(app, row)
         }
-        Item::FileLine { index, mark } => file_line_row(app, *index, *mark, NO_GUTTER, width),
+        Item::FileLine { index, mark } => {
+            file_line_rows(app, *index, *mark, NO_GUTTER, width, false).swap_remove(0)
+        }
         Item::BlameRun { .. } | Item::BlameLine { .. } | Item::Origin(_) => {
             blame_row(app, row, width)
         }
         Item::Agent(agent) => agent_line(row, agent),
-        Item::Unchanged { count } => {
-            Line::styled(format!("  {} {count} unchanged lines", fold_icon(row)), DIM)
-        }
         Item::Version { .. }
         | Item::Text { .. }
         | Item::Messages { .. }
@@ -1189,7 +1280,7 @@ fn draw_mode_line(frame: &mut Frame, app: &mut App, area: Rect) {
             strip.text(" › ", DIM);
         }
         let style = if depth == top { BOLD } else { DIM };
-        strip.click(format!("gitmaster://{address}"), style, Click::Trail(depth));
+        strip.click(address, style, Click::Trail(depth));
     }
     let total = app.view().tree.rows().len();
     let place = app.view().tree.cursor_index().map_or(0, |at| at + 1);
@@ -1556,7 +1647,8 @@ pub(crate) mod tests {
         assert!(shown.contains("Unstaged changes"), "{shown}");
         assert!(shown.contains("src/lib.rs"), "{shown}");
         assert!(shown.contains("NORMAL"), "{shown}");
-        assert!(shown.contains("gitmaster://status"), "{shown}");
+        assert!(shown.contains(" status "), "{shown}");
+        assert!(!shown.contains("gitmaster://"), "{shown}");
         assert!(shown.contains("Space menu"), "{shown}");
     }
 

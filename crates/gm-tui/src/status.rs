@@ -126,10 +126,6 @@ pub enum Item {
         index: usize,
         mark: Mark,
     },
-    /// A run of unchanged lines of the File screen, folded.
-    Unchanged {
-        count: usize,
-    },
     /// A run of lines of the Blame screen that one commit last changed (or none, when they
     /// are not committed): indexes into `Repo::blame`, both ends inclusive.
     BlameRun {

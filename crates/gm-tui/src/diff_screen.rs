@@ -1,9 +1,7 @@
 //! The Diff and File screens (D241, M4). Diff shows the branch against its base (D237) or
 //! one commit, read-only, with the review threads under their lines as on Status. File
-//! shows a whole file of the working tree, colored, with the lines not yet committed marked,
-//! the review threads under their lines (D258) and long unchanged runs folded.
-
-use std::collections::BTreeSet;
+//! shows a whole file of the working tree, colored, with the lines not yet committed marked
+//! and the review threads under their lines (D258).
 
 use gm_schema::{FileDiff, LineKind};
 use gm_view::review::{self, Entry, Opened};
@@ -100,11 +98,6 @@ pub fn diff(repo: &Repo, kind: &DiffKind, opened: Opened<'_>, split: bool) -> Ve
     out
 }
 
-/// Lines shown around a changed line before a run of unchanged ones folds.
-const CONTEXT: usize = 3;
-/// The shortest run of unchanged lines that folds.
-const FOLD_RUN: usize = 8;
-
 /// The line of the working tree that line `n` of the index is at, through the unstaged
 /// diff; `None` when the working tree removed it.
 fn index_to_worktree(n: u32, unstaged: Option<&FileDiff>) -> Option<u32> {
@@ -168,24 +161,16 @@ fn marks(repo: &Repo, path: &str, count: usize) -> Vec<Mark> {
     marks
 }
 
-/// The File screen's sections. `keep` is a line (from 1) that must not be folded away; nor
-/// is a line a thread sits under.
-pub fn file(repo: &Repo, path: &str, keep: Option<u32>, opened: Opened) -> Vec<Section<Item>> {
-    let mut out = vec![Section::leaf(
-        "head",
-        Item::Header {
-            label: "File:",
-            text: path.to_owned(),
-        },
-    )];
+/// The File screen's sections: every line of the file, none folded away, with the threads
+/// ending on a line as its children and the outdated ones above (D258 (8)). The path is on
+/// the mode line, so there is no header.
+pub fn file(repo: &Repo, path: &str, opened: Opened) -> Vec<Section<Item>> {
     let note = |text: &str| Section::leaf("note", Item::Note(text.to_owned()));
     let Some(file) = repo.file.as_ref().filter(|file| file.path == path) else {
-        out.push(note("Reading the file…"));
-        return out;
+        return vec![note("Reading the file…")];
     };
     if let Some(text) = &file.note {
-        out.push(note(text));
-        return out;
+        return vec![note(text)];
     }
     let marks = marks(repo, path, file.lines.len());
     let notes = review::file_notes(file.lines.len(), &repo.comments, path, opened);
@@ -205,58 +190,17 @@ pub fn file(repo: &Repo, path: &str, keep: Option<u32>, opened: Opened) -> Vec<S
             Entry::Diff(_) => None,
         }
     };
-    out.extend(notes.top.into_iter().filter_map(&mut section));
-    // Lines near a change, near the line to keep or under a thread stay unfolded; with none,
-    // all do.
-    let mut shown: BTreeSet<usize> = BTreeSet::new();
-    let anchors = marks
-        .iter()
-        .enumerate()
-        .filter(|(_, mark)| **mark != Mark::Same)
-        .map(|(index, _)| index)
-        .chain(notes.after.keys().copied())
-        .chain(keep.and_then(|n| (n as usize).checked_sub(1)));
-    for at in anchors {
-        shown.extend(at.saturating_sub(CONTEXT)..=at + CONTEXT);
-    }
-    let all = shown.is_empty();
-    let line = |index: usize| {
-        Section::leaf(
+    let mut out: Vec<Section<Item>> = notes.top.into_iter().filter_map(&mut section).collect();
+    for (index, &mark) in marks.iter().enumerate() {
+        let mut row = Section::leaf(
             format!("line/{}", index + 1),
-            Item::FileLine {
-                index,
-                mark: marks[index],
-            },
-        )
-    };
-    let mut index = 0;
-    while index < file.lines.len() {
-        if all || shown.contains(&index) {
-            // The threads ending on a line are its children, so `Tab` folds them (D258 (7)).
-            let mut row = line(index);
-            if let Some(entries) = notes.after.get(&index) {
-                row.children = entries.iter().cloned().filter_map(&mut section).collect();
-            }
-            out.push(row);
-            index += 1;
-            continue;
+            Item::FileLine { index, mark },
+        );
+        // The threads ending on a line are its children, so `Tab` folds them (D258 (7)).
+        if let Some(entries) = notes.after.get(&index) {
+            row.children = entries.iter().cloned().filter_map(&mut section).collect();
         }
-        let end = (index..file.lines.len())
-            .find(|i| shown.contains(i))
-            .unwrap_or(file.lines.len());
-        if end - index < FOLD_RUN {
-            out.extend((index..end).map(line));
-        } else {
-            out.push(
-                Section::with(
-                    format!("run/{}", index + 1),
-                    Item::Unchanged { count: end - index },
-                    (index..end).map(line).collect(),
-                )
-                .folded(),
-            );
-        }
-        index = end;
+        out.push(row);
     }
     if file.truncated {
         out.push(Section::leaf(

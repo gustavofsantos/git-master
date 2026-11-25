@@ -51,6 +51,8 @@ impl From<&AppSettings> for Settings {
                 Layout::Split => DiffLayout::Split,
             },
             author_pictures: app.author_pictures,
+            // The window has no line wrap control; saving never writes the key.
+            line_wrap: None,
             threads: app.threads.clone(),
         }
     }

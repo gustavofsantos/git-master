@@ -156,6 +156,9 @@ fn run(opened: Opened) -> io::Result<()> {
     if settings.diff_layout == gm_core::settings::DiffLayout::Split {
         app.layout = gm_view::diff_rows::Layout::Split;
     }
+    if settings.line_wrap == Some(false) {
+        app.wrap = crate::ui::LineWrap::Cut;
+    }
     loop {
         // A prompt's keys light up when its guard opens (D242 (5)).
         if app.guard_closed(std::time::Instant::now()) {

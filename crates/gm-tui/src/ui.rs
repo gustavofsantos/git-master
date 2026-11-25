@@ -286,6 +286,15 @@ impl Remote {
     }
 }
 
+/// How the File screen shows a line longer than the terminal is wide (D258 (10)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineWrap {
+    /// On the next rows, under the code.
+    Wrap,
+    /// Cut at the edge.
+    Cut,
+}
+
 /// The narrowest terminal that shows the Split layout (D252 (3)).
 pub const SPLIT_MIN_WIDTH: u16 = 100;
 
@@ -325,6 +334,8 @@ pub struct App {
     /// show it: Split falls back to Unified in a narrow one.
     pub layout: Layout,
     shown_layout: Layout,
+    /// How the File screen shows long lines (`gitmaster.lineWrap`, D258 (10)).
+    pub wrap: LineWrap,
     /// The terminal's width at the last draw.
     width: u16,
     /// Diffs asked for, in the order their commands go out, to match them to their ids.
@@ -370,6 +381,7 @@ impl App {
             color_jobs: Vec::new(),
             layout: Layout::Unified,
             shown_layout: Layout::Unified,
+            wrap: LineWrap::Wrap,
             width: u16::MAX,
             asked: VecDeque::new(),
             in_flight: HashMap::new(),
@@ -458,6 +470,11 @@ impl App {
 
     pub fn redraw(&mut self) {
         self.dirty = true;
+    }
+
+    /// Whether the top screen's long lines wrap: only the File screen's do.
+    pub fn wraps(&self) -> bool {
+        self.wrap == LineWrap::Wrap && matches!(self.stack.top(), Screen::File { .. })
     }
 
     /// What the top screen shows.
@@ -1059,7 +1076,7 @@ impl App {
                     );
                 }
                 Screen::File { view, path, keep } => {
-                    view.tree.set(diff_screen::file(repo, path, *keep, opened));
+                    view.tree.set(diff_screen::file(repo, path, opened));
                     if let Some(line) =
                         keep.filter(|_| repo.file.as_ref().is_some_and(|f| &f.path == path))
                     {
@@ -1354,7 +1371,9 @@ impl App {
             Screen::Thread { .. } => moves || threads || name == "file.open",
             Screen::Diff { .. } | Screen::Status(_) => !name.starts_with("filter."),
             // On File, the lines are the working tree's own: they take a thread (D258).
-            Screen::File { .. } if threads || name == "review.comment" => true,
+            Screen::File { .. } if threads || matches!(name, "review.comment" | "view.wrap") => {
+                true
+            }
             Screen::File { .. } | Screen::Blame { .. } => {
                 moves
                     || name.starts_with("select.")
@@ -1410,6 +1429,7 @@ impl App {
             "go.branch" => self.repo.range.is_some(),
             "file.open" | "blame.open" => self.current_file().is_some(),
             "origin.open" => self.selected_lines().is_some(),
+            "view.wrap" => matches!(self.stack.top(), Screen::File { .. }),
             _ => true,
         }
     }
@@ -1797,6 +1817,14 @@ impl App {
                 }
             }
             "go.branch" => self.open_diff(DiffKind::Branch),
+            "view.wrap" => {
+                let (wrap, notice) = match self.wrap {
+                    LineWrap::Wrap => (LineWrap::Cut, "Long lines are cut at the edge."),
+                    LineWrap::Cut => (LineWrap::Wrap, "Long lines wrap."),
+                };
+                self.wrap = wrap;
+                self.notice = Some(notice.to_owned());
+            }
             "diff.layout" => {
                 self.layout = match self.layout {
                     Layout::Unified => Layout::Split,
@@ -3459,7 +3487,8 @@ mod tests {
                 truncated: false,
             },
         });
-        // The cursor is on line 4; the unstaged diff marks it; the far lines are folded.
+        // The cursor is on line 4; the unstaged diff marks it; every line shows, none folded,
+        // and no header: the mode line names the file.
         assert!(matches!(
             app.tree().current().map(|s| &s.item),
             Some(Item::FileLine {
@@ -3467,13 +3496,14 @@ mod tests {
                 mark: crate::status::Mark::Unstaged
             })
         ));
-        assert!(
-            shown(&app)
-                .iter()
-                .any(|r| r.starts_with("Unchanged { count: 23")),
-            "{:?}",
-            shown(&app)
-        );
+        let rows = shown(&app);
+        assert_eq!(rows.len(), 30, "{rows:?}");
+        assert!(rows.iter().all(|r| r.starts_with("FileLine")), "{rows:?}");
+        // The change is a bar before the number, as an editor's sign column shows it.
+        let drawn = crate::draw::tests::screen(&mut app);
+        assert!(drawn.contains("     3   line 3"), "{drawn}");
+        assert!(drawn.contains(" ▎    4   line 4"), "{drawn}");
+        assert!(drawn.contains(" status › file/src/lib.rs "), "{drawn}");
         key(&mut app, "<cr>", now);
         assert_eq!(
             app.take_requests(),
@@ -3654,6 +3684,51 @@ mod tests {
     }
 
     #[test]
+    fn long_lines_of_the_file_screen_wrap_and_space_d_w_cuts_them() {
+        let now = Instant::now();
+        let mut app = app();
+        app.open_file("src/long.rs".to_owned(), None);
+        for (n, kind) in (1..).zip(app.take_commands()) {
+            app.sent(OperationId(n), &kind);
+        }
+        let read = OperationId(1);
+        let long = format!("start {} end", "x".repeat(120));
+        app.apply(&Event::FileRead {
+            id: read,
+            file: gm_schema::FileView {
+                path: "src/long.rs".to_owned(),
+                size: 0,
+                body: gm_schema::FileBody::Text {
+                    text: format!("short\n{long}\nlast"),
+                },
+                truncated: false,
+            },
+        });
+        // 100 columns: the selection mark and the 9 of the gutter leave 90 for the code.
+        let drawn = crate::draw::tests::screen(&mut app);
+        let lines: Vec<&str> = drawn.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("      2   start"))
+            .expect("line 2 is drawn");
+        assert!(lines[at + 1].starts_with("          xxx"), "{drawn}");
+        assert!(lines[at + 1].contains("x end"), "{drawn}");
+        assert!(lines[at + 2].contains("      3   last"), "{drawn}");
+        // A click on the second part of the line is a click on that line.
+        let hit = app
+            .hits
+            .iter()
+            .find(|h| h.click == Click::Row(1))
+            .expect("line 2 is clickable");
+        assert_eq!(hit.area.height, 2);
+        key(&mut app, "<space> d w", now);
+        assert_eq!(app.wrap, LineWrap::Cut);
+        let cut = crate::draw::tests::screen(&mut app);
+        assert!(!cut.contains("x end"), "{cut}");
+        assert!(cut.contains("      3   last"), "{cut}");
+    }
+
+    #[test]
     fn lines_of_the_file_screen_take_a_thread_drawn_under_them() {
         let now = Instant::now();
         let later = now + Duration::from_secs(2);
@@ -3712,15 +3787,15 @@ mod tests {
         // The gutter marks the thread's lines with its bar; `Tab` on its first line, which
         // has no card under it, folds the thread, and the last line shows the chevron.
         let drawn = crate::draw::tests::screen(&mut app);
-        assert!(drawn.contains("    5 ┃  line 5"), "{drawn}");
-        assert!(drawn.contains("    6 ┃  line 6"), "{drawn}");
-        assert!(drawn.contains("    7    line 7"), "{drawn}");
+        assert!(drawn.contains("      5 ┃ line 5"), "{drawn}");
+        assert!(drawn.contains("      6 ┃ line 6"), "{drawn}");
+        assert!(drawn.contains("      7   line 7"), "{drawn}");
         app.tree_mut().move_to_id("line/5");
         key(&mut app, "<tab>", later);
         assert!(!shown(&app).iter().any(|r| r.starts_with("Card")));
         let folded = crate::draw::tests::screen(&mut app);
         assert!(
-            folded.contains(&format!("    6 {}  line 6", crate::icons::FOLDED)),
+            folded.contains(&format!("      6 {} line 6", crate::icons::FOLDED)),
             "{folded}"
         );
         assert_eq!(
