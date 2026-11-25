@@ -33,6 +33,8 @@ pub enum LineChange {
     Added,
     /// The line replaces a removed one.
     Modified,
+    /// The line itself was removed, as a diff shows it.
+    Removed,
     /// Lines were removed right after this one.
     RemovedBelow,
     /// Lines were removed right before this one, at the top of the file.

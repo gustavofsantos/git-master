@@ -3,7 +3,7 @@
 //! shows a whole file of the working tree, colored, with the lines not yet committed marked
 //! and the review threads under their lines (D258).
 
-use gm_schema::{FileDiff, LineKind};
+use gm_schema::{FileDiff, Hunk, LineKind};
 use gm_view::review::{self, Entry, Opened};
 
 use crate::data::{Group, Repo};
@@ -122,6 +122,38 @@ fn index_to_worktree(n: u32, unstaged: Option<&FileDiff>) -> Option<u32> {
         offset += i64::from(hunk.new_lines) - i64::from(hunk.old_lines);
     }
     u32::try_from(i64::from(n) + offset).ok()
+}
+
+/// What line `line_index` of `hunk` is in the shared gutter (D262): in its run of removed and
+/// added lines, the first added lines replace the removed ones (modified) and the rest are new
+/// (added); a removed line is removed; a context line is `None`.
+pub fn run_change(hunk: &Hunk, line_index: usize) -> Option<LineChange> {
+    let line = hunk.lines.get(line_index)?;
+    match line.kind {
+        LineKind::Context => None,
+        LineKind::Removed => Some(LineChange::Removed),
+        LineKind::Added => {
+            let start = hunk.lines[..line_index]
+                .iter()
+                .rposition(|l| l.kind == LineKind::Context)
+                .map_or(0, |at| at + 1);
+            let run = &hunk.lines[start..];
+            let run = &run[..run
+                .iter()
+                .position(|l| l.kind == LineKind::Context)
+                .unwrap_or(run.len())];
+            let removed = run.iter().filter(|l| l.kind == LineKind::Removed).count();
+            let before = hunk.lines[start..line_index]
+                .iter()
+                .filter(|l| l.kind == LineKind::Added)
+                .count();
+            Some(if before < removed {
+                LineChange::Modified
+            } else {
+                LineChange::Added
+            })
+        }
+    }
 }
 
 /// What `diff` changed, by line of its new side: in each run of removed and added lines, the
@@ -294,6 +326,36 @@ mod tests {
             text: String::new(),
             no_newline: false,
         }
+    }
+
+    #[test]
+    fn a_diff_line_is_modified_added_or_removed_by_its_run() {
+        use LineKind::{Added as A, Context as C, Removed as R};
+        let h = hunk(
+            (1, 4),
+            (1, 4),
+            vec![
+                line(C, Some(1), Some(1)),
+                line(R, Some(2), None),
+                line(A, None, Some(2)),
+                line(A, None, Some(3)),
+                line(C, Some(3), Some(4)),
+                line(A, None, Some(5)),
+            ],
+        );
+        let kinds: Vec<Option<LineChange>> =
+            (0..h.lines.len()).map(|i| run_change(&h, i)).collect();
+        assert_eq!(
+            kinds,
+            [
+                None,
+                Some(LineChange::Removed),
+                Some(LineChange::Modified),
+                Some(LineChange::Added),
+                None,
+                Some(LineChange::Added)
+            ]
+        );
     }
 
     #[test]

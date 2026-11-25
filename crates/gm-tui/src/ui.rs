@@ -2658,6 +2658,23 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_line_under_a_thread_carries_its_bar_as_on_the_file_screen() {
+        let now = Instant::now();
+        let mut app = app();
+        unfolded(&mut app, now);
+        app.apply(&Event::ReviewCommentsListed {
+            id: OperationId(50),
+            comments: vec![thread(3, ReviewStatus::Open, 1)],
+        });
+        let drawn = crate::draw::tests::screen(&mut app);
+        // Line 4, `new();`, is added after a removed line: a modified bar, its number, the
+        // open thread's bar; the removed line has a bar and no number.
+        assert!(drawn.contains(" ▎    4 ┃     new();"), "{drawn}");
+        assert!(drawn.contains(" ▎            old();"), "{drawn}");
+        assert!(drawn.contains("      3       let a = 1;"), "{drawn}");
+    }
+
+    #[test]
     fn long_diff_lines_on_status_wrap_in_unified_and_split_and_space_d_w_cuts_them() {
         let now = Instant::now();
         let mut app = app();
@@ -2672,15 +2689,15 @@ mod tests {
             side: gm_schema::DiffSide::Unstaged,
             diff: long,
         });
-        // Unified at 100 columns: the code has 89 columns, so the added line takes two rows
-        // and its sign runs down the second.
+        // Unified at 100 columns: the code has 90 columns, so the added line takes two rows
+        // and its bar runs down the second, as on the File screen (D262).
         let drawn = crate::draw::tests::screen(&mut app);
         let lines: Vec<&str> = drawn.lines().collect();
         let at = lines
             .iter()
-            .position(|l| l.contains("4 +     new(xxx"))
+            .position(|l| l.contains("▎    4       new(xxx"))
             .unwrap_or_else(|| panic!("{drawn}"));
-        assert!(lines[at + 1].starts_with("         + xxx"), "{drawn}");
+        assert!(lines[at + 1].starts_with(" ▎        xxx"), "{drawn}");
         assert!(lines[at + 1].contains("xend);"), "{drawn}");
         // Split: the new side wraps in its half; the row is as tall as that side.
         key(&mut app, "<space> d s", now);
@@ -2688,9 +2705,9 @@ mod tests {
         let lines: Vec<&str> = split.lines().collect();
         let at = lines
             .iter()
-            .position(|l| l.contains("4 +     new(x"))
+            .position(|l| l.contains("│▎    4       new(x"))
             .unwrap_or_else(|| panic!("{split}"));
-        assert!(lines[at + 1].contains("│      + xxx"), "{split}");
+        assert!(lines[at + 1].contains("│▎        xxx"), "{split}");
         assert!(lines.iter().any(|l| l.contains("xend);")), "{split}");
         // Cut: nothing past the edge shows.
         key(&mut app, "<space> d w", now);
@@ -2954,10 +2971,9 @@ mod tests {
             .find(|row| row.contains("one();"))
             .expect("the pair is drawn");
         assert!(row.contains("ONE();"), "{row}");
-        assert!(
-            row.contains("    2 - ") && row.contains("    2 + "),
-            "{row}"
-        );
+        // Both sides in the File screen's gutter (D262): a bar, then the number.
+        assert!(row.contains(" ▎    2       one();"), "{row}");
+        assert!(row.contains("│▎    2       ONE();"), "{row}");
         let separator = row.find('│').unwrap();
         assert!(row.find("one();").unwrap() < separator);
         assert!(row.find("ONE();").unwrap() > separator);

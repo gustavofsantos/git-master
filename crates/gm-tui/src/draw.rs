@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
-use gm_schema::{DiffLine, LineKind, SyntaxRole};
+use gm_schema::{LineKind, SyntaxRole};
 use gm_view::diff_rows::Row as DiffRow;
 use gm_view::local_review::Version;
 use gm_view::provenance_view::Row as ProvenanceRow;
@@ -174,7 +174,7 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let row_height = |row: &Row<'_, Item>| match &row.section.item {
         Item::FileLine { index, .. } if wrap => file_line_height(app, *index, width - 1),
         Item::Line { .. } | Item::Pair { .. } if wrap => {
-            code_rows(app, row, width - 1, wrap).map_or(1, |lines| lines.len())
+            code_rows(app, row, false, width - 1, wrap).map_or(1, |lines| lines.len())
         }
         _ => 1,
     };
@@ -199,7 +199,10 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let mut hits = Vec::new();
     // The tinted spans of each row (D250), when the terminal gave tints.
     let mut backgrounds: Vec<(Rect, palette::Rgb)> = Vec::new();
-    let covered = covered_lines(app);
+    let covered = match (app.stack.top(), app.repo.file.as_ref()) {
+        (crate::ui::Screen::File { .. }, Some(file)) => thread_lines(app, &file.path),
+        _ => std::collections::HashMap::new(),
+    };
     for (index, row) in rows.iter().enumerate().skip(scroll) {
         if lines.len() >= height {
             break;
@@ -216,12 +219,14 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
             Item::FileLine { index, mark } => {
                 let gutter = Gutter {
                     on,
-                    thread: covered.get(index).copied(),
+                    thread: u32::try_from(index + 1)
+                        .ok()
+                        .and_then(|line| covered.get(&line).copied()),
                     folded: row.folded && !row.section.children.is_empty(),
                 };
                 file_line_rows(app, *index, *mark, gutter, width.saturating_sub(1), wrap)
             }
-            _ => code_rows(app, row, width.saturating_sub(1), wrap)
+            _ => code_rows(app, row, on, width.saturating_sub(1), wrap)
                 .unwrap_or_else(|| vec![row_line(app, row, width.saturating_sub(1))]),
         };
         drawn.truncate(height - lines.len());
@@ -266,6 +271,7 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
 fn code_rows(
     app: &App,
     row: &Row<'_, Item>,
+    on: bool,
     width: usize,
     wrap: bool,
 ) -> Option<Vec<Line<'static>>> {
@@ -274,14 +280,14 @@ fn code_rows(
             group,
             path,
             row: index,
-        } => Some(diff_lines(app, *group, path, *index, width, wrap)),
+        } => Some(diff_lines(app, *group, path, *index, on, width, wrap)),
         Item::Pair {
             group,
             path,
             old,
             new,
             ..
-        } => Some(pair_lines(app, *group, path, (*old, *new), width, wrap)),
+        } => Some(pair_lines(app, *group, path, (*old, *new), on, width, wrap)),
         _ => None,
     }
 }
@@ -295,8 +301,8 @@ fn row_change(app: &App, row: &Row<'_, Item>) -> Option<(bool, u16)> {
             path,
             row: index,
         } => match status::line_of(&app.repo, *group, path, *index)?.kind {
-            LineKind::Added => Some((true, 11)),
-            LineKind::Removed => Some((false, 11)),
+            LineKind::Added => Some((true, 10)),
+            LineKind::Removed => Some((false, 10)),
             LineKind::Context => None,
         },
         Item::Text {
@@ -447,34 +453,73 @@ fn diff_lines(
     group: Group,
     path: &str,
     index: usize,
+    on: bool,
     width: usize,
     wrap: bool,
 ) -> Vec<Line<'static>> {
-    let none = || vec![Line::default()];
-    let Some(file) = app.repo.files.get(&(group, path.to_owned())) else {
-        return none();
-    };
-    let Some(DiffRow::Line {
-        hunk_index,
-        line_index,
-        ..
-    }) = file.rows.get(index).copied()
-    else {
-        return none();
-    };
-    let Some(line) = status::line_of(&app.repo, group, path, index) else {
-        return none();
-    };
-    code_lines(
-        line,
-        file.colors.get(&(hunk_index, line_index)),
+    let fit = Fit {
         width,
         wrap,
+        pad: false,
+    };
+    diff_cell(app, group, path, index, false, on, fit).map_or_else(
+        || vec![Line::default()],
+        |rows| rows.into_iter().map(Line::from).collect(),
     )
 }
 
+/// One line of a diff in the shared gutter (D262), as rows of spans: its change, its number
+/// (the old one on Split's old side), the threads on it and its code. `pad` fills each row to
+/// `width`, for a Split side. `None` when the row is not a line of the file's diff.
+fn diff_cell(
+    app: &App,
+    group: Group,
+    path: &str,
+    index: usize,
+    old_side: bool,
+    on: bool,
+    fit: Fit,
+) -> Option<Vec<Vec<Span<'static>>>> {
+    let file = app.repo.files.get(&(group, path.to_owned()))?;
+    let DiffRow::Line {
+        hunk_index,
+        line_index,
+        ..
+    } = file.rows.get(index).copied()?
+    else {
+        return None;
+    };
+    let line = status::line_of(&app.repo, group, path, index)?;
+    let hunk = file.diff.as_ref()?.hunks.get(hunk_index)?;
+    let mark =
+        crate::diff_screen::run_change(hunk, line_index).map_or(Mark::Same, |kind| Mark::Changed {
+            kind,
+            staged: group == Group::Staged,
+        });
+    let number = if old_side { line.old_no } else { line.new_no };
+    // Threads sit on the new side's lines.
+    let thread = if old_side || line.kind == LineKind::Removed {
+        None
+    } else {
+        line.new_no
+            .and_then(|n| thread_lines(app, path).get(&n).copied())
+    };
+    // Without tints a removed line is red, so it reads as removed (D251 (3)).
+    let whole =
+        (line.kind == LineKind::Removed && palette::tints().is_none()).then(|| color(Color::Red));
+    let gutter = Gutter {
+        on,
+        thread,
+        folded: false,
+    };
+    let colors = file.colors.get(&(hunk_index, line_index));
+    Some(gutter_rows(
+        mark, number, gutter, &line.text, colors, whole, fit,
+    ))
+}
+
 /// The columns of a side's gutter in Split: the number, the sign and a space each side.
-const SIDE_GUTTER: u16 = 8;
+const SIDE_GUTTER: u16 = 9;
 
 /// The widths of the two sides of a Split row `width` columns wide. The row is the
 /// selection mark, a space, the left side, a separator and the right side.
@@ -492,13 +537,23 @@ fn pair_lines(
     group: Group,
     path: &str,
     (old, new): (Option<usize>, Option<usize>),
+    on: bool,
     width: usize,
     wrap: bool,
 ) -> Vec<Line<'static>> {
     let (left, right) = pair_sides(u16::try_from(width + 1).unwrap_or(u16::MAX));
     let (left, right) = (usize::from(left), usize::from(right));
-    let old_rows = cell_rows(app, group, path, old, true, left, wrap);
-    let new_rows = cell_rows(app, group, path, new, false, right, wrap);
+    let side = |row: Option<usize>, old_side: bool, width: usize| {
+        let fit = Fit {
+            width,
+            wrap,
+            pad: true,
+        };
+        row.and_then(|row| diff_cell(app, group, path, row, old_side, on, fit))
+            .unwrap_or_else(|| vec![vec![Span::raw(" ".repeat(width))]])
+    };
+    let old_rows = side(old, true, left);
+    let new_rows = side(new, false, right);
     let count = old_rows.len().max(new_rows.len());
     let blank = |width: usize| vec![Span::raw(" ".repeat(width))];
     (0..count)
@@ -508,76 +563,6 @@ fn pair_lines(
             spans.push(Span::styled("│", DIM));
             spans.extend(new_rows.get(at).cloned().unwrap_or_else(|| blank(right)));
             Line::from(spans)
-        })
-        .collect()
-}
-
-/// One side of a Split row, each row of it exactly `width` columns: blank when the side has
-/// no line; with `wrap`, its code continues on the next rows under the code.
-fn cell_rows(
-    app: &App,
-    group: Group,
-    path: &str,
-    row: Option<usize>,
-    old_side: bool,
-    width: usize,
-    wrap: bool,
-) -> Vec<Vec<Span<'static>>> {
-    let file = app.repo.files.get(&(group, path.to_owned()));
-    let line = row.and_then(|row| status::line_of(&app.repo, group, path, row));
-    let (Some(file), Some(row), Some(line)) = (file, row, line) else {
-        return vec![vec![Span::raw(" ".repeat(width))]];
-    };
-    let colors = match file.rows.get(row) {
-        Some(DiffRow::Line {
-            hunk_index,
-            line_index,
-            ..
-        }) => file.colors.get(&(*hunk_index, *line_index)),
-        _ => None,
-    };
-    let (sign, sign_style, whole) = match line.kind {
-        LineKind::Added => ("+", color(Color::Green), None),
-        // Without tints a removed line is red, as in Unified (D251 (3)).
-        LineKind::Removed => (
-            "-",
-            color(Color::Red),
-            palette::tints().is_none().then(|| color(Color::Red)),
-        ),
-        LineKind::Context => (" ", DIM, None),
-    };
-    let number = if old_side { line.old_no } else { line.new_no };
-    let number = number.map_or_else(
-        || " ".repeat(NUMBER_WIDTH),
-        |no| format!("{no:>NUMBER_WIDTH$}"),
-    );
-    let gutter = usize::from(SIDE_GUTTER);
-    let room = width.saturating_sub(gutter).max(1);
-    let code = code_spans(
-        &line.text,
-        colors,
-        whole,
-        if wrap { usize::MAX } else { room },
-    );
-    let pieces = if wrap {
-        split_spans(code, room)
-    } else {
-        vec![code]
-    };
-    pieces
-        .into_iter()
-        .enumerate()
-        .map(|(at, piece)| {
-            let head = if at == 0 {
-                format!("{number} {sign} ")
-            } else {
-                format!("{} {sign} ", " ".repeat(NUMBER_WIDTH))
-            };
-            let used: usize = piece.iter().map(|span| span.content.chars().count()).sum();
-            let mut spans = vec![Span::styled(head, sign_style)];
-            spans.extend(piece);
-            spans.push(Span::raw(" ".repeat(width.saturating_sub(gutter + used))));
-            spans
         })
         .collect()
 }
@@ -683,6 +668,15 @@ fn screen_line(row: &Row<'_, Item>) -> Line<'static> {
     }
 }
 
+/// How a line of code fits its columns: `width` of them, wrapped or cut, and with `pad` each
+/// row filled to `width` (a Split side).
+#[derive(Clone, Copy)]
+struct Fit {
+    width: usize,
+    wrap: bool,
+    pad: bool,
+}
+
 /// What the File screen's gutter shows beside a line's number (D258 (7)).
 #[derive(Clone, Copy)]
 struct Gutter {
@@ -701,31 +695,23 @@ const NO_GUTTER: Gutter = Gutter {
 };
 
 /// The threads of the File screen's file, by line index (from 0): the strongest state of
-/// the threads covering each line, an open thread over a handled one over a resolved one.
-fn covered_lines(app: &App) -> std::collections::HashMap<usize, Badge> {
+/// The threads of `path`, by line number (from 1): the strongest state of the threads
+/// covering each line, an open thread over a handled one over a resolved one.
+fn thread_lines(app: &App, path: &str) -> std::collections::HashMap<u32, Badge> {
     let mut covered = std::collections::HashMap::new();
-    if !matches!(app.stack.top(), crate::ui::Screen::File { .. }) {
-        return covered;
-    }
-    let Some(file) = app.repo.file.as_ref() else {
-        return covered;
-    };
     let rank = |badge: Badge| match badge {
         Badge::Open => 3,
         Badge::Handled => 2,
         Badge::Outdated => 1,
         Badge::Resolved => 0,
     };
-    for comment in app.repo.comments.iter().filter(|c| c.path == file.path) {
+    for comment in app.repo.comments.iter().filter(|c| c.path == path) {
         let Some(location) = comment.location else {
             continue;
         };
         let state = review::badge(comment);
         for line in location.start_line..=location.end_line {
-            let Some(index) = (line as usize).checked_sub(1) else {
-                continue;
-            };
-            let slot = covered.entry(index).or_insert(state);
+            let slot = covered.entry(line).or_insert(state);
             if rank(state) > rank(*slot) {
                 *slot = state;
             }
@@ -767,6 +753,39 @@ fn file_line_rows(
         return vec![Line::default()];
     };
     let text = file.lines.get(index).map_or("", String::as_str);
+    let number = u32::try_from(index + 1).ok();
+    let fit = Fit {
+        width,
+        wrap,
+        pad: false,
+    };
+    gutter_rows(
+        mark,
+        number,
+        gutter,
+        text,
+        file.colors.get(&index),
+        None,
+        fit,
+    )
+    .into_iter()
+    .map(Line::from)
+    .collect()
+}
+
+/// A line of code in the gutter the File screen and the diffs share (D262): the change sign,
+/// the number (bold under the cursor, in a thread's color on its lines), the thread column
+/// and a space, then the code, cut at `width` or wrapped with the signs carried down. `whole`
+/// paints all the code in one style; `pad` fills each row to `width`.
+fn gutter_rows(
+    mark: Mark,
+    number: Option<u32>,
+    gutter: Gutter,
+    text: &str,
+    colors: Option<&LineColors>,
+    whole: Option<Style>,
+    Fit { width, wrap, pad }: Fit,
+) -> Vec<Vec<Span<'static>>> {
     let number_style = match (gutter.on, gutter.thread) {
         (true, _) => BOLD,
         (false, Some(state)) => color(badge(state).2),
@@ -780,12 +799,7 @@ fn file_line_rows(
         None => Span::raw(" "),
     };
     let room = width.saturating_sub(FILE_GUTTER).max(1);
-    let code = code_spans(
-        text,
-        file.colors.get(&index),
-        None,
-        if wrap { usize::MAX } else { room },
-    );
+    let code = code_spans(text, colors, whole, if wrap { usize::MAX } else { room });
     let pieces = if wrap {
         split_spans(code, room)
     } else {
@@ -797,14 +811,24 @@ fn file_line_rows(
         .enumerate()
         .map(|(at, piece)| {
             let change = change_sign(mark, at == 0, at + 1 == count);
-            let number = if at == 0 {
-                Span::styled(format!("{:>5} ", index + 1), number_style)
-            } else {
-                Span::raw("      ")
+            let shown = match number {
+                Some(n) if at == 0 => format!("{n:>NUMBER_WIDTH$} "),
+                _ => " ".repeat(NUMBER_WIDTH + 1),
             };
-            let mut spans = vec![change.clone(), number, thread.clone(), Span::raw(" ")];
+            let used: usize = piece.iter().map(|span| span.content.chars().count()).sum();
+            let mut spans = vec![
+                change,
+                Span::styled(shown, number_style),
+                thread.clone(),
+                Span::raw(" "),
+            ];
             spans.extend(piece);
-            Line::from(spans)
+            if pad {
+                spans.push(Span::raw(
+                    " ".repeat(width.saturating_sub(FILE_GUTTER + used)),
+                ));
+            }
+            spans
         })
         .collect()
 }
@@ -820,6 +844,7 @@ fn change_sign(mark: Mark, first: bool, last: bool) -> Span<'static> {
     let (glyphs, tint) = match kind {
         LineChange::Added => (SIGN_BAR, Color::Green),
         LineChange::Modified => (SIGN_BAR, Color::Blue),
+        LineChange::Removed => (SIGN_BAR, Color::Red),
         LineChange::RemovedBelow if last => (SIGN_BELOW, Color::Red),
         LineChange::RemovedAbove if first => (SIGN_ABOVE, Color::Red),
         LineChange::RemovedBelow | LineChange::RemovedAbove => return Span::raw(" "),
@@ -1090,14 +1115,14 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             group,
             path,
             row: index,
-        } => diff_lines(app, *group, path, *index, width, false).swap_remove(0),
+        } => diff_lines(app, *group, path, *index, false, width, false).swap_remove(0),
         Item::Pair {
             group,
             path,
             old,
             new,
             ..
-        } => pair_lines(app, *group, path, (*old, *new), width, false).swap_remove(0),
+        } => pair_lines(app, *group, path, (*old, *new), false, width, false).swap_remove(0),
         Item::Card { id, part } => card_line(app, *id, part),
         Item::Heading(Heading::Outdated { count, open }) => Line::styled(
             format!(
@@ -1160,59 +1185,6 @@ fn letter_color(letter: char, group: Group) -> Color {
         (_, Group::Staged) | ('A', _) => Color::Green,
         _ => Color::Yellow,
     }
-}
-
-/// A Unified diff line: its number, its sign and its code, cut at `width`, or with `wrap`
-/// continued on the next rows under the code with the sign carried along.
-fn code_lines(
-    line: &DiffLine,
-    colors: Option<&LineColors>,
-    width: usize,
-    wrap: bool,
-) -> Vec<Line<'static>> {
-    let (number, sign, sign_style, whole) = match line.kind {
-        LineKind::Added => (line.new_no, "+", color(Color::Green), None),
-        LineKind::Removed => {
-            // With tints the red background marks the line, so its code keeps its syntax
-            // colors (D251 (3)); without them, the whole line is red.
-            let whole = palette::tints().is_none().then(|| color(Color::Red));
-            (None, "-", color(Color::Red), whole)
-        }
-        LineKind::Context => (line.new_no, " ", DIM, None),
-    };
-    let number = number.map_or_else(
-        || " ".repeat(NUMBER_WIDTH),
-        |no| format!("{no:>NUMBER_WIDTH$}"),
-    );
-    let room = width.saturating_sub(NUMBER_WIDTH + 5).max(1);
-    let code = code_spans(
-        &line.text,
-        colors,
-        whole,
-        if wrap { usize::MAX } else { room },
-    );
-    let pieces = if wrap {
-        split_spans(code, room)
-    } else {
-        vec![code]
-    };
-    pieces
-        .into_iter()
-        .enumerate()
-        .map(|(at, piece)| {
-            let shown = if at == 0 {
-                number.clone()
-            } else {
-                " ".repeat(NUMBER_WIDTH)
-            };
-            let mut spans = vec![
-                Span::styled(format!("  {shown}"), sign_style),
-                Span::styled(format!(" {sign} "), sign_style),
-            ];
-            spans.extend(piece);
-            Line::from(spans)
-        })
-        .collect()
 }
 
 /// The spans of a line's code: its colored ranges in their role's color, the rest plain;
