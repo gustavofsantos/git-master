@@ -39,9 +39,11 @@ pub enum Language {
     Css,
     Clojure,
     Lua,
+    /// The block grammar; the inline grammar reads the text of its `inline` nodes (D260).
+    Markdown,
 }
 
-const LANGUAGES: [Language; 19] = [
+const LANGUAGES: [Language; 20] = [
     Language::Rust,
     Language::Python,
     Language::Go,
@@ -61,6 +63,7 @@ const LANGUAGES: [Language; 19] = [
     Language::Css,
     Language::Clojure,
     Language::Lua,
+    Language::Markdown,
 ];
 
 impl Language {
@@ -109,6 +112,8 @@ impl Language {
             Language::Clojure => Some(tree_sitter_clojure_orchard::LANGUAGE.into()),
             #[cfg(feature = "syntax-lua")]
             Language::Lua => Some(tree_sitter_lua::LANGUAGE.into()),
+            #[cfg(feature = "syntax-md")]
+            Language::Markdown => Some(tree_sitter_md::LANGUAGE.into()),
             #[allow(unreachable_patterns)]
             _ => None,
         }
@@ -142,6 +147,7 @@ impl Language {
             Language::Css => include_str!("../queries/css/highlights.scm").to_owned(),
             Language::Clojure => include_str!("../queries/clojure/highlights.scm").to_owned(),
             Language::Lua => include_str!("../queries/lua/highlights.scm").to_owned(),
+            Language::Markdown => include_str!("../queries/markdown/highlights.scm").to_owned(),
         }
     }
 }
@@ -181,6 +187,7 @@ pub fn language_for_path(path: &str) -> Option<Language> {
                 "css" => Language::Css,
                 "clj" | "cljs" | "cljc" | "cljd" | "edn" | "bb" => Language::Clojure,
                 "lua" | "luau" => Language::Lua,
+                "md" | "markdown" | "mdown" | "mkd" => Language::Markdown,
                 _ => return None,
             }
         }
@@ -324,6 +331,10 @@ pub fn highlight_within(
         }
     }
     drop(captures);
+    if language == Language::Markdown {
+        let after = compiled.query.pattern_count();
+        markdown_inline(&tree, bytes, after, &mut found, &should_stop)?;
+    }
     if should_stop() {
         return None;
     }
@@ -354,6 +365,100 @@ pub fn highlight_within(
         at = end;
     }
     Some(spans)
+}
+
+/// The inline grammar's query (D260), compiled on first use and kept.
+#[cfg(feature = "syntax-md")]
+fn compiled_inline() -> Option<&'static Compiled> {
+    static CACHE: OnceLock<Option<Compiled>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let grammar: tree_sitter::Language = tree_sitter_md::INLINE_LANGUAGE.into();
+            let query =
+                Query::new(&grammar, include_str!("../queries/markdown/inline.scm")).ok()?;
+            let roles = query
+                .capture_names()
+                .iter()
+                .map(|name| role_for_capture(name))
+                .collect();
+            Some(Compiled { query, roles })
+        })
+        .as_ref()
+}
+
+/// Adds the captures of Markdown's inline text (D260): the inline grammar parses each
+/// `inline` node of the block `tree` on its own, so the work grows with the file (one parse
+/// over all the ranges at once grew with their square). Its patterns are numbered after the
+/// block query's `after` patterns. `None` when the time ran out.
+#[cfg(feature = "syntax-md")]
+fn markdown_inline(
+    tree: &tree_sitter::Tree,
+    bytes: &[u8],
+    after: usize,
+    found: &mut Vec<(usize, usize, usize, u8)>,
+    should_stop: &dyn Fn() -> bool,
+) -> Option<()> {
+    let Some(compiled) = compiled_inline() else {
+        return Some(());
+    };
+    let mut ranges = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "inline" {
+            ranges.push(node.byte_range());
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_md::INLINE_LANGUAGE.into())
+        .ok()?;
+    let mut cursor = QueryCursor::new();
+    for range in ranges {
+        if should_stop() {
+            return None;
+        }
+        let text = &bytes[range.start.min(bytes.len())..range.end.min(bytes.len())];
+        // Plain prose has nothing the inline query colors: no emphasis, code, link or escape.
+        if !text
+            .iter()
+            .any(|b| matches!(b, b'*' | b'_' | b'`' | b'[' | b'<' | b'\\'))
+        {
+            continue;
+        }
+        let inline = parser.parse(text, None)?;
+        let mut captures = cursor.captures(&compiled.query, inline.root_node(), text);
+        while let Some((matched, index)) = captures.next() {
+            let capture = matched.captures[*index];
+            let (start, end) = (
+                capture.node.start_byte(),
+                capture.node.end_byte().min(text.len()),
+            );
+            if let (true, Some(role)) = (start < end, compiled.roles[capture.index as usize]) {
+                let code = code_of(Some(role));
+                found.push((
+                    range.start + start,
+                    range.start + end,
+                    after + matched.pattern_index,
+                    code,
+                ));
+            }
+        }
+    }
+    Some(())
+}
+
+#[cfg(not(feature = "syntax-md"))]
+fn markdown_inline(
+    _tree: &tree_sitter::Tree,
+    _bytes: &[u8],
+    _after: usize,
+    _found: &mut Vec<(usize, usize, usize, u8)>,
+    _should_stop: &dyn Fn() -> bool,
+) -> Option<()> {
+    Some(())
 }
 
 /// Leaves a line longer than `HIGHLIGHT_LINE_LIMIT` uncolored.
@@ -401,10 +506,43 @@ mod tests {
         assert_eq!(language_for_path("x.jsx"), Some(Language::JavaScript));
         assert_eq!(language_for_path("x.ts"), Some(Language::TypeScript));
         assert_eq!(language_for_path("x.tsx"), Some(Language::Tsx));
-        assert_eq!(language_for_path("README.md"), None);
+        assert_eq!(language_for_path("README.md"), Some(Language::Markdown));
+        assert_eq!(language_for_path("notes.txt"), None);
         assert_eq!(language_for_path("Makefile"), None);
         assert_eq!(language_for_path(".rs"), Some(Language::Rust));
         assert_eq!(language_for_path("dir.rs/file"), None);
+    }
+
+    #[test]
+    fn markdown_colors_its_blocks_and_its_inline_text() {
+        let text = "# Title *here*\n\nSome `code`, **bold**, *soft* and [a link](https://x.dev).\n\n- item\n> quote\n\n```rust\nfn main() {}\n```\n";
+        let spans = run(Language::Markdown, text);
+        assert_eq!(first(text, &spans, SyntaxRole::Keyword), Some("# Title "));
+        assert!(
+            texts(text, &spans, SyntaxRole::String).contains(&"code"),
+            "{spans:?}"
+        );
+        assert!(
+            texts(text, &spans, SyntaxRole::String)
+                .iter()
+                .any(|code| code.trim() == "fn main() {}"),
+            "{spans:?}"
+        );
+        assert_eq!(first(text, &spans, SyntaxRole::Attribute), Some("rust"));
+        assert_eq!(first(text, &spans, SyntaxRole::Function), Some("a link"));
+        let constants = texts(text, &spans, SyntaxRole::Constant);
+        assert!(constants.contains(&"https://x.dev"), "{constants:?}");
+        assert!(constants.contains(&"bold"), "{constants:?}");
+        let variables = texts(text, &spans, SyntaxRole::Variable);
+        assert!(variables.contains(&"here"), "{variables:?}");
+        assert!(variables.contains(&"soft"), "{variables:?}");
+        let punctuation = texts(text, &spans, SyntaxRole::Punctuation);
+        for mark in ["- ", "> ", "`", "**", "*", "```", "[", "](", ")"] {
+            assert!(
+                punctuation.iter().any(|p| p.trim() == mark.trim()),
+                "{mark}: {punctuation:?}"
+            );
+        }
     }
 
     #[test]
@@ -463,6 +601,14 @@ mod tests {
                     "{language:?}: capture @{name} has no role"
                 );
             }
+        }
+        // Markdown's inline query compiles on a grammar of its own (D260).
+        let inline = compiled_inline().expect("the Markdown inline query compiles");
+        for (name, role) in inline.query.capture_names().iter().zip(&inline.roles) {
+            assert!(
+                role.is_some(),
+                "Markdown inline: capture @{name} has no role"
+            );
         }
     }
 
@@ -566,7 +712,11 @@ mod tests {
             assert_eq!(language_for_path(path), Some(language), "{path}");
         }
         assert_eq!(language_for_path("x.scss"), None);
-        assert_eq!(language_for_path("x.md"), None);
+        assert_eq!(language_for_path("x.md"), Some(Language::Markdown));
+        assert_eq!(
+            language_for_path("docs/Guide.MARKDOWN"),
+            Some(Language::Markdown)
+        );
         assert_eq!(language_for_path("Makefile"), None);
     }
 
@@ -844,6 +994,41 @@ mod tests {
         eprintln!("first use (query compile): {:?}", warm.elapsed());
         let started = Instant::now();
         let spans = highlight(Language::Rust, &text, &stop).expect("within the budget");
+        eprintln!(
+            "{} bytes, {} lines, {} spans: {:?}",
+            text.len(),
+            text.lines().count(),
+            spans.len(),
+            started.elapsed()
+        );
+        assert!(started.elapsed() < HIGHLIGHT_BUDGET);
+    }
+
+    /// D260: the same measurement for Markdown, whose inline grammar is a second pass, on the
+    /// repository's own documentation. Run with `--release` as above.
+    #[test]
+    #[ignore = "a measurement for release builds"]
+    fn timing_of_a_markdown_file_at_the_viewer_limit() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/guide");
+        let mut text = String::new();
+        'fill: loop {
+            for entry in std::fs::read_dir(&docs).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|e| e == "md") {
+                    text.push_str(&std::fs::read_to_string(path).unwrap());
+                    if text.len() >= gm_schema::FILE_VIEW_LIMIT {
+                        break 'fill;
+                    }
+                }
+            }
+        }
+        text.truncate(text.floor_char_boundary(gm_schema::FILE_VIEW_LIMIT));
+        let stop = AtomicBool::new(false);
+        let warm = Instant::now();
+        let _ = highlight(Language::Markdown, "# a *b*\n", &stop);
+        eprintln!("first use (queries compile): {:?}", warm.elapsed());
+        let started = Instant::now();
+        let spans = highlight(Language::Markdown, &text, &stop).expect("within the budget");
         eprintln!(
             "{} bytes, {} lines, {} spans: {:?}",
             text.len(),

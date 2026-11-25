@@ -30,6 +30,7 @@ default = [
     "syntax-css",
     "syntax-clojure-orchard",
     "syntax-lua",
+    "syntax-md",
 ]
 syntax-rust = ["dep:tree-sitter-rust"]
 syntax-python = ["dep:tree-sitter-python"]
@@ -49,6 +50,7 @@ syntax-html = ["dep:tree-sitter-html"]
 syntax-css = ["dep:tree-sitter-css"]
 syntax-clojure-orchard = ["dep:tree-sitter-clojure-orchard"]
 syntax-lua = ["dep:tree-sitter-lua"]
+syntax-md = ["dep:tree-sitter-md"]
 
 [dependencies]
 gm-schema.workspace = true
@@ -83,6 +85,7 @@ tree-sitter-html = { workspace = true, optional = true }
 tree-sitter-css = { workspace = true, optional = true }
 tree-sitter-clojure-orchard = { workspace = true, optional = true }
 tree-sitter-lua = { workspace = true, optional = true }
+tree-sitter-md = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

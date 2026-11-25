@@ -45,6 +45,8 @@ tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-clojure-orchard = "0.2"
 tree-sitter-lua = "0.4"
+# Without its `parser` feature: the grammars only, on `tree-sitter-language` (D260).
+tree-sitter-md = { version = "0.5", default-features = false }
 mlua = { version = "0.11", features = ["luau", "send", "serialize"] }
 gm-schema = { path = "crates/gm-schema" }
 gm-core = { path = "crates/gm-core" }
