@@ -48,6 +48,8 @@ The companion is a stack of screens. It opens on **Status**. Opening something, 
 
 Every screen is made of sections you can fold. `Tab` folds or unfolds the section at the cursor; a click on a section's title does the same. `/` searches the screen, as in less: type the text and press `Enter`, then `n` and `N` go to the next and the previous match. `Enter` opens what is at the cursor: a thread, a commit, a file at that line in your editor.
 
+The mouse scrolls every screen. The wheel moves the view three rows at a time, whether or not the cursor is on screen; when the cursor's row leaves the view, the cursor comes along onto the nearest row shown. A screen longer than the terminal has a scroll bar in its last column, with a thumb as long as the share of the screen you see. Drag the thumb to scroll, or click the bar to jump the thumb to that spot. The next key that moves the cursor brings the view back to follow it.
+
 ## The Status screen
 
 Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream, with how far ahead and behind it is; **Stack**, when the branch is in a [stack](stacks.md): the branches from the root to yours, how far ahead and behind its parent it is, whether a restack is due and how many branches sit on it; **Base**, the default branch it is compared with. Then come its sections, each with a count:

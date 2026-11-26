@@ -49,6 +49,9 @@ const WHEEL_ROWS: isize = 3;
 pub struct View {
     pub tree: Tree<Item>,
     pub scroll: usize,
+    /// The view was moved by the mouse (the wheel or the scroll bar), not the cursor: the
+    /// next draw keeps the view where it is and brings the cursor into it (D265).
+    pub scrolled: bool,
 }
 
 /// A screen of the stack. Status is the root; the other screens come with M3 to M6.
@@ -196,6 +199,8 @@ pub enum Click {
     Answer(Answer),
     /// A file the picker lists, by its index among the hits: it opens.
     Pick(usize),
+    /// The scroll bar: a press on its thumb grabs it, elsewhere on it jumps there (D265).
+    Bar,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -326,6 +331,10 @@ pub struct App {
     pub dirty: bool,
     /// The row a press of the left button started on; a drag selects from it.
     drag_from: Option<usize>,
+    /// The scroll bar of the top screen as the last draw laid it out: its track and state.
+    pub bar: Option<(Rect, crate::scrollbar::Bar)>,
+    /// The cell of the thumb the pointer holds while the thumb is dragged.
+    grab: Option<usize>,
     /// A thread to put the cursor on once its lines are read.
     reveal: Option<i64>,
     commands: Vec<CommandKind>,
@@ -376,6 +385,8 @@ impl App {
             quit: false,
             dirty: true,
             drag_from: None,
+            bar: None,
+            grab: None,
             reveal: None,
             commands: Vec::new(),
             color_jobs: Vec::new(),
@@ -1315,8 +1326,12 @@ impl App {
                         self.answer(answer);
                     }
                 }
+                Some(Click::Bar) => self.press_bar(mouse.row),
                 None => return,
             },
+            MouseEventKind::Drag(MouseButton::Left) if self.grab.is_some() => {
+                self.drag_bar(mouse.row);
+            }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let (Some(from), Some(Click::Row(index))) = (self.drag_from, hit) else {
                     return;
@@ -1327,7 +1342,10 @@ impl App {
                 }
                 self.tree_mut().move_to(index);
             }
-            MouseEventKind::Up(MouseButton::Left) => self.drag_from = None,
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.drag_from = None;
+                self.grab = None;
+            }
             MouseEventKind::ScrollDown => self.scroll_by(WHEEL_ROWS),
             MouseEventKind::ScrollUp => self.scroll_by(-WHEEL_ROWS),
             _ => return,
@@ -1335,14 +1353,41 @@ impl App {
         self.dirty = true;
     }
 
+    /// Moves the view, not the cursor, by `by` rows; the draw stops it at the ends and brings
+    /// the cursor into it (D265).
     fn scroll_by(&mut self, by: isize) {
-        let total = self.tree().rows().len();
-        let rows = self.body_rows;
+        let max = self.bar.map_or(usize::MAX, |(_, bar)| bar.max);
         let screen = self.view_mut();
-        screen.scroll = screen
-            .scroll
-            .saturating_add_signed(by)
-            .min(total.saturating_sub(rows));
+        screen.scroll = screen.scroll.saturating_add_signed(by).min(max);
+        screen.scrolled = true;
+    }
+
+    /// A press on the scroll bar at terminal row `row`: on the thumb it grabs it where it was
+    /// pressed; elsewhere the thumb jumps under the pointer, centered, and is held there.
+    fn press_bar(&mut self, row: u16) {
+        let Some((track, bar)) = self.bar else {
+            return;
+        };
+        let at = usize::from(row.saturating_sub(track.y));
+        let (top, len) = (bar.thumb_top(), bar.thumb_len());
+        self.grab = Some(if (top..top + len).contains(&at) {
+            at - top
+        } else {
+            len / 2
+        });
+        self.drag_bar(row);
+    }
+
+    /// The held thumb follows the pointer at terminal row `row`.
+    fn drag_bar(&mut self, row: u16) {
+        let (Some((track, bar)), Some(grab)) = (self.bar, self.grab) else {
+            return;
+        };
+        let top = i32::from(row) - i32::from(track.y) - i32::try_from(grab).unwrap_or(0);
+        let top = isize::try_from(top).unwrap_or(0);
+        let screen = self.view_mut();
+        screen.scroll = bar.scroll_for(top);
+        screen.scrolled = true;
     }
 
     // ---- Actions (D241 (3)) ----
@@ -3256,6 +3301,105 @@ mod tests {
             app.tree().current().map(|s| &s.item),
             Some(Item::Commit { index: 1 })
         ));
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16, now: Instant) {
+        app.on_mouse_at(
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            now,
+        );
+        crate::draw::tests::screen(app);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_past_the_cursor_and_carries_it_along() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "?", now);
+        crate::draw::tests::screen(&mut app);
+        assert_eq!(app.tree().cursor_index(), Some(0));
+        for _ in 0..5 {
+            mouse(&mut app, MouseEventKind::ScrollDown, 10, 5, now);
+        }
+        // The view went on although the cursor's row left it; the cursor came along onto
+        // the first row shown.
+        assert_eq!(app.view().scroll, 15);
+        assert_eq!(app.tree().cursor_index(), Some(15));
+        for _ in 0..2 {
+            mouse(&mut app, MouseEventKind::ScrollUp, 10, 5, now);
+        }
+        assert_eq!(app.view().scroll, 9);
+        assert_eq!(
+            app.tree().cursor_index(),
+            Some(15),
+            "still on screen: it stays"
+        );
+        // A key moves the cursor, and the view follows it again.
+        key(&mut app, "G", now);
+        crate::draw::tests::screen(&mut app);
+        let (_, bar) = app.bar.expect("the keys overflow the screen");
+        assert_eq!(app.view().scroll, bar.max);
+        for _ in 0..100 {
+            mouse(&mut app, MouseEventKind::ScrollDown, 10, 5, now);
+        }
+        assert_eq!(app.view().scroll, bar.max, "the view stops at the end");
+    }
+
+    #[test]
+    fn the_scroll_bar_shows_where_the_view_is_and_its_thumb_drags_it() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "?", now);
+        let drawn = crate::draw::tests::screen(&mut app);
+        let (track, bar) = app.bar.expect("the keys overflow the screen");
+        // The last column, at the top.
+        assert_eq!(track.x, 99);
+        let first: Vec<&str> = drawn.lines().collect();
+        assert!(first[0].ends_with('█'), "{drawn}");
+        assert!(
+            !first[usize::from(track.height) - 1].ends_with('█'),
+            "{drawn}"
+        );
+        // A press on the track below the thumb jumps there; the thumb then follows the
+        // pointer while the button is held.
+        let bottom = track.y + track.height - 1;
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            99,
+            bottom,
+            now,
+        );
+        assert_eq!(app.view().scroll, bar.max);
+        let drawn = crate::draw::tests::screen(&mut app);
+        let lines: Vec<&str> = drawn.lines().collect();
+        assert!(lines[usize::from(bottom)].ends_with('█'), "{drawn}");
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            40,
+            0,
+            now,
+        );
+        assert_eq!(app.view().scroll, 0);
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 40, 0, now);
+        // The cursor was carried along and is on screen; a drag over the rows now selects
+        // again instead of moving the thumb.
+        let cursor = app.tree().cursor_index().unwrap_or_default();
+        assert!(cursor < usize::from(track.height), "{cursor}");
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            40,
+            3,
+            now,
+        );
+        assert_eq!(app.view().scroll, 0);
     }
 
     #[test]

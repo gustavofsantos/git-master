@@ -15,6 +15,7 @@ mod palette;
 mod picker;
 mod review_screens;
 mod reviews;
+mod scrollbar;
 mod status;
 mod terminal;
 mod threads;

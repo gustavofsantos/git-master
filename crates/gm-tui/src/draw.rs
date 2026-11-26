@@ -28,6 +28,7 @@ use crate::nav::prompt::Answer;
 use crate::nav::sections::Row;
 use crate::palette::{self, Tints};
 use crate::reviews::Turn;
+use crate::scrollbar::Bar;
 use crate::status::{self, Item, LineChange, Mark};
 use crate::threads::TYPES;
 use crate::ui::{App, Click, Hit, MIN_HEIGHT, MIN_WIDTH, Overlay};
@@ -35,6 +36,9 @@ use crate::ui::{App, Click, Hit, MIN_HEIGHT, MIN_WIDTH, Overlay};
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 const ON: Style = Style::new().add_modifier(Modifier::REVERSED);
+/// The scroll bar's thumb (D265).
+const THUMB: Style = Style::new().fg(Color::Gray);
+const SCROLL_THUMB: &str = "█";
 /// The mark of a line a review thread covers.
 const THREAD_BAR: &str = "┃";
 /// The File screen's change signs (D258 (11)), (not staged, staged): a bar for an added or
@@ -162,31 +166,68 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 // ---- The screen's rows ----
 
-fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
-    let height = usize::from(body.height);
-    let rows = app.view().tree.rows();
-    let cursor = app.view().tree.cursor_index().unwrap_or(0);
-    let selection = app.view().tree.selection();
-    let width = usize::from(body.width);
-    // A line of code, of a file or a diff, may wrap over several terminal lines (D258 (10),
-    // D261); every other row is one.
+/// Where the screen's rows start, how far they can, and where the cursor has to go.
+struct Placement {
+    scroll: usize,
+    /// The furthest start: the last rows fill the screen from it.
+    max: usize,
+    /// The row the cursor is carried to, when the mouse moved the view off it (D265).
+    carry: Option<usize>,
+}
+
+/// How many terminal lines `row` takes, `width` columns wide: a line of code, of a file or a
+/// diff, may wrap over several (D258 (10), D261); every other row is one.
+fn row_height(app: &App, row: &Row<'_, Item>, width: usize) -> usize {
     let wrap = app.wraps();
-    let row_height = |row: &Row<'_, Item>| match &row.section.item {
+    match &row.section.item {
         Item::FileLine { index, .. } if wrap => file_line_height(app, *index, width - 1),
         Item::Line { .. } | Item::Pair { .. } if wrap => {
             code_rows(app, row, false, width - 1, wrap).map_or(1, |lines| lines.len())
         }
         _ => 1,
-    };
-    // Keep the cursor on screen: the lowest start that still shows the cursor's row whole.
-    let mut scroll = app.view().scroll.min(rows.len().saturating_sub(1));
-    if cursor < scroll {
+    }
+}
+
+/// Places the top screen's rows in `height` lines of `width` columns. After a cursor move the
+/// view follows the cursor, showing its row whole; after the mouse moved the view, the view
+/// stays and the cursor is carried onto the nearest row shown whole (D265).
+fn place_rows(app: &App, height: usize, width: usize) -> Placement {
+    let rows = app.view().tree.rows();
+    let cursor = app.view().tree.cursor_index().unwrap_or(0);
+    let height_of = |row: &Row<'_, Item>| row_height(app, row, width);
+    let mut max = rows.len();
+    let mut used = 0;
+    while max > 0 {
+        let above = height_of(&rows[max - 1]);
+        if used + above > height {
+            break;
+        }
+        used += above;
+        max -= 1;
+    }
+    let mut scroll = app.view().scroll.min(max);
+    let mut carry = None;
+    if app.view().scrolled {
+        let mut last = scroll;
+        let mut used = 0;
+        for (index, row) in rows.iter().enumerate().skip(scroll) {
+            used += height_of(row);
+            if used > height {
+                break;
+            }
+            last = index;
+        }
+        let into = cursor.clamp(scroll, last.max(scroll));
+        if into != cursor && into < rows.len() {
+            carry = Some(into);
+        }
+    } else if cursor < scroll {
         scroll = cursor;
     } else if let Some(cursor_row) = rows.get(cursor) {
         let mut lowest = cursor;
-        let mut used = row_height(cursor_row);
+        let mut used = height_of(cursor_row);
         while lowest > 0 {
-            let above = row_height(&rows[lowest - 1]);
+            let above = height_of(&rows[lowest - 1]);
             if used + above > height {
                 break;
             }
@@ -195,6 +236,32 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
         }
         scroll = scroll.max(lowest);
     }
+    Placement { scroll, max, carry }
+}
+
+fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
+    // The last column is the scroll bar's (D265).
+    let track = Rect {
+        x: body.x + body.width.saturating_sub(1),
+        width: 1,
+        ..body
+    };
+    let body = Rect {
+        width: body.width.saturating_sub(1),
+        ..body
+    };
+    let height = usize::from(body.height);
+    let width = usize::from(body.width);
+    let wrap = app.wraps();
+    let place = place_rows(app, height, width);
+    if let Some(into) = place.carry {
+        app.view_mut().tree.move_to(into);
+    }
+    let Placement { scroll, max, .. } = place;
+    let rows = app.view().tree.rows();
+    let cursor = app.view().tree.cursor_index().unwrap_or(0);
+    let selection = app.view().tree.selection();
+    let rows_len = rows.len();
     let mut lines: Vec<Line> = Vec::with_capacity(height);
     let mut hits = Vec::new();
     // The tinted spans of each row (D250), when the terminal gave tints.
@@ -262,8 +329,44 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     for (area, tint) in backgrounds {
         buffer.set_style(area.intersection(body), Style::new().bg(tint.color()));
     }
+    let shown = hits.len();
     app.hits.extend(hits);
-    app.view_mut().scroll = scroll;
+    let view = app.view_mut();
+    view.scroll = scroll;
+    view.scrolled = false;
+    let bar = Bar {
+        height,
+        total: rows_len,
+        shown,
+        scroll,
+        max,
+    };
+    draw_bar(frame, app, track, bar);
+}
+
+/// The scroll bar (D265), when there is something to scroll: the thumb, as long as the share
+/// of the rows on screen, on an empty track. It takes clicks over the rows.
+fn draw_bar(frame: &mut Frame, app: &mut App, track: Rect, bar: Bar) {
+    app.bar = None;
+    if !bar.needed() {
+        return;
+    }
+    app.bar = Some((track, bar));
+    app.hits.push(Hit {
+        area: track,
+        click: Click::Bar,
+    });
+    let (top, len) = (bar.thumb_top(), bar.thumb_len());
+    let lines: Vec<Line> = (0..bar.height)
+        .map(|at| {
+            if (top..top + len).contains(&at) {
+                Line::styled(SCROLL_THUMB, THUMB)
+            } else {
+                Line::raw(" ")
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), track);
 }
 
 /// The terminal lines of a diff line row, Unified or Split, wrapped or cut; `None` for any
