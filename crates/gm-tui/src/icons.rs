@@ -26,6 +26,10 @@ pub const OUTDATED: &str = "\u{f071}";
 pub const AGENT: &str = "\u{f06a9}";
 /// `nf-fa-check`: a tool call that ended well.
 pub const CALL_DONE: &str = "\u{f00c}";
+/// `nf-fa-lightbulb_o`: a tip in the banner.
+pub const TIP: &str = "\u{f0eb}";
+/// `nf-fa-times`: the banner's close button.
+pub const CLOSE: &str = "\u{f00d}";
 /// `nf-fa-times`: a tool call that failed.
 pub const CALL_FAILED: &str = "\u{f00d}";
 /// `nf-fa-clock_o`: a tool call with no result recorded.

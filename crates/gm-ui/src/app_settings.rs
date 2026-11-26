@@ -53,6 +53,7 @@ impl From<&AppSettings> for Settings {
             author_pictures: app.author_pictures,
             // The window has no line wrap control; saving never writes the key.
             line_wrap: None,
+            tips: None,
             threads: app.threads.clone(),
         }
     }

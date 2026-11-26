@@ -10,6 +10,7 @@
 //! | `gitmaster.diffLayout` | `unified` (default) or `split` |
 //! | `gitmaster.authorPictures` | boolean, default off |
 //! | `gitmaster.lineWrap` | boolean, default on: the terminal companion's File screen wraps long lines |
+//! | `gitmaster.tips` | boolean, default on: the terminal companion shows a tip when it starts |
 //! | `gitmaster.threads.capture` | boolean, default on |
 //! | `gitmaster.threads.maxResultBytes` | integer |
 //! | `gitmaster.threads.redactBuiltin` | boolean, default on |
@@ -51,6 +52,9 @@ pub struct Settings {
     /// Whether the terminal companion's File screen wraps long lines; `None` when no layer
     /// sets it, which wraps. Read only: the app has no control that writes it.
     pub line_wrap: Option<bool>,
+    /// Whether the terminal companion shows a tip when it starts; `None` when no layer sets
+    /// it, which shows them. Read only, like `line_wrap`.
+    pub tips: Option<bool>,
     pub threads: ThreadsConfig,
 }
 
@@ -115,6 +119,9 @@ impl Settings {
                 }
                 "gitmaster.linewrap" => {
                     settings.line_wrap = Some(boolean(value, settings.line_wrap.unwrap_or(true)));
+                }
+                "gitmaster.tips" => {
+                    settings.tips = Some(boolean(value, settings.tips.unwrap_or(true)));
                 }
                 "gitmaster.threads.capture" => {
                     settings.threads.capture = boolean(value, settings.threads.capture);
@@ -189,6 +196,7 @@ impl Settings {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             line_wrap: None,
+            tips: None,
             threads: ThreadsConfig::from_settings(&document),
         }
     }
@@ -512,6 +520,13 @@ mod tests {
             "gitmaster.linewrap=false\ngitmaster.linewrap=true",
         ));
         assert_eq!(on.line_wrap, Some(true));
+    }
+
+    #[test]
+    fn tips_are_on_until_a_layer_turns_them_off() {
+        assert_eq!(Settings::default().tips, None);
+        let off = Settings::from_entries(&entries("gitmaster.tips=false"));
+        assert_eq!(off.tips, Some(false));
     }
 
     #[test]

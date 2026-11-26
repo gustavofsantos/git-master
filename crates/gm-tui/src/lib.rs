@@ -19,6 +19,7 @@ mod scrollbar;
 mod status;
 mod terminal;
 mod threads;
+mod tips;
 mod ui;
 
 use std::io::{self, IsTerminal};
@@ -140,6 +141,26 @@ pub fn open(path: &Path) -> Result<Opened, String> {
     })
 }
 
+/// The preferences the companion reads at start (configuration.md): the diff layout, line
+/// wrap and the tip (D252 (2), D258 (10), D267).
+fn apply_settings(app: &mut App, root: &std::path::Path) {
+    // The layout the app uses, for this session only (D252 (2)).
+    let settings = gm_core::settings::Settings::load(root, &gm_core::settings::Source::default());
+    if settings.diff_layout == gm_core::settings::DiffLayout::Split {
+        app.layout = gm_view::diff_rows::Layout::Split;
+    }
+    if settings.line_wrap == Some(false) {
+        app.wrap = crate::ui::LineWrap::Cut;
+    }
+    // A tip at each start, unless turned off (D267); the time picks which.
+    if settings.tips != Some(false) {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        app.show_tip(seed);
+    }
+}
+
 fn run(opened: Opened) -> io::Result<()> {
     let Opened {
         engine,
@@ -152,14 +173,7 @@ fn run(opened: Opened) -> io::Result<()> {
     let mut screen = Screen::take()?;
     let root = std::path::PathBuf::from(&status.root);
     let mut app = App::new(status);
-    // The layout the app uses, for this session only (D252 (2)).
-    let settings = gm_core::settings::Settings::load(&root, &gm_core::settings::Source::default());
-    if settings.diff_layout == gm_core::settings::DiffLayout::Split {
-        app.layout = gm_view::diff_rows::Layout::Split;
-    }
-    if settings.line_wrap == Some(false) {
-        app.wrap = crate::ui::LineWrap::Cut;
-    }
+    apply_settings(&mut app, &root);
     loop {
         // A prompt's keys light up when its guard opens (D242 (5)).
         if app.guard_closed(std::time::Instant::now()) {

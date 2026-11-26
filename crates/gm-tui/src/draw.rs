@@ -130,10 +130,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
     app.fit_layout(size.width);
+    // The banner, while there is one, takes the row above the mode line (D267).
+    let banner = u16::from(app.banner.is_some());
     let body = Rect {
-        height: size.height - 2,
+        height: size.height - 2 - banner,
         ..size
     };
+    if banner > 0 {
+        draw_banner(
+            frame,
+            app,
+            Rect {
+                y: size.y + size.height - 3,
+                height: 1,
+                ..size
+            },
+        );
+    }
     app.body_rows = usize::from(body.height);
     draw_rows(frame, app, body);
     draw_mode_line(
@@ -1572,6 +1585,34 @@ fn draw_mode_line(frame: &mut Frame, app: &mut App, area: Rect) {
     strip.render(frame, &mut app.hits);
 }
 
+/// The banner (D267): its label and text on a soft background, cut to fit, and a close button
+/// at the right edge.
+fn draw_banner(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(banner) = app.banner.clone() else {
+        return;
+    };
+    let close = format!(" {} ", icons::CLOSE);
+    let room = usize::from(area.width).saturating_sub(close.chars().count() + 1);
+    let label = format!(" {} {} ", icons::TIP, banner.label);
+    let text: String = format!(" {}", banner.text)
+        .chars()
+        .take(room.saturating_sub(label.chars().count()))
+        .collect();
+    let used = label.chars().count() + text.chars().count();
+    let mut strip = Strip::new(area);
+    strip
+        .text(label, color(Color::Yellow).add_modifier(Modifier::BOLD))
+        .text(text, Style::new())
+        .text(" ".repeat(room.saturating_sub(used) + 1), Style::new())
+        .click(close, DIM, Click::CloseBanner);
+    strip.render(frame, &mut app.hits);
+    if let Some(tints) = palette::tints() {
+        frame
+            .buffer_mut()
+            .set_style(area, Style::new().bg(tints.cursor.color()));
+    }
+}
+
 fn draw_hint_line(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut strip = Strip::new(area);
     if let Some(notice) = app.notice.as_ref().or(app.watch_notice.as_ref()) {
@@ -2041,6 +2082,53 @@ pub(crate) mod tests {
         let cell = &terminal.backend().buffer()[(9, 1)];
         assert_eq!(cell.symbol(), "L");
         assert!(cell.modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn a_tip_shows_in_a_banner_above_the_mode_line_until_it_is_closed() {
+        let mut app = app();
+        let plain = screen(&mut app);
+        let rows = app.body_rows;
+        app.show_tip(0);
+        let shown = screen(&mut app);
+        let lines: Vec<&str> = shown.lines().collect();
+        assert!(
+            lines[27].contains("Tip") && lines[27].contains("g b on a line"),
+            "{shown}"
+        );
+        assert!(lines[27].trim_end().ends_with(icons::CLOSE), "{shown}");
+        assert!(lines[28].contains("NORMAL"), "{shown}");
+        assert_eq!(
+            app.body_rows,
+            rows - 1,
+            "the banner takes a row of the body"
+        );
+        // Esc on Status, with nothing to go back from, closes it; the row comes back.
+        crate::ui::tests::key(&mut app, "<esc>", std::time::Instant::now());
+        assert_eq!(app.banner, None);
+        assert_eq!(screen(&mut app), plain);
+        assert_eq!(app.body_rows, rows);
+        // A click on its close button closes it too.
+        app.show_tip(1);
+        screen(&mut app);
+        let close = app
+            .hits
+            .iter()
+            .find(|hit| hit.click == Click::CloseBanner)
+            .map(|hit| hit.area)
+            .expect("the close button is clickable");
+        app.on_mouse_at(
+            ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Down(
+                    ratatui::crossterm::event::MouseButton::Left,
+                ),
+                column: close.x + 1,
+                row: close.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            std::time::Instant::now(),
+        );
+        assert_eq!(app.banner, None);
     }
 
     #[test]

@@ -197,6 +197,10 @@ Long lines wrap: the rest of a line continues on the next rows, under the code, 
 
 **Agent thread** (`Enter` on an agent thread, one of its edits or a linked thread on **Origin**) shows a captured agent session, read as the app's **Threads** page reads it, by sections: the **Request**, the **Decisions** (questions the agent asked you and your answers), the **Changes** to each file with their patches, the **Runs** of commands, how they ended, how long they took and their output, the **Files read**, and the **Timeline** of turns, folded, with every message and tool call in order. `g f` and `g b` on a changed file open it on **File** and **Blame**. The thread's text is shown as plain text, a line per row; long outputs and patches show their first 40 lines, and a session of more than 5,000 entries shows its first 5,000.
 
+## Tips
+
+Each time the companion starts, a banner above the mode line shows a tip: something it can do that is easy to miss, such as `g b` to see who last changed a line or `Space w` to see how lines got where they are. A tip names the keys of your own key map, and a tip for an action you left without a key is not shown. Click `✕` at the end of the banner to close it, or press `Esc` on **Status** when there is nothing else to go back from; the banner takes no room once it is closed. To stop the tips, set `gitmaster.tips` to `false` (`git config --global gitmaster.tips false`; see [Configuration](../reference/configuration.md)).
+
 ## Your own keys
 
 > **Planned.** A key map of your own is not available yet.

@@ -201,6 +201,17 @@ pub enum Click {
     Pick(usize),
     /// The scroll bar: a press on its thumb grabs it, elsewhere on it jumps there (D265).
     Bar,
+    /// The banner's close button (D267).
+    CloseBanner,
+}
+
+/// A line of news above the mode line, such as the tip shown at start (D267). It stays until
+/// closed, and takes no room once it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Banner {
+    /// What kind of news it is, shown first: `Tip`.
+    pub label: &'static str,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -322,6 +333,8 @@ pub struct App {
     /// The last search.
     pub search: Option<String>,
     pub notice: Option<String>,
+    /// The banner above the mode line, until it is closed (D267).
+    pub banner: Option<Banner>,
     pub watch_notice: Option<String>,
     /// Rows of the screen's body, as the last draw had them, for moving half a screen.
     pub body_rows: usize,
@@ -385,6 +398,7 @@ impl App {
             quit: false,
             dirty: true,
             drag_from: None,
+            banner: None,
             bar: None,
             grab: None,
             reveal: None,
@@ -461,6 +475,15 @@ impl App {
     }
 
     /// Shows `text` on the hint line.
+    /// Shows a tip in the banner, chosen by `seed` from those whose actions have keys (D267).
+    pub fn show_tip(&mut self, seed: u64) {
+        self.banner = self
+            .input
+            .map(crate::nav::Mode::Normal)
+            .and_then(|map| crate::tips::pick(seed, map))
+            .map(|text| Banner { label: "Tip", text });
+    }
+
     pub fn notify(&mut self, text: String) {
         self.notice = Some(text);
         self.dirty = true;
@@ -1338,6 +1361,7 @@ impl App {
                     }
                 }
                 Some(Click::Bar) => self.press_bar(mouse.row),
+                Some(Click::CloseBanner) => self.banner = None,
                 None => return,
             },
             MouseEventKind::Drag(MouseButton::Left) if self.grab.is_some() => {
@@ -1551,8 +1575,13 @@ impl App {
             "screen.back" | "screen.close" => {
                 if self.tree().selection().is_some() {
                     self.tree_mut().clear_selection();
-                } else if !self.stack.back() && name == "screen.close" {
-                    self.quit = true;
+                } else if !self.stack.back() {
+                    // On the first screen, `q` quits and `Esc` closes the banner (D267).
+                    if name == "screen.close" {
+                        self.quit = true;
+                    } else {
+                        self.banner = None;
+                    }
                 }
             }
             "search.start" => self.overlays.push(Overlay::Search {
@@ -2401,7 +2430,7 @@ fn description(branch: &str, text: Option<&str>) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
 
@@ -2468,7 +2497,7 @@ mod tests {
         }
     }
 
-    fn key(app: &mut App, keys: &str, now: Instant) {
+    pub(crate) fn key(app: &mut App, keys: &str, now: Instant) {
         for key in crate::nav::keys::parse_sequence(keys).unwrap() {
             let code = match key.code {
                 Code::Char(c) => KeyCode::Char(c),
