@@ -23,4 +23,5 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm"]
 rustix = { version = "1", features = ["event", "stdio"] }
 
 [dev-dependencies]
+proptest.workspace = true
 tempfile.workspace = true

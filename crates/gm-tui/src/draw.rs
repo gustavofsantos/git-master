@@ -745,17 +745,15 @@ const FILE_GUTTER: usize = 9;
 /// How many terminal lines File line `index` takes when long lines wrap in `width` columns.
 fn file_line_height(app: &App, index: usize, width: usize) -> usize {
     let room = width.saturating_sub(FILE_GUTTER).max(1);
-    let columns = app
+    let chars = app
         .repo
         .file
         .as_ref()
         .and_then(|file| file.lines.get(index))
-        .map_or(0, |text| {
-            text.chars()
-                .map(|c| if c == '\t' { 4 } else { 1 })
-                .sum::<usize>()
+        .map_or_else(Vec::new, |text| {
+            text.replace('\t', "    ").chars().collect::<Vec<_>>()
         });
-    columns.div_ceil(room).max(1)
+    wrap_rows(&chars, room).len()
 }
 
 /// A line of the File screen (D258 (9)): the change bar, its number, the thread mark and
@@ -820,7 +818,8 @@ fn gutter_rows(
     let room = width.saturating_sub(FILE_GUTTER).max(1);
     let code = code_spans(text, colors, whole, if wrap { usize::MAX } else { room });
     let pieces = if wrap {
-        split_spans(code, room)
+        let chars: Vec<char> = code.iter().flat_map(|span| span.content.chars()).collect();
+        split_spans(code, &wrap_rows(&chars, room))
     } else {
         vec![code]
     };
@@ -872,24 +871,78 @@ fn change_sign(mark: Mark, first: bool, last: bool) -> Span<'static> {
     Span::styled(if staged { open } else { solid }, color(tint))
 }
 
-/// Cuts `spans` into lines of at most `room` characters each, keeping each piece's style.
-/// No span is empty; an empty input gives one empty line.
-fn split_spans(spans: Vec<Span<'static>>, room: usize) -> Vec<Vec<Span<'static>>> {
-    let mut out: Vec<Vec<Span<'static>>> = vec![Vec::new()];
-    let mut left = room;
+/// The rows a line of `chars` wraps to in `room` columns, as `(start, end)` ranges of
+/// `chars`. A row ends at the end of a word and the spaces after it are not drawn, so words
+/// stay whole (D264); a word longer than `room` fills the row and is cut. A row is never
+/// wider than `room`, and there is always one row, empty for an empty line.
+pub(crate) fn wrap_rows(chars: &[char], room: usize) -> Vec<(usize, usize)> {
+    let room = room.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while chars.len() - start > room {
+        // The length of the word at or after `at`, past any spaces.
+        let word_at = |at: usize| {
+            chars[at..]
+                .iter()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| !c.is_whitespace())
+                .count()
+        };
+        let window = start + 1..=start + room;
+        // Best, the row ends with a word, and the word after fits a row of its own (else
+        // breaking before it would only waste this row). Next, the row is only the spaces
+        // before a word that fits (an indentation). Last, the row is cut.
+        let end = window
+            .clone()
+            .rev()
+            .find(|&at| {
+                !chars[at - 1].is_whitespace() && chars[at].is_whitespace() && word_at(at) <= room
+            })
+            .or_else(|| {
+                window.rev().find(|&at| {
+                    chars[at - 1].is_whitespace()
+                        && !chars[at].is_whitespace()
+                        && word_at(at) <= room
+                })
+            })
+            .unwrap_or(start + room);
+        rows.push((start, end));
+        start = end;
+        if chars[end].is_whitespace() {
+            while start < chars.len() && chars[start].is_whitespace() {
+                start += 1;
+            }
+            if start == chars.len() {
+                return rows;
+            }
+        }
+    }
+    rows.push((start, chars.len()));
+    rows
+}
+
+/// Cuts `spans` into the `rows` of [`wrap_rows`], keeping each piece's style; the characters
+/// between rows (the spaces at a break) are left out. No span is empty.
+fn split_spans(spans: Vec<Span<'static>>, rows: &[(usize, usize)]) -> Vec<Vec<Span<'static>>> {
+    let mut out: Vec<Vec<Span<'static>>> = vec![Vec::new(); rows.len().max(1)];
+    let mut row = 0;
+    let mut at = 0;
     for span in spans {
-        let style = span.style;
-        let mut chars = span.content.chars().peekable();
-        while chars.peek().is_some() {
-            if left == 0 {
-                out.push(Vec::new());
-                left = room;
+        let mut piece = String::new();
+        for c in span.content.chars() {
+            while rows.get(row).is_some_and(|&(_, end)| at >= end) {
+                if !piece.is_empty() {
+                    out[row].push(Span::styled(std::mem::take(&mut piece), span.style));
+                }
+                row += 1;
             }
-            let piece: String = chars.by_ref().take(left).collect();
-            left -= piece.chars().count();
-            if let Some(line) = out.last_mut() {
-                line.push(Span::styled(piece, style));
+            if rows.get(row).is_some_and(|&(start, _)| at >= start) {
+                piece.push(c);
             }
+            at += 1;
+        }
+        if let Some(line) = out.get_mut(row).filter(|_| !piece.is_empty()) {
+            line.push(Span::styled(piece, span.style));
         }
     }
     out
@@ -1750,6 +1803,76 @@ pub(crate) mod tests {
                 submodule: None,
             }],
         })
+    }
+
+    fn wrapped(text: &str, room: usize) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        wrap_rows(&chars, room)
+            .into_iter()
+            .map(|(start, end)| chars[start..end].iter().collect())
+            .collect()
+    }
+
+    #[test]
+    fn wrap_breaks_between_words_and_drops_the_spaces_at_the_break() {
+        assert_eq!(wrapped("one two three", 7), ["one two", "three"]);
+        assert_eq!(
+            wrapped("let value = compute(a, b);", 12),
+            ["let value =", "compute(a,", "b);"]
+        );
+        assert_eq!(wrapped("abc   ", 3), ["abc"]);
+        assert_eq!(wrapped("    indented words", 12), ["    indented", "words"]);
+        assert_eq!(wrapped("", 5), [""]);
+        assert_eq!(wrapped("fits", 5), ["fits"]);
+        assert_eq!(wrapped("  ab", 3), ["  ", "ab"]);
+    }
+
+    #[test]
+    fn wrap_cuts_a_word_longer_than_a_row_without_wasting_the_row_before_it() {
+        assert_eq!(wrapped("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrapped("ab cdefghijk", 4), ["ab c", "defg", "hijk"]);
+        assert_eq!(wrapped("ab cdef", 4), ["ab", "cdef"]);
+    }
+
+    #[test]
+    fn split_spans_follows_the_rows_and_keeps_styles() {
+        let spans = vec![
+            Span::styled("one ", BOLD),
+            Span::raw("two"),
+            Span::styled(" three", DIM),
+        ];
+        let rows = wrap_rows(&"one two three".chars().collect::<Vec<_>>(), 7);
+        let out = split_spans(spans, &rows);
+        assert_eq!(
+            out,
+            [
+                vec![Span::styled("one ", BOLD), Span::raw("two")],
+                vec![Span::styled("three", DIM)],
+            ]
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn wrapped_rows_fit_and_keep_every_word(text in "[a-z ]{0,80}", room in 1usize..20) {
+            let rows = wrapped(&text, room);
+            proptest::prop_assert!(!rows.is_empty());
+            for row in &rows {
+                proptest::prop_assert!(row.chars().count() <= room);
+            }
+            let joined: String = rows.concat();
+            proptest::prop_assert_eq!(
+                joined.split_whitespace().collect::<String>(),
+                text.split_whitespace().collect::<String>()
+            );
+            // A word that fits a row is never split.
+            for word in text.split_whitespace().filter(|w| w.len() <= room) {
+                proptest::prop_assert!(
+                    rows.iter().any(|row| row.split_whitespace().any(|w| w == word)),
+                    "{} split in {:?}", word, rows
+                );
+            }
+        }
     }
 
     #[test]
