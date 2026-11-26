@@ -10,6 +10,7 @@
 //! | `gitmaster.diffLayout` | `unified` (default) or `split` |
 //! | `gitmaster.authorPictures` | boolean, default off |
 //! | `gitmaster.lineWrap` | boolean, default on: the terminal companion's File screen wraps long lines |
+//! | `gitmaster.images` | `auto` (default), `kitty` or `off`: images in the terminal companion |
 //! | `gitmaster.tips` | boolean, default on: the terminal companion shows a tip when it starts |
 //! | `gitmaster.threads.capture` | boolean, default on |
 //! | `gitmaster.threads.maxResultBytes` | integer |
@@ -42,6 +43,18 @@ pub enum DiffLayout {
     Split,
 }
 
+/// What `gitmaster.images` asks of the terminal companion (D268).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalImages {
+    /// Images where the terminal is known to draw them.
+    #[default]
+    Auto,
+    /// Images whatever the terminal seems to be.
+    Kitty,
+    /// No images: a line of text names them.
+    Off,
+}
+
 /// The preferences the app keeps. Each field has its default when no layer sets it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Settings {
@@ -55,6 +68,8 @@ pub struct Settings {
     /// Whether the terminal companion shows a tip when it starts; `None` when no layer sets
     /// it, which shows them. Read only, like `line_wrap`.
     pub tips: Option<bool>,
+    /// Whether the terminal companion draws images. Read only, like `line_wrap`.
+    pub images: TerminalImages,
     pub threads: ThreadsConfig,
 }
 
@@ -119,6 +134,13 @@ impl Settings {
                 }
                 "gitmaster.linewrap" => {
                     settings.line_wrap = Some(boolean(value, settings.line_wrap.unwrap_or(true)));
+                }
+                "gitmaster.images" => {
+                    settings.images = match value.map(str::to_ascii_lowercase).as_deref() {
+                        Some("kitty" | "on" | "true" | "yes") => TerminalImages::Kitty,
+                        Some("off" | "false" | "no" | "none") => TerminalImages::Off,
+                        _ => TerminalImages::Auto,
+                    };
                 }
                 "gitmaster.tips" => {
                     settings.tips = Some(boolean(value, settings.tips.unwrap_or(true)));
@@ -197,6 +219,7 @@ impl Settings {
                 .unwrap_or(false),
             line_wrap: None,
             tips: None,
+            images: TerminalImages::Auto,
             threads: ThreadsConfig::from_settings(&document),
         }
     }
@@ -520,6 +543,18 @@ mod tests {
             "gitmaster.linewrap=false\ngitmaster.linewrap=true",
         ));
         assert_eq!(on.line_wrap, Some(true));
+    }
+
+    #[test]
+    fn images_are_auto_until_a_layer_asks_for_kitty_or_off() {
+        assert_eq!(Settings::default().images, TerminalImages::Auto);
+        let read = |text| Settings::from_entries(&entries(text)).images;
+        assert_eq!(read("gitmaster.images=kitty"), TerminalImages::Kitty);
+        assert_eq!(read("gitmaster.images=OFF"), TerminalImages::Off);
+        assert_eq!(
+            read("gitmaster.images=off\ngitmaster.images=auto"),
+            TerminalImages::Auto
+        );
     }
 
     #[test]

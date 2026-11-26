@@ -17,6 +17,10 @@ async-channel.workspace = true
 # The crossterm backend only (D235); crossterm itself is used through `ratatui::crossterm`,
 # so its version always matches the one ratatui draws with.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+# Images on the terminal (D268): sent as PNG in base64; other formats are decoded and
+# shrunk first. Formats are the ones the File screen and the diffs show.
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [target.'cfg(unix)'.dependencies]
 # Waits for the terminal's answer to the palette query with a deadline (D250).

@@ -259,6 +259,12 @@ pub fn file(repo: &Repo, path: &str, opened: Opened) -> Vec<Section<Item>> {
     let Some(file) = repo.file.as_ref().filter(|file| file.path == path) else {
         return vec![note("Reading the file…")];
     };
+    if file.binary && crate::images::is_image(path) {
+        return vec![Section::leaf(
+            "image",
+            Item::Image((path.to_owned(), gm_schema::ImageAt::Worktree)),
+        )];
+    }
     if let Some(text) = &file.note {
         return vec![note(text)];
     }

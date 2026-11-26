@@ -10,6 +10,9 @@ mod diff_screen;
 mod draw;
 mod help;
 mod icons;
+mod image_rows;
+mod images;
+mod kitty;
 mod nav;
 mod palette;
 mod picker;
@@ -152,12 +155,36 @@ fn apply_settings(app: &mut App, root: &std::path::Path) {
     if settings.line_wrap == Some(false) {
         app.wrap = crate::ui::LineWrap::Cut;
     }
+    // Images where the terminal draws them, unless turned off (D268).
+    let wanted = match settings.images {
+        gm_core::settings::TerminalImages::Auto => kitty::Wanted::Auto,
+        gm_core::settings::TerminalImages::Kitty => kitty::Wanted::Kitty,
+        gm_core::settings::TerminalImages::Off => kitty::Wanted::Off,
+    };
+    app.graphics = kitty::detect(wanted, |name| std::env::var(name).ok());
+    app.cell_px = cell_pixels();
     // A tip at each start, unless turned off (D267); the time picks which.
     if settings.tips != Some(false) {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
         app.show_tip(seed);
+    }
+}
+
+/// Takes back what the colorer and the image decoder finished, and hands them their new jobs.
+fn pump(app: &mut App, colorer: &mut Colorer, decoder: &images::Decoder) {
+    while let Ok((job, spans)) = colorer.done.try_recv() {
+        app.colored(&job, &spans);
+    }
+    for job in app.take_color_jobs() {
+        colorer.color(job);
+    }
+    for job in app.take_decode_jobs() {
+        decoder.decode(job);
+    }
+    while let Ok((key, hash, result)) = decoder.done.try_recv() {
+        app.decoded(key, hash, result);
     }
 }
 
@@ -170,6 +197,7 @@ fn run(opened: Opened) -> io::Result<()> {
         notices,
     } = opened;
     let mut colorer = Colorer::start()?;
+    let decoder = images::Decoder::start()?;
     let mut screen = Screen::take()?;
     let root = std::path::PathBuf::from(&status.root);
     let mut app = App::new(status);
@@ -193,7 +221,10 @@ fn run(opened: Opened) -> io::Result<()> {
                         watch.request();
                         app.redraw();
                     }
-                    Input::Resize(..) => app.redraw(),
+                    Input::Resize(..) => {
+                        app.cell_px = cell_pixels();
+                        app.redraw();
+                    }
                     Input::Paste(text) => app.on_paste(&text),
                     Input::FocusLost => {}
                 }
@@ -214,15 +245,10 @@ fn run(opened: Opened) -> io::Result<()> {
                 Notice::Refreshing(_) => {}
             }
         }
-        while let Ok((job, spans)) = colorer.done.try_recv() {
-            app.colored(&job, &spans);
-        }
+        pump(&mut app, &mut colorer, &decoder);
         for kind in app.take_commands() {
             let id = engine.dispatch(Actor::Human, kind.clone());
             app.sent(id, &kind);
-        }
-        for job in app.take_color_jobs() {
-            colorer.color(job);
         }
         for request in app.take_requests() {
             match request {
@@ -241,6 +267,7 @@ fn run(opened: Opened) -> io::Result<()> {
                     app.redraw();
                 }
                 Request::Copy(text) => copy(&text)?,
+                Request::Graphics(text) => graphics(&text)?,
                 Request::Edit { path, line } => {
                     // The editor takes the terminal; the companion takes it back after.
                     drop(screen);
@@ -254,6 +281,12 @@ fn run(opened: Opened) -> io::Result<()> {
             }
         }
         if app.quit {
+            // The terminal frees the images this companion sent (D268).
+            if let Some(support) = app.graphics {
+                for id in &app.image_ids {
+                    graphics(&kitty::delete(support, *id))?;
+                }
+            }
             return Ok(());
         }
     }
@@ -279,6 +312,28 @@ fn edit(path: &str, line: u32) -> io::Result<()> {
         .arg(path)
         .status()
         .map(|_| ())
+}
+
+/// Writes graphics commands to the terminal, between two draws (D268).
+fn graphics(text: &str) -> io::Result<()> {
+    use std::io::Write as _;
+    let mut out = io::stdout().lock();
+    out.write_all(text.as_bytes())?;
+    out.flush()
+}
+
+/// The size of a terminal cell in pixels, as the terminal reports it; 8 by 16 when it does not
+/// (tmux may not), the usual shape.
+fn cell_pixels() -> (u16, u16) {
+    ratatui::crossterm::terminal::window_size()
+        .ok()
+        .filter(|size| size.width > 0 && size.height > 0 && size.columns > 0 && size.rows > 0)
+        .map_or((8, 16), |size| {
+            (
+                (size.width / size.columns).max(1),
+                (size.height / size.rows).max(1),
+            )
+        })
 }
 
 /// Puts `text` on the clipboard with OSC 52, which terminals and tmux pass on.

@@ -50,6 +50,13 @@ pub enum Item {
     },
     /// A line of the branch's description, under its head (D266).
     Description(String),
+    /// An image on the File screen, under its caption (D268).
+    Image(crate::images::ImageKey),
+    /// A changed image in a diff: before on the left, after on the right (D268).
+    ImagePair {
+        before: Option<crate::images::ImageKey>,
+        after: Option<crate::images::ImageKey>,
+    },
     Blank,
     Group {
         group: Group,
@@ -173,6 +180,15 @@ impl Item {
         match self {
             Item::Header { label, text } => format!("{label} {text}"),
             Item::Group { group, .. } => group.title().to_owned(),
+            Item::Image((path, _))
+            | Item::ImagePair {
+                after: Some((path, _)),
+                ..
+            }
+            | Item::ImagePair {
+                before: Some((path, _)),
+                ..
+            } => path.clone(),
             Item::File { path: text, .. }
             | Item::Description(text)
             | Item::Note(text)
@@ -423,6 +439,13 @@ pub fn file_children(
         return note("Reading the diff…");
     };
     if diff.binary {
+        if crate::images::is_image(path) {
+            let (before, after) = crate::images::pair(repo, group, path, diff.old_path.as_deref());
+            return vec![Section::leaf(
+                id("image", String::new()),
+                Item::ImagePair { before, after },
+            )];
+        }
         return note("Binary file: its contents are not shown.");
     }
     if diff.hunks.is_empty() {

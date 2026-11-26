@@ -232,6 +232,8 @@ pub enum Request {
         path: String,
         line: u32,
     },
+    /// Write these graphics commands to the terminal: images sent, placed, deleted (D268).
+    Graphics(String),
 }
 
 /// What a read or a write in flight is for.
@@ -251,6 +253,8 @@ enum Pending {
     Blame,
     /// A page of the agent thread `uid`.
     Agent(String),
+    /// An image for the File screen or a diff (D268).
+    Image(crate::images::ImageKey),
     Write(&'static str),
     Text,
     /// A commit of what is staged, written in the text box.
@@ -364,6 +368,14 @@ pub struct App {
     asked: VecDeque<(Group, String)>,
     in_flight: HashMap<OperationId, Pending>,
     range_head: Option<(Option<String>, Option<String>)>,
+    /// How images reach the terminal; `None` when they are not drawn (D268).
+    pub graphics: Option<crate::kitty::Support>,
+    /// The size of a terminal cell in pixels, to keep an image's shape.
+    pub cell_px: (u16, u16),
+    /// Images sent so far, for their ids; and the ids the terminal holds, to delete at the end.
+    pub(crate) image_seq: u32,
+    pub image_ids: Vec<u32>,
+    pub(crate) decode_jobs: Vec<crate::images::DecodeJob>,
 }
 
 impl std::fmt::Debug for App {
@@ -411,6 +423,11 @@ impl App {
             asked: VecDeque::new(),
             in_flight: HashMap::new(),
             range_head: None,
+            graphics: None,
+            cell_px: (8, 16),
+            image_seq: 0,
+            image_ids: Vec::new(),
+            decode_jobs: Vec::new(),
         };
         app.rebuild();
         app.ask_for_reads();
@@ -464,6 +481,14 @@ impl App {
 
     pub fn take_commands(&mut self) -> Vec<CommandKind> {
         std::mem::take(&mut self.commands)
+    }
+
+    pub(crate) fn push_command(&mut self, kind: CommandKind) {
+        self.commands.push(kind);
+    }
+
+    pub(crate) fn push_request(&mut self, request: Request) {
+        self.requests.push(request);
     }
 
     pub fn take_color_jobs(&mut self) -> Vec<ColorJob> {
@@ -563,6 +588,7 @@ impl App {
             CommandKind::LoadHistory { .. } => Pending::Commits,
             CommandKind::LoadCommitDetail { .. } => Pending::CommitDetail,
             CommandKind::LoadBlame { .. } => Pending::Blame,
+            CommandKind::ReadImage { path, at } => Pending::Image((path.clone(), at.clone())),
             CommandKind::ReadThread { uid, .. } => Pending::Agent(uid.clone()),
             CommandKind::ReadProvenance {
                 path,
@@ -833,7 +859,19 @@ impl App {
                 {
                     read.colors = old.colors;
                 }
+                if read.binary && crate::images::is_image(&read.path) {
+                    self.read_image((read.path.clone(), gm_schema::ImageAt::Worktree));
+                }
                 self.repo.file = Some(read);
+            }
+            Event::ImageRead {
+                id,
+                path,
+                at,
+                image,
+            } if matches!(self.in_flight.get(id), Some(Pending::Image(_))) => {
+                self.in_flight.remove(id);
+                self.image_read((path.clone(), at.clone()), image);
             }
             Event::BlameLoaded { id, path, lines }
                 if self.in_flight.get(id) == Some(&Pending::Blame) =>
@@ -881,6 +919,13 @@ impl App {
 
     fn file_loaded(&mut self, group: Group, path: &str, diff: gm_schema::FileDiff) {
         self.color_jobs.extend(diff_color_jobs(group, &diff));
+        if diff.binary && crate::images::is_image(path) {
+            let (before, after) =
+                crate::images::pair(&self.repo, group, path, diff.old_path.as_deref());
+            for key in [before, after].into_iter().flatten() {
+                self.read_image(key);
+            }
+        }
         self.repo
             .files
             .entry((group, path.to_owned()))
@@ -918,6 +963,7 @@ impl App {
                         | Pending::File
                         | Pending::Blame
                         | Pending::Agent(_)
+                        | Pending::Image(_)
                 )
             )
         {
@@ -934,6 +980,11 @@ impl App {
                 self.repo.commits = None;
             }
             Some(Pending::Commits) => self.repo.commits = None,
+            Some(Pending::Image(key)) => {
+                self.repo
+                    .images
+                    .insert(key, crate::images::Picture::Failed(reason));
+            }
             Some(Pending::CommitDetail | Pending::File | Pending::Blame) => {
                 self.notice = Some(reason);
             }
@@ -2726,6 +2777,137 @@ pub(crate) mod tests {
         }
         let file = &app.repo.files[&(Group::Commit, "src/lib.rs".to_owned())];
         assert!(!file.colors.contains_key(&(0, 2)));
+    }
+
+    /// Gives every decode job its answer, as the decoding thread would.
+    fn decode_all(app: &mut App) {
+        for (key, bytes, hash, draw) in app.take_decode_jobs() {
+            app.decoded(key, hash, crate::images::decode(&bytes, draw));
+        }
+    }
+
+    #[test]
+    fn an_image_shows_on_the_file_screen_through_placeholders_sent_once() {
+        use gm_schema::{ImageAt, ImageBytes};
+        let mut app = app();
+        app.graphics = Some(crate::kitty::Support { tmux: true });
+        app.open_file("img/logo.png".to_owned(), None);
+        for (n, kind) in (1..).zip(app.take_commands()) {
+            app.sent(OperationId(n), &kind);
+        }
+        app.apply(&Event::FileRead {
+            id: OperationId(1),
+            file: gm_schema::FileView {
+                path: "img/logo.png".to_owned(),
+                size: 0,
+                body: gm_schema::FileBody::Binary,
+                truncated: false,
+            },
+        });
+        let asked = app.take_commands();
+        let read = CommandKind::ReadImage {
+            path: "img/logo.png".to_owned(),
+            at: ImageAt::Worktree,
+        };
+        assert_eq!(asked, std::slice::from_ref(&read));
+        let png = crate::images::tests::png(40, 20);
+        let answer = |id| Event::ImageRead {
+            id: OperationId(id),
+            path: "img/logo.png".to_owned(),
+            at: ImageAt::Worktree,
+            image: ImageBytes::Bytes { data: png.clone() },
+        };
+        app.sent(OperationId(9), &read);
+        app.apply(&answer(9));
+        decode_all(&mut app);
+        let drawn = crate::draw::tests::screen(&mut app);
+        assert!(drawn.contains("File · PNG 40×20 · "), "{drawn}");
+        // 40x20 pixels in 8x16 cells: 5 columns, 2 rows of placeholders.
+        let rows: Vec<&str> = drawn
+            .lines()
+            .filter(|line| line.contains(crate::kitty::PLACEHOLDER))
+            .collect();
+        assert_eq!(rows.len(), 2, "{drawn}");
+        // Sent once, wrapped for tmux; drawn again, nothing more goes out.
+        match app.take_requests().as_slice() {
+            [Request::Graphics(text)] => {
+                assert!(text.starts_with("\x1bPtmux;\x1b\x1b_Ga=T,U=1,f=100,t=d,i="));
+                assert!(text.contains(",c=5,r=2,"), "{text:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        crate::draw::tests::screen(&mut app);
+        assert!(app.take_requests().is_empty());
+        // The same bytes read again are not decoded again.
+        app.sent(OperationId(10), &read);
+        app.apply(&answer(10));
+        assert!(app.take_decode_jobs().is_empty());
+    }
+
+    #[test]
+    fn a_changed_image_in_a_diff_shows_its_before_and_after_named_without_kitty() {
+        use gm_schema::{ImageAt, ImageBytes};
+        let mut app = App::new(RepoStatus {
+            root: "/repo".to_owned(),
+            branch: BranchInfo::default(),
+            entries: vec![entry("img/logo.png", None, Some(Change::Modified))],
+        });
+        app.take_commands();
+        let now = Instant::now();
+        app.tree_mut().move_to_id("file/Unstaged/img/logo.png");
+        key(&mut app, "<tab>", now);
+        let asked = app.take_commands();
+        app.sent(OperationId(7), &asked[0]);
+        app.apply(&Event::DiffLoaded {
+            id: OperationId(7),
+            side: gm_schema::DiffSide::Unstaged,
+            diff: FileDiff {
+                path: "img/logo.png".to_owned(),
+                old_path: None,
+                binary: true,
+                hunks: Vec::new(),
+            },
+        });
+        // The index is the before, the working tree the after.
+        let asked = app.take_commands();
+        let at: Vec<&ImageAt> = asked
+            .iter()
+            .filter_map(|kind| match kind {
+                CommandKind::ReadImage { at, .. } => Some(at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(at, [&ImageAt::Index, &ImageAt::Worktree]);
+        for (n, kind) in (20..).zip(&asked) {
+            app.sent(OperationId(n), kind);
+        }
+        app.apply(&Event::ImageRead {
+            id: OperationId(20),
+            path: "img/logo.png".to_owned(),
+            at: ImageAt::Index,
+            image: ImageBytes::Missing,
+        });
+        app.apply(&Event::ImageRead {
+            id: OperationId(21),
+            path: "img/logo.png".to_owned(),
+            at: ImageAt::Worktree,
+            image: ImageBytes::Bytes {
+                data: crate::images::tests::png(3, 2),
+            },
+        });
+        decode_all(&mut app);
+        let drawn = crate::draw::tests::screen(&mut app);
+        let line = drawn
+            .lines()
+            .find(|line| line.contains("Before ·"))
+            .unwrap_or_default();
+        assert!(
+            line.contains("Before · not there: the image is new"),
+            "{drawn}"
+        );
+        assert!(line.contains("│ After · PNG 3×2 · 94 B"), "{drawn}");
+        assert!(!drawn.contains(crate::kitty::PLACEHOLDER));
+        assert!(app.take_requests().is_empty());
     }
 
     /// Unfolds src/lib.rs and gives it its diff.

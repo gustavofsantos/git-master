@@ -134,6 +134,8 @@ pub struct Repo {
     /// The branch's description (`branch.<name>.description`) and the branch it was read
     /// for; shown under its head only while that branch is checked out (D266).
     pub description: Option<(String, String)>,
+    /// The images read for the File screen and the diffs, by path and version (D268).
+    pub images: HashMap<crate::images::ImageKey, crate::images::Picture>,
     /// The commit the Diff screen shows, with its files.
     pub commit: Option<CommitDetail>,
     /// The file the File screen shows.
@@ -157,6 +159,8 @@ pub struct FileText {
     pub note: Option<String>,
     /// The text is the first part of a larger file.
     pub truncated: bool,
+    /// The file is binary: an image is shown instead of lines (D268).
+    pub binary: bool,
 }
 
 impl FileText {
@@ -169,6 +173,7 @@ impl FileText {
         match view.body {
             FileBody::Text { text } => file.lines = text.lines().map(str::to_owned).collect(),
             FileBody::Binary => {
+                file.binary = true;
                 file.note = Some("Binary file: its contents are not shown.".to_owned());
             }
             FileBody::Missing => {

@@ -54,6 +54,7 @@ impl From<&AppSettings> for Settings {
             // The window has no line wrap control; saving never writes the key.
             line_wrap: None,
             tips: None,
+            images: gm_core::settings::TerminalImages::Auto,
             threads: app.threads.clone(),
         }
     }

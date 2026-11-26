@@ -23,6 +23,7 @@ use gm_view::time::relative_time;
 use crate::agent_screen::AgentRow;
 use crate::data::{Group, LineColors};
 use crate::icons;
+use crate::image_rows;
 use crate::nav::keys::show_sequence;
 use crate::nav::prompt::Answer;
 use crate::nav::sections::Row;
@@ -197,6 +198,9 @@ fn row_height(app: &App, row: &Row<'_, Item>, width: usize) -> usize {
         Item::Line { .. } | Item::Pair { .. } if wrap => {
             code_rows(app, row, false, width - 1, wrap).map_or(1, |lines| lines.len())
         }
+        Item::Image(_) | Item::ImagePair { .. } => {
+            image_rows::lines(app, &row.section.item, width - 1).map_or(1, |(lines, _)| lines.len())
+        }
         _ => 1,
     }
 }
@@ -252,6 +256,40 @@ fn place_rows(app: &App, height: usize, width: usize) -> Placement {
     Placement { scroll, max, carry }
 }
 
+/// The lines of row `row`, `width` columns wide after the selection mark: a line of the File
+/// screen, an image, which it adds to `shown` (D268), a line of code, or any other row.
+fn row_lines(
+    app: &App,
+    row: &Row<'_, Item>,
+    on: bool,
+    covered: &std::collections::HashMap<u32, Badge>,
+    width: usize,
+    shown: &mut Vec<image_rows::Placed>,
+) -> Vec<Line<'static>> {
+    let wrap = app.wraps();
+    match &row.section.item {
+        Item::FileLine { index, mark } => {
+            let gutter = Gutter {
+                on,
+                thread: u32::try_from(index + 1)
+                    .ok()
+                    .and_then(|line| covered.get(&line).copied()),
+                folded: row.folded && !row.section.children.is_empty(),
+            };
+            file_line_rows(app, *index, *mark, gutter, width, wrap)
+        }
+        Item::Image(_) | Item::ImagePair { .. } => {
+            let (lines, placed) =
+                image_rows::lines(app, &row.section.item, width).unwrap_or_default();
+            shown.extend(placed);
+            lines
+        }
+        _ => {
+            code_rows(app, row, on, width, wrap).unwrap_or_else(|| vec![row_line(app, row, width)])
+        }
+    }
+}
+
 fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     // The last column is the scroll bar's (D265).
     let track = Rect {
@@ -265,7 +303,6 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     };
     let height = usize::from(body.height);
     let width = usize::from(body.width);
-    let wrap = app.wraps();
     let place = place_rows(app, height, width);
     if let Some(into) = place.carry {
         app.view_mut().tree.move_to(into);
@@ -279,6 +316,8 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let mut hits = Vec::new();
     // The tinted spans of each row (D250), when the terminal gave tints.
     let mut backgrounds: Vec<(Rect, palette::Rgb)> = Vec::new();
+    // The images drawn, to send or place once the rows are laid out (D268).
+    let mut shown: Vec<image_rows::Placed> = Vec::new();
     let covered = match (app.stack.top(), app.repo.file.as_ref()) {
         (crate::ui::Screen::File { .. }, Some(file)) => thread_lines(app, &file.path),
         _ => std::collections::HashMap::new(),
@@ -295,20 +334,7 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
             Span::raw(" ")
         };
         let on = index == cursor;
-        let mut drawn = match &row.section.item {
-            Item::FileLine { index, mark } => {
-                let gutter = Gutter {
-                    on,
-                    thread: u32::try_from(index + 1)
-                        .ok()
-                        .and_then(|line| covered.get(&line).copied()),
-                    folded: row.folded && !row.section.children.is_empty(),
-                };
-                file_line_rows(app, *index, *mark, gutter, width.saturating_sub(1), wrap)
-            }
-            _ => code_rows(app, row, on, width.saturating_sub(1), wrap)
-                .unwrap_or_else(|| vec![row_line(app, row, width.saturating_sub(1))]),
-        };
+        let mut drawn = row_lines(app, row, on, &covered, width.saturating_sub(1), &mut shown);
         drawn.truncate(height - lines.len());
         let tall = u16::try_from(drawn.len()).unwrap_or(1);
         let area = Rect::new(body.x, y, body.width, tall);
@@ -341,6 +367,9 @@ fn draw_rows(frame: &mut Frame, app: &mut App, body: Rect) {
     let buffer = frame.buffer_mut();
     for (area, tint) in backgrounds {
         buffer.set_style(area.intersection(body), Style::new().bg(tint.color()));
+    }
+    for placed in shown {
+        app.show_image(&placed.key, placed.cols, placed.rows);
     }
     let shown = hits.len();
     app.hits.extend(hits);
@@ -1280,7 +1309,7 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             Span::raw(text.clone()),
         ]),
         Item::Description(text) => description_line(text),
-        Item::Blank => Line::default(),
+        Item::Blank | Item::Image(_) | Item::ImagePair { .. } => Line::default(),
         Item::Group { group, count } => Line::from(vec![
             Span::styled(
                 format!("{} {}", fold_icon(row), group.title()),
