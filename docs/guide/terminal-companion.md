@@ -52,7 +52,7 @@ The mouse scrolls every screen. The wheel moves the view three rows at a time, w
 
 ## The Status screen
 
-Status starts with the branch: **Head**, the branch and its last commit; **Merge**, its upstream, with how far ahead and behind it is; **Stack**, when the branch is in a [stack](stacks.md): the branches from the root to yours, how far ahead and behind its parent it is, whether a restack is due and how many branches sit on it; **Base**, the default branch it is compared with. Then come its sections, each with a count:
+Status starts with the branch: **Head**, the branch and its last commit, with the branch's [description](branches.md) under it in italics when it has one (a branch without one takes no line for it); **Merge**, its upstream, with how far ahead and behind it is; **Stack**, when the branch is in a [stack](stacks.md): the branches from the root to yours, how far ahead and behind its parent it is, whether a restack is due and how many branches sit on it; **Base**, the default branch it is compared with. Then come its sections, each with a count:
 
 - **Untracked files**, **Unstaged changes** and **Staged changes**. A file unfolds into its hunks, its lines in the same gutter as the [File](#diff-file-blame-and-origin) screen: the change sign (a removed line has a red bar of its own and no number), the number, the bar of a review thread on the line, then the code colored by its language. In Split, each side has that gutter, with the old numbers on the left. Review threads are drawn under the lines they are about.
 - **Review threads**, by who acts next: waiting for you, waiting for the agent.

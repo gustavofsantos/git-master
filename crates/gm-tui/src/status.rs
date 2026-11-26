@@ -48,6 +48,8 @@ pub enum Item {
         label: &'static str,
         text: String,
     },
+    /// A line of the branch's description, under its head (D266).
+    Description(String),
     Blank,
     Group {
         group: Group,
@@ -172,6 +174,7 @@ impl Item {
             Item::Header { label, text } => format!("{label} {text}"),
             Item::Group { group, .. } => group.title().to_owned(),
             Item::File { path: text, .. }
+            | Item::Description(text)
             | Item::Note(text)
             | Item::Text { text, .. }
             | Item::Card {
@@ -625,6 +628,19 @@ fn headers(repo: &Repo) -> Vec<Section<Item>> {
             ),
         },
     )];
+    // The description shows only when the branch has one, each of its lines a row.
+    if let Some((_, text)) = repo
+        .description
+        .as_ref()
+        .filter(|(name, _)| branch.head.as_ref() == Some(name))
+    {
+        for (at, line) in text.lines().enumerate() {
+            out.push(Section::leaf(
+                format!("description/{at}"),
+                Item::Description(line.to_owned()),
+            ));
+        }
+    }
     if let Some(upstream) = &branch.upstream {
         out.push(Section::leaf(
             "merge",

@@ -1250,6 +1250,15 @@ fn agent_line(row: &Row<'_, Item>, agent: &AgentRow) -> Line<'static> {
     }
 }
 
+/// A line of the branch's description: under the head's text, past the labels' column, in
+/// italic (D266).
+fn description_line(text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(8)),
+        Span::styled(text.to_owned(), Style::new().add_modifier(Modifier::ITALIC)),
+    ])
+}
+
 fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
     let repo = &app.repo;
     match &row.section.item {
@@ -1257,6 +1266,7 @@ fn row_line(app: &App, row: &Row<'_, Item>, width: usize) -> Line<'static> {
             Span::styled(format!("{label:<8}"), DIM),
             Span::raw(text.clone()),
         ]),
+        Item::Description(text) => description_line(text),
         Item::Blank => Line::default(),
         Item::Group { group, count } => Line::from(vec![
             Span::styled(
@@ -1989,6 +1999,48 @@ pub(crate) mod tests {
         assert!(shown.contains(" status "), "{shown}");
         assert!(!shown.contains("gitmaster://"), "{shown}");
         assert!(shown.contains("Space menu"), "{shown}");
+    }
+
+    #[test]
+    fn the_branch_description_shows_under_its_head_in_italic_only_when_it_has_one() {
+        let mut app = app();
+        let lines =
+            |app: &mut App| -> Vec<String> { screen(app).lines().map(str::to_owned).collect() };
+        // None: the line under Head is the next header, no room is kept.
+        let read = |app: &mut App, branch: &str, text: Option<&str>| {
+            app.apply(&gm_schema::Event::BranchDescriptionRead {
+                id: gm_schema::OperationId(9),
+                branch: branch.to_owned(),
+                text: text.map(str::to_owned),
+            });
+        };
+        read(&mut app, "feature", None);
+        let shown = lines(&mut app);
+        assert!(
+            shown[0].contains("Head:") && shown[1].contains("Base:"),
+            "{shown:?}"
+        );
+        read(&mut app, "feature", Some("   \n"));
+        assert!(
+            lines(&mut app)[1].contains("Base:"),
+            "a blank description is none"
+        );
+        // Another branch's description is not this one's.
+        read(&mut app, "main", Some("Not this branch"));
+        assert!(!lines(&mut app).concat().contains("Not this branch"));
+        read(&mut app, "feature", Some("Ledger postings\nin two lines\n"));
+        let shown = lines(&mut app);
+        assert!(
+            shown[1].starts_with("         Ledger postings"),
+            "{shown:?}"
+        );
+        assert!(shown[2].starts_with("         in two lines"), "{shown:?}");
+        assert!(shown[3].contains("Base:"), "{shown:?}");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let cell = &terminal.backend().buffer()[(9, 1)];
+        assert_eq!(cell.symbol(), "L");
+        assert!(cell.modifier.contains(Modifier::ITALIC));
     }
 
     #[test]

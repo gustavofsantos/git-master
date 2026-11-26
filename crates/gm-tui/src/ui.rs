@@ -734,6 +734,9 @@ impl App {
             }
             Event::StashesListed { stashes, .. } => self.repo.stashes.clone_from(stashes),
             Event::StacksLoaded { stacks, .. } => self.repo.stacks.clone_from(stacks),
+            Event::BranchDescriptionRead { branch, text, .. } => {
+                self.repo.description = description(branch, text.as_deref());
+            }
             Event::RevisionStackLoaded { id, diffs }
                 if self.in_flight.get(id) == Some(&Pending::Stack) =>
             {
@@ -967,6 +970,14 @@ impl App {
         });
         // A stash changes the working tree, so its list moves with the status.
         self.commands.push(CommandKind::ListStashes);
+        // A description is edited outside the companion, in Git's config: read it each time.
+        match self.repo.status.branch.head.clone() {
+            Some(branch) => self.commands.push(CommandKind::ReadBranchDescription {
+                branch,
+                member: None,
+            }),
+            None => self.repo.description = None,
+        }
         // The branch's changes move only with HEAD (D237 (3)).
         let head = (
             self.repo.status.branch.head.clone(),
@@ -2380,6 +2391,13 @@ fn status_files(repo: &Repo, group: Group) -> Vec<String> {
                 })
                 .collect()
         })
+}
+
+/// The description read for `branch`, trimmed; `None` when it has none or only spaces (D266).
+fn description(branch: &str, text: Option<&str>) -> Option<(String, String)> {
+    text.map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| (branch.to_owned(), text.to_owned()))
 }
 
 #[cfg(test)]

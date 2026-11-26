@@ -131,6 +131,9 @@ pub struct Repo {
     pub commits: Option<History>,
     pub stashes: Vec<StashEntry>,
     pub stacks: StackSnapshot,
+    /// The branch's description (`branch.<name>.description`) and the branch it was read
+    /// for; shown under its head only while that branch is checked out (D266).
+    pub description: Option<(String, String)>,
     /// The commit the Diff screen shows, with its files.
     pub commit: Option<CommitDetail>,
     /// The file the File screen shows.
