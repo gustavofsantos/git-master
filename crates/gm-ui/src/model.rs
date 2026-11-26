@@ -1672,6 +1672,8 @@ impl Model {
         | Event::ScorecardsListed { .. }
         // A branch intent is read by the window from S5 on; the model keeps none yet (D215).
         | Event::BranchDescriptionRead { .. }
+        // Images are drawn by the terminal companion; the window does not ask (D268).
+        | Event::ImageRead { .. }
         // Line counts and whole-file blame are read by the terminal companion; the window does
         // not ask (D236 (8), D247).
         | Event::ChangeStatsLoaded { .. }
@@ -2168,7 +2170,8 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::ScorecardPublished { id, .. }
         | Event::ScorecardsListed { id, .. }
         | Event::RecentScorecardsListed { id, .. }
-        | Event::BranchDescriptionRead { id, .. } => Some(*id),
+        | Event::BranchDescriptionRead { id, .. }
+        | Event::ImageRead { id, .. } => Some(*id),
         Event::ThreadsChanged
         | Event::WorkflowRunChanged { .. }
         | Event::WorkflowMessageSuggested { .. }

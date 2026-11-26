@@ -9,11 +9,11 @@ use gm_schema::threads::ProvenanceResult;
 use gm_schema::{
     Actor, Blocker, BranchFailure, Command, CommandKind, CommitFile, ConflictFileRead,
     ConflictSite, DirListing, Event, FileBody, FileView, GrepOptions, HealthReport, History,
-    MERGED_LIST_CHANGED, MemberRequest, MergedBranch, OperationId, OperationState, REFLOG_PAGE,
-    RangeMode, RestackBlock, RestackPlan, RestackResolution, ReviewAuthorFilter, ReviewChange,
-    ReviewComment, ReviewStatus, STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, ScorecardCommentInput,
-    ScorecardStatus, ScorecardSummary, StackSnapshot, WorkflowDiagnostic, WorktreeEntry,
-    WorktreeInspection,
+    IMAGE_LIMIT, ImageAt, ImageBytes, MERGED_LIST_CHANGED, MemberRequest, MergedBranch,
+    OperationId, OperationState, REFLOG_PAGE, RangeMode, RestackBlock, RestackPlan,
+    RestackResolution, ReviewAuthorFilter, ReviewChange, ReviewComment, ReviewStatus,
+    STASH_LIST_CHANGED, SUBMODULE_COMMIT_LIMIT, ScorecardCommentInput, ScorecardStatus,
+    ScorecardSummary, StackSnapshot, WorkflowDiagnostic, WorktreeEntry, WorktreeInspection,
 };
 use gm_schema::{resolve_kind, resolve_severity};
 
@@ -2738,6 +2738,7 @@ impl Engine {
                 Err("remote operations are started by handle".to_owned())
             }
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
+            CommandKind::ReadImage { path, at } => self.read_image(id, path, at),
             CommandKind::Checkout { branch } => {
                 let root = self.open_root()?;
                 self.git.checkout(&root, branch).map_err(|e| e.0)?;
@@ -5276,6 +5277,32 @@ impl Engine {
         }
     }
 
+    /// The bytes of the image at `path` in the working tree, the index or a commit (D268). A
+    /// file larger than `IMAGE_LIMIT` is answered with its size; a read never records (D28).
+    fn read_image(
+        &mut self,
+        id: OperationId,
+        path: &str,
+        at: &ImageAt,
+    ) -> Result<Vec<Event>, String> {
+        let root = self.open_root()?;
+        let image = match at {
+            ImageAt::Worktree => read_worktree_image(&root, path)?,
+            ImageAt::Index => {
+                bytes_or_missing(self.git.file_in_index(&root, path).map_err(|e| e.0)?)
+            }
+            ImageAt::Commit { rev } => {
+                bytes_or_missing(self.git.file_at_commit(&root, rev, path).map_err(|e| e.0)?)
+            }
+        };
+        Ok(vec![Event::ImageRead {
+            id,
+            path: path.to_owned(),
+            at: at.clone(),
+            image,
+        }])
+    }
+
     /// The branch description read (D215 (1)). A read: never recorded (D28).
     fn description_command(
         &mut self,
@@ -6529,6 +6556,7 @@ impl Engine {
                 | CommandKind::ListScorecards { .. }
                 | CommandKind::ListRecentScorecards { .. }
                 | CommandKind::ReadBranchDescription { .. }
+                | CommandKind::ReadImage { .. }
                 | CommandKind::LoadReviewSnapshotText { .. }
                 | CommandKind::LoadReviewCurrentText { .. }
                 | CommandKind::LoadReviewChange { .. }
@@ -6864,6 +6892,43 @@ fn is_review_command(kind: &CommandKind) -> bool {
                 | CommandKind::ListScorecards { .. }
                 | CommandKind::ListRecentScorecards { .. }
         )
+}
+
+/// The bytes of a stored image, or its size when it is larger than `IMAGE_LIMIT` (D268).
+fn bytes_or_missing(content: Option<Vec<u8>>) -> ImageBytes {
+    match content {
+        None => ImageBytes::Missing,
+        Some(data) if data.len() as u64 > IMAGE_LIMIT => ImageBytes::TooLarge {
+            size: data.len() as u64,
+        },
+        Some(data) => ImageBytes::Bytes { data },
+    }
+}
+
+/// The image at `path` in the worktree `root`: a path that leaves the worktree is refused, a
+/// file larger than `IMAGE_LIMIT` is not read past its size (D268).
+fn read_worktree_image(root: &Path, path: &str) -> Result<ImageBytes, String> {
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(format!("not a path in the worktree: {path:?}"));
+    }
+    let full = root.join(relative);
+    let Ok(meta) = std::fs::symlink_metadata(&full) else {
+        return Ok(ImageBytes::Missing);
+    };
+    if !meta.is_file() {
+        return Ok(ImageBytes::Missing);
+    }
+    if meta.len() > IMAGE_LIMIT {
+        return Ok(ImageBytes::TooLarge { size: meta.len() });
+    }
+    std::fs::read(&full)
+        .map(|data| ImageBytes::Bytes { data })
+        .map_err(|error| format!("{path}: {error}"))
 }
 
 /// Whether `kind` is an approval or branch intent command (D215).

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::compare::{RangeMode, RevisionRange};
 use crate::conflict::{ConflictFileRead, ConflictSite, HunkOrigin};
 use crate::diff::{DiffSide, FileDiff, HunkId, StageTarget};
-use crate::files::{DirListing, FileSearch, FileView};
+use crate::files::{DirListing, FileSearch, FileView, ImageAt, ImageBytes};
 use crate::grep::{GrepOptions, GrepResult};
 use crate::health::{HealthProgress, HealthReport};
 use crate::history::{BlameEntry, CommitDetail, CommitFile, History, HistoryScope};
@@ -342,6 +342,12 @@ pub enum CommandKind {
     /// the next one.
     ReadFile {
         path: String,
+    },
+    /// Reads the bytes of the image at `path`, in the working tree, the index or a commit, for
+    /// a front end to draw (D268). A read: never recorded (D28). Answers `ImageRead`.
+    ReadImage {
+        path: String,
+        at: ImageAt,
     },
     /// A local branch, or a remote branch such as `origin/feature` (a local
     /// tracking branch is created for it when none exists).
@@ -1476,6 +1482,13 @@ pub enum Event {
     FileRead {
         id: OperationId,
         file: FileView,
+    },
+    /// Answers `ReadImage`: the bytes of `path` at `at`, or why there are none.
+    ImageRead {
+        id: OperationId,
+        path: String,
+        at: ImageAt,
+        image: ImageBytes,
     },
     /// The colors of the file `FileRead` carried, sent right after it when the
     /// language has a grammar (N4). `id` is the read's. Spans are in order, do

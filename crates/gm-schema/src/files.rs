@@ -57,6 +57,34 @@ pub struct DirListing {
     pub indexing: bool,
 }
 
+/// The most bytes of an image `ReadImage` reads; a larger one is answered with its size only
+/// (D268).
+pub const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
+
+/// Where `ReadImage` reads a file from (D268).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ImageAt {
+    /// The working tree, as it is now.
+    Worktree,
+    /// The index: what is staged.
+    Index,
+    /// A commit, or anything Git resolves to one (`HEAD`, a branch, a full id).
+    Commit { rev: String },
+}
+
+/// What `ReadImage` found (D268).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ImageBytes {
+    /// The file's bytes, as stored; the reader decodes them.
+    Bytes { data: Vec<u8> },
+    /// There is no such file there.
+    Missing,
+    /// The file is larger than `IMAGE_LIMIT`: only its size is read.
+    TooLarge { size: u64 },
+}
+
 /// What a file holds, as the viewer shows it (N2).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
