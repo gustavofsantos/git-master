@@ -124,7 +124,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if size.width < MIN_WIDTH || size.height < MIN_HEIGHT {
         let text = format!(
             "GitMaster needs a terminal of at least {MIN_WIDTH}x{MIN_HEIGHT}; this one is {}x{}. \
-             Make it larger, or press Ctrl+C to quit.",
+             Make it larger, or press Ctrl+C twice to quit.",
             size.width, size.height
         );
         frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), size);

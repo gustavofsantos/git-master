@@ -1,6 +1,7 @@
 //! Routes a key to what it does (D241, `design/tui-navigation.md`, Input routing): through
 //! the pending prefix, if any, and the key map of the mode. Two keys are safe whatever the
-//! map says: `Ctrl+C` quits, and `Esc` leaves a pending prefix.
+//! map says: `Ctrl+C` asks to quit (the app quits on a second one, D271), and `Esc` leaves a
+//! pending prefix.
 
 use std::collections::BTreeMap;
 

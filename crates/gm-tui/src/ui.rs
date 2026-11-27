@@ -397,7 +397,12 @@ pub struct App {
     pub workspace: Option<String>,
     /// What the last Update Workspace did, for the hint line once it ends.
     update_summary: Option<String>,
+    /// When `Ctrl+C` was pressed, while a second press would quit (D271).
+    quit_armed: Option<Instant>,
 }
+
+/// How long after a first `Ctrl+C` a second one quits (D271).
+pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 
 impl std::fmt::Debug for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -451,6 +456,7 @@ impl App {
             decode_jobs: Vec::new(),
             workspace: None,
             update_summary: None,
+            quit_armed: None,
         };
         app.rebuild();
         app.ask_for_reads();
@@ -1263,9 +1269,21 @@ impl App {
             return;
         };
         self.dirty = true;
+        // `Ctrl+C` twice quits; the first press only says how (D271).
         if key == Key::ctrl('c') {
-            self.quit = true;
+            let armed = self
+                .quit_armed
+                .is_some_and(|at| now.saturating_duration_since(at) <= QUIT_WINDOW);
+            if armed {
+                self.quit = true;
+            } else {
+                self.quit_armed = Some(now);
+                self.notice = Some("Press Ctrl+C again to quit.".to_owned());
+            }
             return;
+        }
+        if self.quit_armed.take().is_some() {
+            self.notice = None;
         }
         if !self.overlays.is_empty() {
             self.overlay_key(key, now);
@@ -4710,8 +4728,28 @@ pub(crate) mod tests {
         key(&mut app, "<space> <space>", now);
         key(&mut app, "d i f f s <cr>", now);
         assert_eq!(lists(&app), 2);
+        key(&mut app, "<c-c> <c-c>", now);
+        assert!(app.quit, "Ctrl+C twice quits from anywhere (D271)");
+    }
+
+    #[test]
+    fn one_ctrl_c_only_says_how_to_quit_and_another_key_or_a_pause_starts_over() {
+        let now = Instant::now();
+        let mut app = app();
         key(&mut app, "<c-c>", now);
-        assert!(app.quit, "Ctrl+C always quits (D241 (6))");
+        assert!(!app.quit);
+        assert_eq!(app.notice.as_deref(), Some("Press Ctrl+C again to quit."));
+        // Another key between the two starts over.
+        key(&mut app, "j", now);
+        assert_eq!(app.notice, None);
+        key(&mut app, "<c-c>", now);
+        assert!(!app.quit, "the j disarmed the first press");
+        // Too long a pause starts over too.
+        let late = now + QUIT_WINDOW + Duration::from_millis(1);
+        key(&mut app, "<c-c>", late);
+        assert!(!app.quit, "more than two seconds after the first");
+        key(&mut app, "<c-c>", late + Duration::from_millis(500));
+        assert!(app.quit);
     }
 
     #[test]
