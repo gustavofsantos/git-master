@@ -83,11 +83,11 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 
 ## The command list
 
-Press `Ctrl+K` to find a command by what it does. The list opens at the bottom of the screen: a search field, then one command per row. A row shows the command's key first, when it has one, and a short description in the rest of the row, such as `Space s   Stage the hunk under the cursor`. A command with no key has an empty first column: every command is in the list, whether or not it has a key.
+Press `Space` twice to find a command by what it does: the leader, then the leader again. The list opens at the bottom of the screen: a search field, then one command per row. A row shows the command's key first, when it has one, and a short description in the rest of the row, such as `Space s   Stage the hunk under the cursor`. A command with no key has an empty first column: every command is in the list, whether or not it has a key.
 
 The list holds the commands that apply where you are, as the menu does. Type to narrow it: a row stays when its description holds every word you typed, in any case. `↓` and `↑`, or `Ctrl+N` and `Ctrl+P` (`Ctrl+J` and `Ctrl+K` too), move through it, and `Enter`, or a click on a row, runs the command and closes the list.
 
-A row ending in `…` opens a list of its own, stacked on the one before, such as **Filter the threads…** with one row per filter. The new list has its own search field and starts empty. `Ctrl+C` or `Esc` closes the list on top and goes back to the one below, as it was left, with its text and its row; on the last list, it closes the command list. This is the one place where `Ctrl+C` does not quit.
+A row ending in `…` opens a list of its own, stacked on the one before, such as **Filter the threads…** with one row per filter. The new list has its own search field and starts empty. `Esc` closes the list on top and goes back to the one below, as it was left, with its text and its row; on the last list, it closes the command list. `Ctrl+C` quits, here as everywhere.
 
 ## Keys
 
@@ -119,10 +119,10 @@ A row ending in `…` opens a list of its own, stacked on the one before, such a
 | `q`, `Esc` | Close the menu, clear the selection, or go back one screen; on **Status**, `q` quits. |
 | `Space` | Open the menu. |
 | `?` | Open the **Keys** screen. |
-| `Ctrl+K` | Open the [command list](#the-command-list). |
+| `Space Space` | Open the [command list](#the-command-list). |
 | `Ctrl+Z` | Suspend to the shell; `fg` brings the companion back. |
 | `Ctrl+L` | Redraw the screen. |
-| `Ctrl+C` | Quit; in the command list, close the list on top. |
+| `Ctrl+C` | Quit. |
 
 ## Stage and unstage
 
@@ -220,7 +220,7 @@ Each time the companion starts, a banner above the mode line shows a tip: someth
 
 > **Planned.** A key map of your own is not available yet.
 
-Every action has a name, and every key is a binding of a name, so you can make the keys yours: rebind any action, in any mode, and choose the prefix that opens the menu, such as `,` or `g` in place of `Space`. Two keys cannot be taken away: `Ctrl+C` always quits, except in the command list, where it closes the list on top, and `Esc` always closes the menu. A binding that names an unknown action, or a key bound twice, is reported when the companion starts, and the default is kept for it.
+Every action has a name, and every key is a binding of a name, so you can make the keys yours: rebind any action, in any mode, and choose the prefix that opens the menu, such as `,` or `g` in place of `Space`. Two keys cannot be taken away: `Ctrl+C` always quits, and `Esc` always closes the menu. A binding that names an unknown action, or a key bound twice, is reported when the companion starts, and the default is kept for it.
 
 ## See also
 
