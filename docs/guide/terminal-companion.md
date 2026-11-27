@@ -81,6 +81,14 @@ You do not have to wait for the menu: `Space s` stages at once.
 
 Press `?` to see every key on the **Keys** screen. It opens on top of the screen you were on: move, scroll and search it like any screen, and `q` or `Esc` takes you back.
 
+## The command list
+
+Press `Ctrl+K` to find a command by what it does. The list opens at the bottom of the screen: a search field, then one command per row. A row shows the command's key first, when it has one, and a short description in the rest of the row, such as `Space s   Stage the hunk under the cursor`. A command with no key has an empty first column: every command is in the list, whether or not it has a key.
+
+The list holds the commands that apply where you are, as the menu does. Type to narrow it: a row stays when its description holds every word you typed, in any case. `↓` and `↑`, or `Ctrl+N` and `Ctrl+P` (`Ctrl+J` and `Ctrl+K` too), move through it, and `Enter`, or a click on a row, runs the command and closes the list.
+
+A row ending in `…` opens a list of its own, stacked on the one before, such as **Filter the threads…** with one row per filter. The new list has its own search field and starts empty. `Ctrl+C` or `Esc` closes the list on top and goes back to the one below, as it was left, with its text and its row; on the last list, it closes the command list. This is the one place where `Ctrl+C` does not quit.
+
 ## Keys
 
 > **Planned.** The keys cannot be changed yet; see [Your own keys](#your-own-keys).
@@ -111,9 +119,10 @@ Press `?` to see every key on the **Keys** screen. It opens on top of the screen
 | `q`, `Esc` | Close the menu, clear the selection, or go back one screen; on **Status**, `q` quits. |
 | `Space` | Open the menu. |
 | `?` | Open the **Keys** screen. |
+| `Ctrl+K` | Open the [command list](#the-command-list). |
 | `Ctrl+Z` | Suspend to the shell; `fg` brings the companion back. |
 | `Ctrl+L` | Redraw the screen. |
-| `Ctrl+C` | Quit. |
+| `Ctrl+C` | Quit; in the command list, close the list on top. |
 
 ## Stage and unstage
 
@@ -130,6 +139,8 @@ The branch's remote is one key away, in the **Remote** group of the menu:
 - **push** (`Space P`) pushes the branch alone, with a lease: to its upstream, or, when it has none, to the only remote, which becomes its upstream. It asks first, naming the branch and where it goes, since a remote cannot take a push back. Tags and other branches are never pushed.
 
 These run as the app's own [Fetch, Pull and Push with lease](branches.md#fetch-pull-and-push-with-lease) do, without asking for a password: use a credential helper or an SSH agent. The hint line says what runs (`Pushing…`), then how it ended, with Git's reason when it failed. **Merge** on Status follows: how far ahead and behind the upstream the branch is.
+
+In a [workspace](workspaces.md), started at the workspace's folder, the command list also has **Update every member of the workspace**. It runs [Update every member](workspaces.md#update-every-member): it fetches each repository once and fast-forwards each member to its target, a following member and a member on a branch alike, and leaves every member that cannot move as it was. The hint line says how it ended, such as `Updated 2 · up to date 1 · skipped 1: billing has changes`.
 
 The companion runs no [workflow](../workflows/overview.md) on a commit or a push: it has no place to approve a run. Commit and push from the app when a workflow should gate them.
 
@@ -149,7 +160,7 @@ On a thread, the menu offers **reply** (`Space r`), **resolve** (`Space R`) or *
 
 ## Questions wait a second
 
-Every question the companion asks you, and the text box, waits one second before it takes an answer that ends it. In that second, `Esc` and the other ways to cancel are ignored; for a question whose yes changes something you cannot take back, such as deleting a thread, the yes is ignored too. Keys pressed in that second are dropped, so a key you meant for the screen behind cannot answer the question by accident. The keys show dimmed until they are taken. `Ctrl+C` still quits at once, and the menu answers your first key without waiting.
+Every question the companion asks you, and the text box, waits one second before it takes an answer that ends it. In that second, `Esc` and the other ways to cancel are ignored; for a question whose yes changes something you cannot take back, such as deleting a thread, the yes is ignored too. Keys pressed in that second are dropped, so a key you meant for the screen behind cannot answer the question by accident. The keys show dimmed until they are taken. `Ctrl+C` still quits at once, and the menu and the command list answer your first key without waiting.
 
 **copy reference** puts `@path:lines` of the selection on the clipboard, to paste into your agent's prompt.
 
@@ -209,7 +220,7 @@ Each time the companion starts, a banner above the mode line shows a tip: someth
 
 > **Planned.** A key map of your own is not available yet.
 
-Every action has a name, and every key is a binding of a name, so you can make the keys yours: rebind any action, in any mode, and choose the prefix that opens the menu, such as `,` or `g` in place of `Space`. Two keys cannot be taken away: `Ctrl+C` always quits, and `Esc` always closes the menu. A binding that names an unknown action, or a key bound twice, is reported when the companion starts, and the default is kept for it.
+Every action has a name, and every key is a binding of a name, so you can make the keys yours: rebind any action, in any mode, and choose the prefix that opens the menu, such as `,` or `g` in place of `Space`. Two keys cannot be taken away: `Ctrl+C` always quits, except in the command list, where it closes the list on top, and `Esc` always closes the menu. A binding that names an unknown action, or a key bound twice, is reported when the companion starts, and the default is kept for it.
 
 ## See also
 

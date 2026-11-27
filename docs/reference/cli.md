@@ -162,7 +162,11 @@ IFS=$'\t' read -r _ branch repo < <(my-repos | gitmaster worktree branches --rep
 ```sh
 gitmaster workspace create <name> [--root <dir>] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
 gitmaster workspace add <repo|url> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none] [--clone-to <dir>]
+gitmaster workspace add <repo|url> --follow <remote>/<branch> [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none] [--clone-to <dir>]
 gitmaster workspace remove-member <member> [--workspace <name|dir>] [--root <dir>] [--force]
+gitmaster workspace update [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
+gitmaster workspace start-branch <member> <branch> [--workspace <name|dir>] [--root <dir>]
+gitmaster workspace follow <member> <remote>/<branch> [--workspace <name|dir>] [--root <dir>]
 gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
 gitmaster workspace path <name> [--root <dir>]
 gitmaster workspace status [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
@@ -206,6 +210,8 @@ Every repository of the list is checked before anything is created. When one of 
 
 `add` refuses a branch that is checked out in another worktree, and says which. It refuses a `<member>` folder that exists, and a repository that is already a member. When the commit fails, for example because Git has no user name, the member stays added and staged, the message says how to commit it, and the exit status is `1`. When registering the submodule fails, the new worktree is removed again.
 
+`add <repo> --follow <remote>/<branch>` adds the repository as a [following member](../guide/workspaces.md#share-a-repository-between-workspaces) instead: the worktree is checked out at the commit of the remote branch, such as `origin/main`, on a detached HEAD, and the submodule records `follow = <remote>/<branch>` in place of a branch. It takes no `<branch>` or `<base>`. The remote branch must exist in the repository; fetch first when it is new. Any number of workspaces can follow the same remote branch of one repository.
+
 `<repo>` can be the URL of a repository you have no clone of yet. A value that is not a folder and looks like a URL, such as `https://host/team/billing.git`, `ssh://host/billing` or `git@host:team/billing.git`, is cloned first, then added as above. The clone goes to `--clone-to <dir>` when given, else to `<root>/<name>`, where `<name>` is the last part of the URL without `.git` and the root is `gitmaster.clone.root`, else `~/src`. The folder must not exist. `add` prints `cloned <url> into <dir>` on the standard error when the clone is done. When the clone fails, nothing is created and the exit status is `1`; when the clone succeeds and adding the member fails, the clone stays and the message names it.
 
 ### Remove a member
@@ -217,6 +223,29 @@ Every repository of the list is checked before anything is created. When one of 
 3. The workspace's repository commits the removal, `Remove <member>`.
 
 It refuses a member that contains the current directory, even with `--force`. It refuses a member with staged, unstaged or untracked files, or on a detached `HEAD` that holds commits no local or remote branch has, and says which; `--force` removes it anyway, with what it discards. A member whose folder is gone is pruned from its repository's worktree records and removed from the workspace. A member whose repository is gone while its folder is there is refused, even with `--force`. When the commit fails, the removal stays staged, the message says how to commit it, and the exit status is `1`.
+
+### Update a workspace
+
+`update` fetches each repository the members belong to, once, from every remote, then moves each member to its target when that is a fast-forward and the member has no staged, unstaged or untracked files. The target of a member on a branch is the branch's upstream; the target of a following member is the remote branch it follows. The move is `git merge --ff-only` in both cases. Nothing else is done: no merge commit, rebase, stash or push, and no combination is recorded. See [Update every member](../guide/workspaces.md#update-every-member).
+
+It prints one line per member, in the order of `.gitmodules`. A `tsv` line (the default) holds, separated by tabs, the member, the result and its detail:
+
+| Result | Detail |
+|---|---|
+| `updated` | The old and the new commit, `<old>..<new>`. |
+| `up-to-date` | The commit the member is on. |
+| `skipped` | Why: `no upstream`, `changes`, `diverged`, `not on its branch` or `missing`. |
+| `failed` | Git's message. |
+
+`--format json` prints one line with a JSON array that has an object per member: `member`, `result`, `from`, `to` and `reason`. A skipped member is not a failure: the exit status is `0` unless a fetch or a move failed, then `1` after the last line. The update is recorded in the operation log.
+
+### Change what a member follows
+
+`start-branch <member> <branch>` creates `<branch>` in a following member, at the commit the member is on, and checks it out there; the files changed in the member stay changed, on the branch. The member becomes a member on `<branch>`: the workspace's `.gitmodules` records the branch in place of what it followed, and the workspace's repository commits the change, `Start <branch> in <member>`. It refuses a member that does not follow, and a branch that exists in the repository already.
+
+`follow <member> <remote>/<branch>` makes a member follow the remote branch: the member is checked out at its commit, on a detached HEAD, `.gitmodules` records `follow = <remote>/<branch>` in place of a branch, and the workspace's repository commits the change, `Follow <remote>/<branch> in <member>`. The branch the member was on stays in the repository. It refuses a member with staged, unstaged or untracked files, and a remote branch the repository does not have. It does not fetch: run `update` afterwards to bring the member to the newest commit.
+
+Both print the member's path.
 
 ### List and find workspaces
 
@@ -238,12 +267,12 @@ It refuses a member that contains the current directory, even with `--force`. It
 | Field | Value |
 |---|---|
 | Member | The member's folder name. |
-| Branch | The branch checked out in the member, or `(detached)`. |
+| Branch | The branch checked out in the member; `(follows <remote>/<branch>)` for a following member; `(detached)` for a member that should be on a branch and is not. |
 | Changes | `dirty` when the member has staged, unstaged or untracked files, else `clean`. |
 | New commits | How many commits the member's `HEAD` has that the commit recorded in the workspace does not. |
 | Repository | The path of the main checkout the member belongs to. |
 
-`--format json` prints one line with a JSON array that has an object per member: `member`, `branch` (`null` when detached), `detached`, `dirty`, `new_commits`, `recorded`, `head` and `repo`.
+`--format json` prints one line with a JSON array that has an object per member: `member`, `branch` (`null` when detached), `detached`, `follow` (the remote branch it follows, `null` for a member on a branch), `dirty`, `new_commits`, `recorded`, `head` and `repo`.
 
 A member whose folder is gone prints `(missing)` as its branch, and the command exits `1` after the last line.
 

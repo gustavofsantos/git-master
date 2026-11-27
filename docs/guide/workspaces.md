@@ -1,7 +1,7 @@
 ---
 title: Workspaces
 description: Group branches of several repositories into one workspace, a Git repository whose submodules are worktrees of your own clones, to change and test them together with an agent.
-status: implemented
+status: partial
 order: 55
 ---
 
@@ -17,12 +17,13 @@ A workspace is a Git repository of its own. Each repository in it is a submodule
   service-a/                   worktree of ~/src/service-a, on feat/checkout-v2
   service-b/                   worktree of ~/src/service-b, on feat/checkout-v2
   service-c/                   worktree of ~/src/service-c, on feat/new-pricing
+  shared-lib/                  worktree of ~/src/shared-lib, following origin/main
 ```
 
 | Part | What it is |
 |---|---|
 | The workspace repository | A Git repository that GitMaster creates. It records which commit of each repository the workspace points to, and it holds your own files for the integration: notes, scripts, the configuration of a local environment. |
-| A member | One repository of the workspace, checked out on one branch. Its folder is a linked worktree of your clone, registered in the workspace repository as a submodule. |
+| A member | One repository of the workspace. Its folder is a linked worktree of your clone, registered in the workspace repository as a submodule. A member is either **on a branch**, which you change in the workspace, or **following** a branch of a remote, such as `origin/main`, which it keeps up with and does not change. |
 
 The workspace repository is yours to write in. Your service repositories are not touched: GitMaster writes nothing into their working trees, and adds nothing to them but the worktree records Git keeps in their `.git` folder.
 
@@ -57,7 +58,7 @@ Opening a workspace switches the window to it, like a worktree; switching back t
 
 - [Code navigation](code-navigation.md) searches every member: Quick Open lists the files of all members, and text search looks inside them.
 - The diff of a member shows the commits it gained, as a list, and opens each one.
-- Each member keeps its branch checked out. When a Git command leaves a member on a detached HEAD, its row is marked **detached**, and **Check Out Branch** puts it back on its branch.
+- Each member on a branch keeps its branch checked out. When a Git command leaves such a member on a detached HEAD, its row is marked **detached**, and **Check Out Branch** puts it back on its branch. A following member is on a detached HEAD by design: its row says what it follows, such as **follows origin/main**, and is not marked detached.
 
 When the detached HEAD holds commits that no local or remote branch has, **Check Out Branch** refuses and says how many, so they are not left behind: put them on a branch first, from the member's own view.
 
@@ -72,7 +73,7 @@ billing   feat/pay-v2  4f2a9c1
 checkout  feat/pay-v2  9be03d7
 ```
 
-Your own files in the workspace repository, such as notes or scripts, are not staged by it: commit them as in any repository. **Record Combination** is not available when no member has a new commit, or when a member is on a detached HEAD.
+Your own files in the workspace repository, such as notes or scripts, are not staged by it: commit them as in any repository. **Record Combination** is not available when no member has a new commit, or when a member that should be on a branch is on a detached HEAD. A following member is recorded at the commit it is on.
 
 The combinations follow each other on one branch, `main`. The workspace's [History](history.md) is the list of the combinations you recorded, and each one opens to the commits of each member.
 
@@ -105,6 +106,71 @@ When nothing would be lost, the dialog asks once and **Remove member** removes i
 GitMaster removes the member's worktree from your clone and commits the removal in the workspace repository. The member's branch and its commits stay in your clone. The combinations recorded before still name the member, in the workspace's history.
 
 On the command line, `gitmaster workspace add` adds a repository, from a folder or a URL, and `gitmaster workspace remove-member` removes one; see [Command line](../reference/cli.md#add-a-member).
+
+## Share a repository between workspaces
+
+Some repositories are part of every change without being changed: a shared library, a contract, a key service that other services build against. Two workspaces can both hold such a repository, each with the latest version, by **following** a branch of its remote instead of checking out a branch.
+
+Git lets a branch be checked out in only one worktree at a time, so two workspaces cannot both hold `main` of the same clone. A following member holds no branch: it is checked out at the commit of a remote branch, such as `origin/main`, on a detached HEAD. Any number of workspaces can follow the same remote branch of the same repository at once, and your clone stays on whatever branch you have checked out there.
+
+```text
+shared-lib  ─●───●───●   origin/main
+                     ├── checkout-v2/shared-lib     following origin/main
+                     └── ledger-split/shared-lib    following origin/main
+~/src/shared-lib on main, untouched
+```
+
+### Add a following member
+
+> **Planned.** The app's **Add Repository to Workspace…** dialog has no **Follow** choice yet. Use `gitmaster workspace add --follow` (see [Command line](../reference/cli.md#add-a-member)).
+
+When you add a repository, choose **Follow** instead of a branch, and pick the remote branch, such as `origin/main`. The member is checked out at that branch's commit. The workspace's `.gitmodules` records what the member follows, so the workspace's history says it too.
+
+A following member is updated with the others; see [Update every member](#update-every-member).
+
+### Start a branch in a following member
+
+When you need to change the repository a member follows, start a branch in it. The branch starts at the commit the member is on, and the member becomes a member on that branch: it is no longer updated from the remote branch it followed, and you commit and push in it as in any other member.
+
+> **Planned.** The app has no **Start Branch Here** command yet. Use `gitmaster workspace start-branch` (see [Command line](../reference/cli.md#change-what-a-member-follows)).
+
+- Files you or an agent changed in the member stay changed, on the new branch.
+- The branch name must be free in that repository: a branch that exists already is refused, and so is a branch checked out in another worktree.
+- The other workspaces that follow the same remote branch are not affected.
+- The workspace repository commits the change of `.gitmodules`.
+
+### Follow again
+
+When the change is merged, make the member follow its remote branch again. The member goes to the commit of the remote branch, on a detached HEAD, and the branch it was on stays in the repository with its commits.
+
+> **Planned.** The app has no **Follow** command for a member yet. Use `gitmaster workspace follow` (see [Command line](../reference/cli.md#change-what-a-member-follows)).
+
+GitMaster refuses to follow while the member has staged, unstaged or untracked files, so nothing is left behind.
+
+## Update every member
+
+**Update Workspace** brings every member up to date with its remote, with one rule that is the same for every member and every run:
+
+1. **Fetch.** Each repository the members belong to is fetched once, from every remote, as **Fetch** does.
+2. **Target.** Each member has a target: for a member on a branch, the branch's upstream, such as `origin/feat/checkout-v2`; for a following member, the remote branch it follows.
+3. **Move.** Each member, in the order of the workspace, moves to its target only when that is a fast-forward and the member has no staged, unstaged or untracked files. The move is the same Git command for both kinds of member, `git merge --ff-only`.
+
+Nothing else happens: no merge commit, no rebase, no stash, no push, and no combination is recorded. A member that cannot move stays exactly as it was, and the result says why:
+
+| Result | When |
+|---|---|
+| **updated** | The member moved to its target, a fast-forward. The result names the old and the new commit. |
+| **up to date** | The member is already at its target, or contains it. |
+| **skipped: no upstream** | The member is on a branch that has no upstream, such as a branch not pushed yet. |
+| **skipped: changes** | The member has staged, unstaged or untracked files. |
+| **skipped: diverged** | The member has commits its target does not, so moving would need a merge or a rebase. |
+| **skipped: not on its branch** | The member should be on a branch and is on a detached HEAD or another branch, or it should follow and is on a branch. |
+| **skipped: missing** | The member's folder is gone. |
+| **failed** | Git failed, for example when a remote cannot be reached. Git's message is shown. |
+
+Running it again right away answers **up to date** for every member that moved, and the same skip for every member that did not, so it is safe to run as often as you like, before you start an agent or after you come back to a workspace.
+
+> **Planned.** The app has no **Update Workspace** command yet. Use `gitmaster workspace update` (see [Command line](../reference/cli.md#update-a-workspace)) or the [terminal companion](terminal-companion.md#the-command-list).
 
 ## Run an agent in a workspace
 
