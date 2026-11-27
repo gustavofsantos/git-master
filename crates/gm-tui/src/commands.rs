@@ -1,4 +1,4 @@
-//! The command list (`Ctrl+K`, D270): the commands that apply where you are, a key column and a
+//! The command list (`Space Space`, D270): the commands that apply where you are, a key column and a
 //! short description, filtered by the words typed. A row of a group in `SUBLISTS` opens a list
 //! of its own, stacked on the one before. Pure: the overlay, the keys and the drawing live in
 //! `ui.rs` and `draw.rs`.

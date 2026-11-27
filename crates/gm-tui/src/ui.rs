@@ -174,7 +174,7 @@ pub enum Overlay {
         picker: Picker,
         guard: Guard,
     },
-    /// One list of the command list (`Ctrl+K`, D270), stacked on the one below it. Not a
+    /// One list of the command list (`Space Space`, D270), stacked on the one below it. Not a
     /// prompt: its guard is open from the start (D270 (7)).
     Commands {
         list: CommandList,
@@ -1263,13 +1263,8 @@ impl App {
             return;
         };
         self.dirty = true;
-        // In the command list, `Ctrl+C` closes the list on top instead of quitting (D270 (6)).
         if key == Key::ctrl('c') {
-            if matches!(self.overlays.last(), Some(Overlay::Commands { .. })) {
-                self.overlays.pop();
-            } else {
-                self.quit = true;
-            }
+            self.quit = true;
             return;
         }
         if !self.overlays.is_empty() {
@@ -4645,7 +4640,7 @@ pub(crate) mod tests {
     fn ctrl_k_lists_what_applies_with_its_key_and_typing_narrows_it() {
         let now = Instant::now();
         let mut app = app();
-        key(&mut app, "<c-k>", now);
+        key(&mut app, "<space> <space>", now);
         assert_eq!(lists(&app), 1);
         let rows = command_rows(&app);
         assert!(
@@ -4679,10 +4674,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_row_with_a_list_of_its_own_stacks_it_and_ctrl_c_pops_one_list_at_a_time() {
+    fn a_row_with_a_list_of_its_own_stacks_it_and_esc_pops_one_list_at_a_time() {
         let now = Instant::now();
         let mut app = app();
-        key(&mut app, "<c-k>", now);
+        key(&mut app, "<space> <space>", now);
         key(&mut app, "d i f f s", now);
         key(&mut app, "<cr>", now);
         assert_eq!(lists(&app), 2);
@@ -4697,27 +4692,36 @@ pub(crate) mod tests {
             "{listed}"
         );
 
-        key(&mut app, "<c-c>", now);
+        key(&mut app, "<esc>", now);
         assert_eq!(lists(&app), 1, "back to the first list");
         let Some(Overlay::Commands { list, .. }) = app.overlays.last() else {
             panic!("the first list");
         };
         assert_eq!(list.query, "diffs", "as it was left");
-        key(&mut app, "<c-c>", now);
+        key(&mut app, "<esc>", now);
         assert_eq!(lists(&app), 0);
-        assert!(!app.quit, "Ctrl+C closed the lists, it did not quit");
-        key(&mut app, "<c-c>", now);
-        assert!(app.quit, "with no list, Ctrl+C quits");
+        assert!(!app.quit);
     }
 
     #[test]
-    fn esc_also_pops_and_an_action_of_a_stacked_list_runs_and_closes_them_all() {
+    fn ctrl_c_quits_even_with_lists_open() {
         let now = Instant::now();
         let mut app = app();
-        key(&mut app, "<c-k>", now);
+        key(&mut app, "<space> <space>", now);
+        key(&mut app, "d i f f s <cr>", now);
+        assert_eq!(lists(&app), 2);
+        key(&mut app, "<c-c>", now);
+        assert!(app.quit, "Ctrl+C always quits (D241 (6))");
+    }
+
+    #[test]
+    fn an_action_of_a_stacked_list_runs_and_closes_every_list() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<space> <space>", now);
         key(&mut app, "<esc>", now);
         assert_eq!(lists(&app), 0);
-        key(&mut app, "<c-k>", now);
+        key(&mut app, "<space> <space>", now);
         key(&mut app, "d i f f s <cr>", now);
         key(&mut app, "s p l i t <cr>", now);
         assert_eq!(lists(&app), 0);
@@ -4728,7 +4732,7 @@ pub(crate) mod tests {
     fn a_click_on_a_row_runs_it() {
         let now = Instant::now();
         let mut app = app();
-        key(&mut app, "<c-k>", now);
+        key(&mut app, "<space> <space>", now);
         key(&mut app, "k e y", now);
         crate::draw::tests::screen(&mut app);
         let area = app
@@ -4755,7 +4759,7 @@ pub(crate) mod tests {
         let now = Instant::now();
         let mut app = app();
         app.workspace = Some("/repo".to_owned());
-        key(&mut app, "<c-k>", now);
+        key(&mut app, "<space> <space>", now);
         key(&mut app, "u p d a t e <cr>", now);
         let sent = app.take_commands();
         assert_eq!(

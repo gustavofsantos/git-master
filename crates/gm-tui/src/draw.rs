@@ -1735,6 +1735,8 @@ fn draw_menu(frame: &mut Frame, app: &mut App, body: Rect) {
                 break;
             }
             let mut strip = Strip::new(area);
+            // A key longer than one letter, such as `Space`, keeps a gap before its title.
+            let key = format!("{key} ");
             strip.click(
                 format!("{key:<3}"),
                 color(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -1969,7 +1971,7 @@ fn draw_commands(frame: &mut Frame, app: &mut App, body: Rect) {
         Span::styled("run   ", DIM),
         Span::styled("↑ ↓ ", BOLD),
         Span::styled("move   ", DIM),
-        Span::styled("Esc Ctrl+C ", BOLD),
+        Span::styled("Esc ", BOLD),
         Span::styled(if titles.len() > 1 { "back" } else { "close" }, DIM),
     ]));
     let inner = panel(frame, body, height, &title);
@@ -2254,6 +2256,10 @@ pub(crate) mod tests {
             "{shown}"
         );
         assert!(shown.contains("s  stage"), "{shown}");
+        assert!(
+            shown.contains("Space commands"),
+            "the leader twice opens the command list: {shown}"
+        );
         assert!(
             !shown.contains("u  unstage"),
             "an unstaged file cannot be unstaged: {shown}"

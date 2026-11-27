@@ -576,7 +576,6 @@ const NORMAL: &[(&str, &str)] = &[
     ("n", "search.next"),
     ("N", "search.previous"),
     ("?", "help.keys"),
-    ("<c-k>", "commands.open"),
     ("<c-z>", "terminal.suspend"),
     ("<c-l>", "terminal.redraw"),
     ("<space> s", "stage"),
@@ -608,6 +607,7 @@ const NORMAL: &[(&str, &str)] = &[
     ("<space> d s", "diff.layout"),
     ("<space> d w", "view.wrap"),
     ("<space> ?", "help.keys"),
+    ("<space> <space>", "commands.open"),
 ];
 
 const INSERT_KEYS: &[(&str, &str)] = &[
