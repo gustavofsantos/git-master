@@ -1589,15 +1589,19 @@ impl<'a> Workspaces<'a> {
 
     // ---- Following members and Update Workspace (D269) ----
 
-    /// The folders to fetch for Update Workspace: one member folder per repository the members
-    /// belong to, in the order of `.gitmodules`, skipping members whose folder is gone. The key is
-    /// the repository's main checkout, as `.gitmodules` records it.
+    /// The folders to fetch for Update Workspace: one per repository the members belong to, in
+    /// the order of `.gitmodules`, skipping members whose folder is gone. The key is the
+    /// repository's main checkout, as `.gitmodules` records it, and the fetch runs there, as Fetch
+    /// does in that clone, so a remote named by a relative path still resolves; a main checkout
+    /// that is gone is fetched from the member's folder.
     pub fn fetch_targets(&self, ws: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
         let mut targets: Vec<(String, PathBuf)> = Vec::new();
         for member in self.members(ws)? {
             let dir = ws.join(&member.path);
             if dir.exists() && !targets.iter().any(|(repo, _)| *repo == member.url) {
-                targets.push((member.url, dir));
+                let main = PathBuf::from(&member.url);
+                let at = if main.is_dir() { main } else { dir };
+                targets.push((member.url, at));
             }
         }
         Ok(targets)

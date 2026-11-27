@@ -512,3 +512,20 @@ fn follow_again_refuses_changes_then_keeps_the_branch() {
     );
     assert_eq!(git_in(&ws, &["status", "--porcelain"]), "");
 }
+
+#[test]
+fn a_remote_named_by_a_relative_path_is_fetched_from_the_clone() {
+    let s = Scratch::new();
+    let shared = s.repo_with_origin("shared");
+    // The clone names its remote relative to itself, which a member's folder elsewhere does not
+    // resolve: the fetch runs in the clone, as Fetch does there.
+    git_in(&shared, &["remote", "set-url", "origin", "../shared.git"]);
+    let ws = s.create("one");
+    let member = s.follow(&ws, &shared, "origin/main");
+    let tip = s.push_upstream("shared", "main", "b.txt");
+
+    let (code, rows) = s.update(&ws);
+    assert_eq!(code, 0, "{rows:?}");
+    assert!(rows[0].starts_with("shared\tupdated\t"), "{rows:?}");
+    assert_eq!(git_in(&member, &["rev-parse", "HEAD"]), tip);
+}
