@@ -87,7 +87,7 @@ Press `Space` twice to find a command by what it does: the leader, then the lead
 
 The list holds the commands that apply where you are, as the menu does. Type to narrow it: a row stays when its description holds every word you typed, in any case. `↓` and `↑`, or `Ctrl+N` and `Ctrl+P` (`Ctrl+J` and `Ctrl+K` too), move through it, and `Enter`, or a click on a row, runs the command and closes the list.
 
-A row ending in `…` opens a list of its own, stacked on the one before, such as **Filter the threads…** with one row per filter. The new list has its own search field and starts empty. `Esc` closes the list on top and goes back to the one below, as it was left, with its text and its row; on the last list, it closes the command list. `Ctrl+C` quits, here as everywhere.
+A row ending in `…` opens a list of its own, stacked on the one before, such as **Filter the threads…** with one row per filter. The new list has its own search field and starts empty. `Esc` closes the list on top and goes back to the one below, as it was left, with its text and its row; on the last list, it closes the command list. `Ctrl+C` twice quits, here as everywhere.
 
 ## Keys
 
@@ -122,7 +122,11 @@ A row ending in `…` opens a list of its own, stacked on the one before, such a
 | `Space Space` | Open the [command list](#the-command-list). |
 | `Ctrl+Z` | Suspend to the shell; `fg` brings the companion back. |
 | `Ctrl+L` | Redraw the screen. |
-| `Ctrl+C` | Quit. |
+| `Ctrl+C` `Ctrl+C` | Quit: press `Ctrl+C` twice within two seconds. The first press only says how. |
+
+## Quit
+
+`q` on Status quits, as in less. `Ctrl+C` quits from anywhere, but only when you press it twice: the first press leaves everything as it is and the hint line says `Press Ctrl+C again to quit.`; a second press within two seconds quits. Any other key in between, or a pause longer than two seconds, starts over, so a stray `Ctrl+C`, such as one meant for the agent in the pane beside it, never closes the companion.
 
 ## Stage and unstage
 
@@ -160,7 +164,7 @@ On a thread, the menu offers **reply** (`Space r`), **resolve** (`Space R`) or *
 
 ## Questions wait a second
 
-Every question the companion asks you, and the text box, waits one second before it takes an answer that ends it. In that second, `Esc` and the other ways to cancel are ignored; for a question whose yes changes something you cannot take back, such as deleting a thread, the yes is ignored too. Keys pressed in that second are dropped, so a key you meant for the screen behind cannot answer the question by accident. The keys show dimmed until they are taken. `Ctrl+C` still quits at once, and the menu and the command list answer your first key without waiting.
+Every question the companion asks you, and the text box, waits one second before it takes an answer that ends it. In that second, `Esc` and the other ways to cancel are ignored; for a question whose yes changes something you cannot take back, such as deleting a thread, the yes is ignored too. Keys pressed in that second are dropped, so a key you meant for the screen behind cannot answer the question by accident. The keys show dimmed until they are taken. `Ctrl+C` twice still quits at once, and the menu and the command list answer your first key without waiting.
 
 **copy reference** puts `@path:lines` of the selection on the clipboard, to paste into your agent's prompt.
 
@@ -220,7 +224,7 @@ Each time the companion starts, a banner above the mode line shows a tip: someth
 
 > **Planned.** A key map of your own is not available yet.
 
-Every action has a name, and every key is a binding of a name, so you can make the keys yours: rebind any action, in any mode, and choose the prefix that opens the menu, such as `,` or `g` in place of `Space`. Two keys cannot be taken away: `Ctrl+C` always quits, and `Esc` always closes the menu. A binding that names an unknown action, or a key bound twice, is reported when the companion starts, and the default is kept for it.
+Every action has a name, and every key is a binding of a name, so you can make the keys yours: rebind any action, in any mode, and choose the prefix that opens the menu, such as `,` or `g` in place of `Space`. Two keys cannot be taken away: `Ctrl+C` pressed twice always quits, and `Esc` always closes the menu. A binding that names an unknown action, or a key bound twice, is reported when the companion starts, and the default is kept for it.
 
 ## See also
 

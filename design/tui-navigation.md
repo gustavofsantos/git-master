@@ -51,7 +51,7 @@ A **prompt** is an overlay that waits for the person: Confirm, the text box, the
 - keys pressed during the wait are dropped, not queued: a key meant for the screen behind cannot answer the prompt;
 - the prompt shows its cancel and confirm keys dimmed until they are accepted, so the wait is visible.
 
-`Ctrl+C` still quits at once. The menu is not a prompt: it acts on the first key. The wait is one value in the code (`PROMPT_GUARD`), read through the same path as the key map, so it can be configured with it (Q50).
+`Ctrl+C` twice still quits at once (D271). The menu is not a prompt: it acts on the first key. The wait is one value in the code (`PROMPT_GUARD`), read through the same path as the key map, so it can be configured with it (Q50).
 
 ## Sections
 
@@ -95,7 +95,7 @@ The **leader** is an ordinary prefix bound in the Normal and Visual maps (`Space
 
 Keys are written in one notation in the code and in configuration: `j`, `G`, `<space>`, `<tab>`, `<cr>`, `<esc>`, `<c-s>`, `<s-down>`, `<pagedown>`, sequences separated by spaces (`<space> s`, `g g`).
 
-The **default map** binds the universal keys (arrows, page keys, `Tab`, `Enter`, `Esc`, `Shift`+arrows to select), the vim keys for muscle memory (`j`, `k`, `g g`, `G`, `<c-d>`, `<c-u>`, `V`), the leader (`Space`, as neovim's), and, borrowed from neovim, less and the Unix terminal (D242): `q` back as in less and man (with `Esc`); `/` search, `n` and `N` for the next and previous match; `] c` and `[ c` for the next and previous hunk, as in vim's diff mode; `z a`, `z o`, `z c`, `z R`, `z M` to fold, as in vim (with `Tab`); `<c-z>` to suspend to the shell and `<c-l>` to redraw; `?` for the keys screen, as in tig, lazygit and Magit (vim and less search backward with it; `N` does that here). A person's map, read from a configuration file later, replaces bindings by action name and may rebind the leader to `,` or `g`. Two rules keep it safe: `Ctrl+C` always quits and `Esc` always leaves Pending mode, whatever the map says, so no map can lock a person in; and a map that names an unknown action or binds a key twice is reported, with the default kept for that binding.
+The **default map** binds the universal keys (arrows, page keys, `Tab`, `Enter`, `Esc`, `Shift`+arrows to select), the vim keys for muscle memory (`j`, `k`, `g g`, `G`, `<c-d>`, `<c-u>`, `V`), the leader (`Space`, as neovim's), and, borrowed from neovim, less and the Unix terminal (D242): `q` back as in less and man (with `Esc`); `/` search, `n` and `N` for the next and previous match; `] c` and `[ c` for the next and previous hunk, as in vim's diff mode; `z a`, `z o`, `z c`, `z R`, `z M` to fold, as in vim (with `Tab`); `<c-z>` to suspend to the shell and `<c-l>` to redraw; `?` for the keys screen, as in tig, lazygit and Magit (vim and less search backward with it; `N` does that here). A person's map, read from a configuration file later, replaces bindings by action name and may rebind the leader to `,` or `g`. Two rules keep it safe: `Ctrl+C` pressed twice always quits (D271) and `Esc` always leaves Pending mode, whatever the map says, so no map can lock a person in; and a map that names an unknown action or binds a key twice is reported, with the default kept for that binding.
 
 ## Terminal conventions (D242)
 
