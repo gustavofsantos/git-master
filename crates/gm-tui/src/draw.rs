@@ -174,6 +174,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Confirm { .. }) => draw_question(frame, app, body, now),
         Some(Overlay::Search { .. }) => draw_search(frame, app, size),
         Some(Overlay::Files { .. }) => draw_files(frame, app, body, now),
+        Some(Overlay::Commands { .. }) => draw_commands(frame, app, body),
         None => draw_menu(frame, app, body),
     }
 }
@@ -1901,6 +1902,84 @@ fn draw_files(frame: &mut Frame, app: &mut App, body: Rect, now: Instant) {
             app.hits.push(Hit {
                 area: Rect::new(inner.x, y, inner.width, 1),
                 click: Click::Pick(index),
+            });
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The command list on top (D270): its search field with how many rows it keeps, then a row per
+/// command, its key in the first column and its description in the rest, the one under the cursor
+/// reversed. The title names every list of the stack, first to top.
+fn draw_commands(frame: &mut Frame, app: &mut App, body: Rect) {
+    let titles: Vec<&str> = app
+        .overlays
+        .iter()
+        .filter_map(|overlay| match overlay {
+            Overlay::Commands { list, .. } => Some(list.title()),
+            _ => None,
+        })
+        .collect();
+    let title = titles.join(" › ");
+    let Some(Overlay::Commands { list, .. }) = app.overlays.last() else {
+        return;
+    };
+    let rows = usize::from(body.height)
+        .saturating_sub(4)
+        .clamp(1, PICKER_ROWS);
+    let height = u16::try_from(rows + 3).unwrap_or(u16::MAX);
+    let shown = list.shown();
+    let width = list
+        .rows
+        .iter()
+        .map(|row| row.key.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(7)
+        + 2;
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled("› ", BOLD),
+        Span::raw(list.query.clone()),
+        Span::styled(" ", ON),
+        Span::styled(format!("  {}/{}", shown.len(), list.rows.len()), DIM),
+    ])];
+    let first = (list.selected + 1).saturating_sub(rows);
+    let mut clicks: Vec<(usize, usize)> = Vec::new();
+    for (at, &index) in shown.iter().enumerate().skip(first).take(rows) {
+        let row = &list.rows[index];
+        clicks.push((lines.len(), at));
+        let line = Line::from(vec![
+            Span::styled(format!("{:<width$}", row.key), BOLD),
+            Span::raw(row.description.clone()),
+        ]);
+        lines.push(if at == list.selected {
+            line.patch_style(ON)
+        } else {
+            line
+        });
+    }
+    if shown.is_empty() {
+        lines.push(Line::styled("No command matches.", DIM));
+    }
+    while lines.len() < rows + 1 {
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("Enter ", color(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("run   ", DIM),
+        Span::styled("↑ ↓ ", BOLD),
+        Span::styled("move   ", DIM),
+        Span::styled("Esc Ctrl+C ", BOLD),
+        Span::styled(if titles.len() > 1 { "back" } else { "close" }, DIM),
+    ]));
+    let inner = panel(frame, body, height, &title);
+    app.hits.retain(|hit| !inner.intersects(hit.area));
+    for (row, at) in clicks {
+        let y = inner.y + u16::try_from(row).unwrap_or(u16::MAX);
+        if y < inner.y + inner.height {
+            app.hits.push(Hit {
+                area: Rect::new(inner.x, y, inner.width, 1),
+                click: Click::Command(at),
             });
         }
     }

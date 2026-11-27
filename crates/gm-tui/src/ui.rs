@@ -4,7 +4,7 @@
 //! under the cursor or in the selection. Nothing here draws or touches the terminal.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gm_schema::{
     CommandKind, Event, HistoryScope, LineKind, OperationId, OperationState, RepoStatus,
@@ -19,6 +19,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::agent_screen::AgentPage;
 use crate::blame_screens;
+use crate::commands::{CommandList, Target, update_summary};
 use crate::data::{
     ColorJob, ColorTarget, FileText, Group, Repo, blame_color_job, diff_color_jobs, split_colors,
 };
@@ -173,6 +174,12 @@ pub enum Overlay {
         picker: Picker,
         guard: Guard,
     },
+    /// One list of the command list (`Ctrl+K`, D270), stacked on the one below it. Not a
+    /// prompt: its guard is open from the start (D270 (7)).
+    Commands {
+        list: CommandList,
+        guard: Guard,
+    },
 }
 
 impl Overlay {
@@ -181,7 +188,8 @@ impl Overlay {
             Overlay::Text { guard, .. }
             | Overlay::Confirm { guard, .. }
             | Overlay::Search { guard, .. }
-            | Overlay::Files { guard, .. } => guard,
+            | Overlay::Files { guard, .. }
+            | Overlay::Commands { guard, .. } => guard,
         }
     }
 }
@@ -199,6 +207,8 @@ pub enum Click {
     Answer(Answer),
     /// A file the picker lists, by its index among the hits: it opens.
     Pick(usize),
+    /// A row of the command list on top, by its position among the rows shown: it runs (D270).
+    Command(usize),
     /// The scroll bar: a press on its thumb grabs it, elsewhere on it jumps there (D265).
     Bar,
     /// The banner's close button (D267).
@@ -269,6 +279,8 @@ enum Remote {
     Fetch,
     Pull,
     Push,
+    /// Update Workspace (D269 (4)).
+    Update,
 }
 
 impl Remote {
@@ -277,6 +289,7 @@ impl Remote {
             CommandKind::Fetch => Some(Self::Fetch),
             CommandKind::Pull => Some(Self::Pull),
             CommandKind::PushWithLease => Some(Self::Push),
+            CommandKind::UpdateWorkspace { .. } => Some(Self::Update),
             _ => None,
         }
     }
@@ -286,6 +299,7 @@ impl Remote {
             Self::Fetch => "Fetching…",
             Self::Pull => "Pulling…",
             Self::Push => "Pushing…",
+            Self::Update => "Updating the workspace…",
         }
     }
 
@@ -294,6 +308,7 @@ impl Remote {
             Self::Fetch => "Fetched.",
             Self::Pull => "Pulled.",
             Self::Push => "Pushed.",
+            Self::Update => "Updated.",
         }
     }
 
@@ -302,6 +317,7 @@ impl Remote {
             Self::Fetch => "Fetch failed",
             Self::Pull => "Pull failed",
             Self::Push => "Push failed",
+            Self::Update => "Update failed",
         }
     }
 }
@@ -376,6 +392,11 @@ pub struct App {
     pub(crate) image_seq: u32,
     pub image_ids: Vec<u32>,
     pub(crate) decode_jobs: Vec<crate::images::DecodeJob>,
+    /// The workspace's folder when the repository is a workspace, so Update Workspace applies
+    /// (D269).
+    pub workspace: Option<String>,
+    /// What the last Update Workspace did, for the hint line once it ends.
+    update_summary: Option<String>,
 }
 
 impl std::fmt::Debug for App {
@@ -428,6 +449,8 @@ impl App {
             image_seq: 0,
             image_ids: Vec::new(),
             decode_jobs: Vec::new(),
+            workspace: None,
+            update_summary: None,
         };
         app.rebuild();
         app.ask_for_reads();
@@ -629,7 +652,10 @@ impl App {
             | CommandKind::AddReviewCommentOn { .. }
             | CommandKind::ReplyToReviewComment { .. } => Pending::Text,
             CommandKind::Commit { .. } => Pending::Commit,
-            CommandKind::Fetch | CommandKind::Pull | CommandKind::PushWithLease => {
+            CommandKind::Fetch
+            | CommandKind::Pull
+            | CommandKind::PushWithLease
+            | CommandKind::UpdateWorkspace { .. } => {
                 let Some(remote) = Remote::of(kind) else {
                     return;
                 };
@@ -809,7 +835,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// Takes an answer for the file picker; false when `event` is not one.
+    /// Takes an answer for the file picker, or the rows of Update Workspace; false when `event`
+    /// is neither.
     fn apply_picker(&mut self, event: &Event) -> bool {
         match event {
             Event::FilesFound { id, search } => {
@@ -823,6 +850,10 @@ impl App {
                 if let Some(command) = self.picker_mut().map(|picker| picker.command()) {
                     self.commands.push(command);
                 }
+            }
+            // What Update Workspace did, for the hint line once it ends (D269 (4)).
+            Event::WorkspaceUpdated { members, .. } => {
+                self.update_summary = Some(update_summary(members));
             }
             _ => return false,
         }
@@ -1016,10 +1047,12 @@ impl App {
                 self.notice = Some(format!("{what} failed: {reason}"));
             }
             Some(Pending::Remote(remote)) => {
-                self.notice = Some(if failed {
-                    format!("{}: {reason}", remote.failed())
-                } else {
-                    remote.done().to_owned()
+                // Update Workspace says what each member did (D269 (4)).
+                let summary = self.update_summary.take();
+                self.notice = Some(match (failed, summary) {
+                    (_, Some(summary)) => summary,
+                    (true, None) => format!("{}: {reason}", remote.failed()),
+                    (false, None) => remote.done().to_owned(),
                 });
             }
             Some(Pending::Text | Pending::Commit) => {
@@ -1230,8 +1263,13 @@ impl App {
             return;
         };
         self.dirty = true;
+        // In the command list, `Ctrl+C` closes the list on top instead of quitting (D270 (6)).
         if key == Key::ctrl('c') {
-            self.quit = true;
+            if matches!(self.overlays.last(), Some(Overlay::Commands { .. })) {
+                self.overlays.pop();
+            } else {
+                self.quit = true;
+            }
             return;
         }
         if !self.overlays.is_empty() {
@@ -1308,6 +1346,17 @@ impl App {
                 }
                 _ => {}
             },
+            Some(Overlay::Commands { list, .. }) => match self.input.feed(Mode::Insert, key) {
+                Outcome::Type(c) => list.type_text(c.encode_utf8(&mut [0; 4])),
+                Outcome::Action("text.backspace") => list.backspace(),
+                Outcome::Action("pick.down") => list.move_by(1),
+                Outcome::Action("pick.up") => list.move_by(-1),
+                Outcome::Action("text.newline" | "text.send") => self.choose_command(None, now),
+                Outcome::Action("text.cancel") => {
+                    self.overlays.pop();
+                }
+                _ => {}
+            },
             Some(Overlay::Text { composer, .. }) => match self.input.feed(Mode::Insert, key) {
                 Outcome::Type(c) => composer.type_text(c.encode_utf8(&mut [0; 4])),
                 Outcome::Action("text.newline") => composer.type_text("\n"),
@@ -1362,6 +1411,9 @@ impl App {
                 picker.type_text(text.lines().next().unwrap_or_default());
                 self.commands.push(picker.command());
             }
+            Some(Overlay::Commands { list, .. }) => {
+                list.type_text(text.lines().next().unwrap_or_default());
+            }
             _ => return,
         }
         self.dirty = true;
@@ -1401,6 +1453,7 @@ impl App {
                 }
                 Some(Click::Trail(depth)) => self.stack.back_to(depth + 1),
                 Some(Click::Pick(index)) => self.pick(Some(index)),
+                Some(Click::Command(index)) => self.choose_command(Some(index), now),
                 Some(Click::Answer(answer)) => {
                     let allowed = self
                         .overlays
@@ -1557,6 +1610,7 @@ impl App {
             "thread.delete" | "thread.show" => thread.is_some(),
             "copy.reference" => current.and_then(Item::file).is_some(),
             "commit" => self.repo.status.entries.iter().any(|e| e.staged.is_some()),
+            "workspace.update" => self.workspace.is_some(),
             "remote.pull" => self.repo.status.branch.upstream.is_some(),
             "remote.push" => self.repo.status.branch.head.is_some(),
             "go.branch" => self.repo.range.is_some(),
@@ -1567,6 +1621,45 @@ impl App {
                 Screen::File { .. } | Screen::Status(_) | Screen::Diff { .. }
             ),
             _ => true,
+        }
+    }
+
+    /// Opens the command list of `group`, or the first one for `None`, on top of the lists open
+    /// already (D270). Its rows are what applies now, under the lists.
+    fn open_commands(&mut self, group: Option<&'static str>) {
+        let map = self.input.map(Mode::Normal);
+        let key = |name: &str| {
+            map.and_then(|map| {
+                map.keys_of(name)
+                    .iter()
+                    .map(|keys| crate::nav::keys::show_sequence(keys))
+                    .min_by_key(|shown| (shown.chars().count(), shown.clone()))
+            })
+            .unwrap_or_default()
+        };
+        let list = CommandList::build(self.registry.all(), group, |name| self.applies(name), key);
+        self.overlays.push(Overlay::Commands {
+            list,
+            guard: Guard::with_wait(Instant::now(), false, Duration::ZERO),
+        });
+    }
+
+    /// Runs the row at `at` among the rows the list on top shows, or the one under the cursor:
+    /// an action closes every list first, then runs as from its key; a group stacks its list.
+    fn choose_command(&mut self, at: Option<usize>, now: Instant) {
+        let Some(Overlay::Commands { list, .. }) = self.overlays.last() else {
+            return;
+        };
+        let Some(target) = list.chosen(at).map(|row| row.target) else {
+            return;
+        };
+        match target {
+            Target::List(group) => self.open_commands(Some(group)),
+            Target::Action(name) => {
+                self.overlays
+                    .retain(|overlay| !matches!(overlay, Overlay::Commands { .. }));
+                self.run(name, now);
+            }
         }
     }
 
@@ -1999,6 +2092,13 @@ impl App {
                 }
             }
             "go.branch" => self.open_diff(DiffKind::Branch),
+            "commands.open" => self.open_commands(None),
+            "workspace.update" => {
+                if let Some(workspace) = self.workspace.clone() {
+                    self.commands
+                        .push(CommandKind::UpdateWorkspace { workspace });
+                }
+            }
             "view.wrap" => {
                 let (wrap, notice) = match self.wrap {
                     LineWrap::Wrap => (LineWrap::Cut, "Long lines are cut at the edge."),
@@ -2483,7 +2583,6 @@ fn description(branch: &str, text: Option<&str>) -> Option<(String, String)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::time::Duration;
 
     use gm_schema::{
         BranchInfo, Change, DiffLine, FileDiff, Hunk, HunkId, ReviewAnchor, ReviewComment,
@@ -4520,6 +4619,172 @@ pub(crate) mod tests {
             texts(&app).iter().any(|t| t == "Request"),
             "{:?}",
             texts(&app)
+        );
+    }
+
+    // ---- The command list (D270) ----
+
+    fn command_rows(app: &App) -> Vec<String> {
+        let Some(Overlay::Commands { list, .. }) = app.overlays.last() else {
+            return Vec::new();
+        };
+        list.shown()
+            .iter()
+            .map(|&i| list.rows[i].description.clone())
+            .collect()
+    }
+
+    fn lists(app: &App) -> usize {
+        app.overlays
+            .iter()
+            .filter(|overlay| matches!(overlay, Overlay::Commands { .. }))
+            .count()
+    }
+
+    #[test]
+    fn ctrl_k_lists_what_applies_with_its_key_and_typing_narrows_it() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<c-k>", now);
+        assert_eq!(lists(&app), 1);
+        let rows = command_rows(&app);
+        assert!(
+            rows.contains(&"Fetch every remote and prune the branches they deleted".to_owned())
+        );
+        assert!(
+            rows.contains(&"Diffs and long lines…".to_owned()),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.starts_with("Move the cursor")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("workspace")),
+            "not a workspace: {rows:?}"
+        );
+        let listed = crate::draw::tests::screen(&mut app);
+        assert!(listed.contains("Commands"), "{listed}");
+        assert!(listed.contains("Space F"), "the key column: {listed}");
+
+        // The first key is taken at once: the list is not a prompt.
+        key(&mut app, "f e t c h", now);
+        assert_eq!(
+            command_rows(&app),
+            ["Fetch every remote and prune the branches they deleted"]
+        );
+        key(&mut app, "<cr>", now);
+        assert_eq!(lists(&app), 0, "running a command closes the list");
+        assert_eq!(app.take_commands(), [CommandKind::Fetch]);
+    }
+
+    #[test]
+    fn a_row_with_a_list_of_its_own_stacks_it_and_ctrl_c_pops_one_list_at_a_time() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<c-k>", now);
+        key(&mut app, "d i f f s", now);
+        key(&mut app, "<cr>", now);
+        assert_eq!(lists(&app), 2);
+        let rows = command_rows(&app);
+        assert!(
+            rows.contains(&"Switch the diffs between Unified and Split".to_owned()),
+            "{rows:?}"
+        );
+        let listed = crate::draw::tests::screen(&mut app);
+        assert!(
+            listed.contains("Commands › Diffs and long lines"),
+            "{listed}"
+        );
+
+        key(&mut app, "<c-c>", now);
+        assert_eq!(lists(&app), 1, "back to the first list");
+        let Some(Overlay::Commands { list, .. }) = app.overlays.last() else {
+            panic!("the first list");
+        };
+        assert_eq!(list.query, "diffs", "as it was left");
+        key(&mut app, "<c-c>", now);
+        assert_eq!(lists(&app), 0);
+        assert!(!app.quit, "Ctrl+C closed the lists, it did not quit");
+        key(&mut app, "<c-c>", now);
+        assert!(app.quit, "with no list, Ctrl+C quits");
+    }
+
+    #[test]
+    fn esc_also_pops_and_an_action_of_a_stacked_list_runs_and_closes_them_all() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<c-k>", now);
+        key(&mut app, "<esc>", now);
+        assert_eq!(lists(&app), 0);
+        key(&mut app, "<c-k>", now);
+        key(&mut app, "d i f f s <cr>", now);
+        key(&mut app, "s p l i t <cr>", now);
+        assert_eq!(lists(&app), 0);
+        assert_eq!(app.layout, Layout::Split);
+    }
+
+    #[test]
+    fn a_click_on_a_row_runs_it() {
+        let now = Instant::now();
+        let mut app = app();
+        key(&mut app, "<c-k>", now);
+        key(&mut app, "k e y", now);
+        crate::draw::tests::screen(&mut app);
+        let area = app
+            .hits
+            .iter()
+            .find(|hit| hit.click == Click::Command(0))
+            .map(|hit| hit.area)
+            .expect("the row is clickable");
+        app.on_mouse_at(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + 2,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            now,
+        );
+        assert_eq!(lists(&app), 0);
+        assert_eq!(app.stack.trail(), ["status", "keys"]);
+    }
+
+    #[test]
+    fn in_a_workspace_the_list_updates_every_member_and_the_hint_line_says_how_it_ended() {
+        let now = Instant::now();
+        let mut app = app();
+        app.workspace = Some("/repo".to_owned());
+        key(&mut app, "<c-k>", now);
+        key(&mut app, "u p d a t e <cr>", now);
+        let sent = app.take_commands();
+        assert_eq!(
+            sent,
+            [CommandKind::UpdateWorkspace {
+                workspace: "/repo".to_owned()
+            }]
+        );
+        app.sent(OperationId(7), &sent[0]);
+        assert_eq!(app.notice.as_deref(), Some("Updating the workspace…"));
+        let row = |member: &str, result, reason: Option<&str>| gm_schema::MemberUpdate {
+            member: member.to_owned(),
+            result,
+            from: None,
+            to: None,
+            reason: reason.map(str::to_owned),
+        };
+        app.apply(&Event::WorkspaceUpdated {
+            id: OperationId(7),
+            path: "/repo".to_owned(),
+            members: vec![
+                row("shared", gm_schema::UpdateResult::Updated, None),
+                row("billing", gm_schema::UpdateResult::Skipped, Some("changes")),
+            ],
+        });
+        ended(&mut app, 7, OperationState::Done, Some("Updated"));
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Updated 1 · up to date 0 · skipped 1: billing has changes")
         );
     }
 }

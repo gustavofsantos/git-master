@@ -5,6 +5,7 @@
 mod agent_screen;
 mod blame_screens;
 mod color;
+mod commands;
 mod data;
 mod diff_screen;
 mod draw;
@@ -162,6 +163,12 @@ fn apply_settings(app: &mut App, root: &std::path::Path) {
         gm_core::settings::TerminalImages::Off => kitty::Wanted::Off,
     };
     app.graphics = kitty::detect(wanted, |name| std::env::var(name).ok());
+    // Update Workspace applies in a workspace's own repository (D269): a read of its config.
+    if gm_core::workspace::Workspaces::new(&gm_core::git::SubprocessGit::default(), None)
+        .is_workspace(root)
+    {
+        app.workspace = Some(root.to_string_lossy().into_owned());
+    }
     app.cell_px = cell_pixels();
     // A tip at each start, unless turned off (D267); the time picks which.
     if settings.tips != Some(false) {
