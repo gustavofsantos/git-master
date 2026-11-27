@@ -206,6 +206,15 @@ Pictures are drawn with the kitty graphics protocol, which kitty and Ghostty spe
 
 `Enter` on a line, on Status, Diff or File, opens the file at that line in `$VISUAL`, else `$EDITOR`, else `vi`. The companion hands the terminal to the editor and takes it back when the editor quits.
 
+A file can open in a program of its own instead, by its extension: a spreadsheet viewer for `.csv`, say. Name the program with `gitmaster-open.<extension>.command`:
+
+```sh
+git config --global gitmaster-open.csv.command pln
+git config --global gitmaster-open.tsv.command "pln -d tab"
+```
+
+`Enter` on a line of a `.csv` file then runs `pln` with the file's path as its last argument, in the terminal, as it runs the editor. The program gets no line number. The extension is matched without regard to case, and the command is split into words, never passed to a shell (see [Configuration](../reference/configuration.md#git-configuration-keys)).
+
 **Blame** (`g b` on a line, a file or a thread) shows the file as it is in your working tree, cut into runs of lines that one change last touched. Each run is a section headed by the commit, its subject, who made it and when, or **not committed** for lines you have not committed yet, staged or not. `Enter` on a run's heading opens the commit on the **Diff** screen; `Enter` on a line opens your editor there; `Space w` asks **Origin** about the line or the lines you selected.
 
 > **Planned.** A run made by an agent does not name the agent and its thread on Blame yet; `Space w` shows them on Origin.
