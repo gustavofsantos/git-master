@@ -2,7 +2,11 @@
 //! `gitmaster.editor`, split into words here and never given to a shell; without it, the
 //! system opens the file with the application it has for it. The editor is started and left
 //! alone: the app does not wait for it and reads nothing from it.
+//!
+//! Files of some extensions can open in a program of their own instead of the editor, such as
+//! a spreadsheet viewer for `.csv`: `gitmaster-open.<extension>.command` (D272).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -54,6 +58,34 @@ pub fn split_command(line: &str) -> Result<Vec<String>, String> {
     if in_word {
         words.push(word);
     }
+    Ok(words)
+}
+
+/// The command configured for the extension of `file`, matched without regard to case; `None`
+/// when the file has no extension or none is configured for it. `openers` is keyed by the
+/// extension in lower case, without the dot, as `Settings::openers` holds it.
+pub fn opener_for<'a>(openers: &'a BTreeMap<String, String>, file: &Path) -> Option<&'a str> {
+    let extension = file.extension()?.to_str()?.to_lowercase();
+    openers.get(&extension).map(String::as_str)
+}
+
+/// The program and its arguments that open `file` with `command`, the file as the last
+/// argument (`opener_for`).
+///
+/// # Errors
+///
+/// When the command cannot be split or names no program.
+pub fn opener_argv(command: &str, file: &Path) -> Result<Vec<String>, String> {
+    let mut words = split_command(command).map_err(|e| format!("gitmaster-open: {e}"))?;
+    if words.first().is_none_or(String::is_empty) {
+        return Err("gitmaster-open: the command names no program".to_owned());
+    }
+    if let Some(rest) = words[0].strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        words[0] = Path::new(&home).join(rest).to_string_lossy().into_owned();
+    }
+    words.push(file.to_string_lossy().into_owned());
     Ok(words)
 }
 
@@ -194,6 +226,28 @@ mod tests {
             argv(Some("kitty nvim"), file).unwrap(),
             ["kitty", "nvim", "/w/my flow.lua"]
         );
+    }
+
+    #[test]
+    fn an_opener_is_found_by_extension_whatever_its_case() {
+        let openers = BTreeMap::from([("csv".to_owned(), "pln -H".to_owned())]);
+        assert_eq!(
+            opener_for(&openers, Path::new("/w/data.csv")),
+            Some("pln -H")
+        );
+        assert_eq!(
+            opener_for(&openers, Path::new("/w/DATA.CSV")),
+            Some("pln -H")
+        );
+        assert_eq!(opener_for(&openers, Path::new("/w/data.tsv")), None);
+        assert_eq!(opener_for(&openers, Path::new("/w/csv")), None);
+        assert_eq!(opener_for(&openers, Path::new("/w/.csv")), None);
+        assert_eq!(
+            opener_argv("pln -H", Path::new("/w/my data.csv")).unwrap(),
+            ["pln", "-H", "/w/my data.csv"]
+        );
+        assert!(opener_argv("''", Path::new("/w/a.csv")).is_err());
+        assert!(opener_argv("pln 'x", Path::new("/w/a.csv")).is_err());
     }
 
     #[test]

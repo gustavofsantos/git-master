@@ -18,6 +18,7 @@
 //! | `gitmaster.threads.redactDisabledBuiltin` | multi-valued: names of built-in patterns to turn off |
 //! | `gitmaster.threads.redactPath` | multi-valued: globs whose content is never stored |
 //! | `gitmaster-redact.<name>.regex`, `.group` | a user redaction pattern |
+//! | `gitmaster-open.<extension>.command` | the program the terminal companion opens such files with (D272) |
 //!
 //! A multi-valued key adds up across layers, as Git's do. An empty value clears what the layers
 //! below it set, so a repository can remove a global entry. A pattern with an empty `regex` is
@@ -26,7 +27,7 @@
 //! The preferences used to live in `settings.json`. `migrate_legacy` moves them into the global
 //! configuration once and sets the file aside.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,6 +71,9 @@ pub struct Settings {
     pub tips: Option<bool>,
     /// Whether the terminal companion draws images. Read only, like `line_wrap`.
     pub images: TerminalImages,
+    /// The command that opens a file by its extension (lower case, without the dot) instead of
+    /// the editor, from `gitmaster-open.<extension>.command` (D272). Read only, like `line_wrap`.
+    pub openers: BTreeMap<String, String>,
     pub threads: ThreadsConfig,
 }
 
@@ -161,6 +165,24 @@ impl Settings {
                     push(&mut disabled, value.unwrap_or_default());
                 }
                 "gitmaster.threads.redactpath" => push(&mut paths, value.unwrap_or_default()),
+                key if key.starts_with("gitmaster-open.") => {
+                    if let Some(extension) = key
+                        .strip_prefix("gitmaster-open.")
+                        .and_then(|rest| rest.strip_suffix(".command"))
+                    {
+                        let extension = extension.trim_start_matches('.').to_lowercase();
+                        match value.map(str::trim).filter(|v| !v.is_empty()) {
+                            // An empty value clears what a lower layer set.
+                            None => {
+                                settings.openers.remove(&extension);
+                            }
+                            Some(command) if !extension.is_empty() => {
+                                settings.openers.insert(extension, command.to_owned());
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
                 key => {
                     let Some((name, variable)) = key
                         .strip_prefix("gitmaster-redact.")
@@ -220,6 +242,7 @@ impl Settings {
             line_wrap: None,
             tips: None,
             images: TerminalImages::Auto,
+            openers: BTreeMap::new(),
             threads: ThreadsConfig::from_settings(&document),
         }
     }
@@ -543,6 +566,29 @@ mod tests {
             "gitmaster.linewrap=false\ngitmaster.linewrap=true",
         ));
         assert_eq!(on.line_wrap, Some(true));
+    }
+
+    #[test]
+    fn openers_are_keyed_by_extension_and_a_later_layer_wins() {
+        assert!(Settings::default().openers.is_empty());
+        let settings = Settings::from_entries(&entries(
+            "gitmaster-open.CSV.command=pln\n\
+             gitmaster-open.tsv.command=vd\n\
+             gitmaster-open..json.command=  jless  \n\
+             gitmaster-open.tsv.command=pln -d tab\n\
+             gitmaster-open.md.command=glow\n\
+             gitmaster-open.md.command=\n\
+             gitmaster-open.txt.editor=less",
+        ));
+        let openers: Vec<(&str, &str)> = settings
+            .openers
+            .iter()
+            .map(|(e, c)| (e.as_str(), c.as_str()))
+            .collect();
+        assert_eq!(
+            openers,
+            [("csv", "pln"), ("json", "jless"), ("tsv", "pln -d tab")]
+        );
     }
 
     #[test]

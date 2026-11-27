@@ -156,6 +156,7 @@ fn apply_settings(app: &mut App, root: &std::path::Path) {
     if settings.line_wrap == Some(false) {
         app.wrap = crate::ui::LineWrap::Cut;
     }
+    app.openers = settings.openers;
     // Images where the terminal draws them, unless turned off (D268).
     let wanted = match settings.images {
         gm_core::settings::TerminalImages::Auto => kitty::Wanted::Auto,
@@ -278,7 +279,7 @@ fn run(opened: Opened) -> io::Result<()> {
                 Request::Edit { path, line } => {
                     // The editor takes the terminal; the companion takes it back after.
                     drop(screen);
-                    if let Err(error) = edit(&path, line) {
+                    if let Err(error) = edit(&path, line, &app.openers) {
                         app.notify(format!("The editor did not start: {error}"));
                     }
                     screen = Screen::take()?;
@@ -299,9 +300,12 @@ fn run(opened: Opened) -> io::Result<()> {
     }
 }
 
-/// Runs `$VISUAL`, else `$EDITOR`, else `vi` on `path` at `line`, and waits for it. The
-/// variable may hold arguments (`code -w`), split on spaces as a shell would for words.
-fn edit(path: &str, line: u32) -> io::Result<()> {
+/// Runs the program that opens `path` (`edit_argv`) and waits for it.
+fn edit(
+    path: &str,
+    line: u32,
+    openers: &std::collections::BTreeMap<String, String>,
+) -> io::Result<()> {
     let editor = std::env::var("VISUAL")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -309,16 +313,42 @@ fn edit(path: &str, line: u32) -> io::Result<()> {
             std::env::var("EDITOR")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
-        })
-        .unwrap_or_else(|| "vi".to_owned());
-    let mut words = editor.split_whitespace();
-    let program = words.next().unwrap_or("vi");
+        });
+    let words = edit_argv(path, line, openers, editor.as_deref()).map_err(io::Error::other)?;
+    let (program, rest) = words
+        .split_first()
+        .ok_or_else(|| io::Error::other("no program"))?;
     std::process::Command::new(program)
-        .args(words)
-        .arg(format!("+{line}"))
-        .arg(path)
+        .args(rest)
         .status()
         .map(|_| ())
+}
+
+/// What opens `path` at `line`: the command configured for its extension (D272), with the
+/// file as its last argument and no line, since that program may not read one; else `editor`
+/// (`$VISUAL` or `$EDITOR`), else `vi`, with `+line` before the file. The editor variable may
+/// hold arguments (`code -w`), split on spaces as a shell would for words.
+fn edit_argv(
+    path: &str,
+    line: u32,
+    openers: &std::collections::BTreeMap<String, String>,
+    editor: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let file = Path::new(path);
+    if let Some(command) = gm_core::external_editor::opener_for(openers, file) {
+        return gm_core::external_editor::opener_argv(command, file);
+    }
+    let mut words: Vec<String> = editor
+        .unwrap_or("vi")
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if words.is_empty() {
+        words.push("vi".to_owned());
+    }
+    words.push(format!("+{line}"));
+    words.push(path.to_owned());
+    Ok(words)
 }
 
 /// Writes graphics commands to the terminal, between two draws (D268).
@@ -373,6 +403,41 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use std::collections::BTreeMap;
+
+    use super::edit_argv;
+
+    #[test]
+    fn a_configured_extension_opens_in_its_program_without_the_line() {
+        let openers = BTreeMap::from([("csv".to_owned(), "pln -w 40".to_owned())]);
+        assert_eq!(
+            edit_argv("/r/data/Sales.CSV", 12, &openers, Some("nvim")).unwrap(),
+            ["pln", "-w", "40", "/r/data/Sales.CSV"]
+        );
+    }
+
+    #[test]
+    fn other_files_open_in_the_editor_at_the_line() {
+        let openers = BTreeMap::from([("csv".to_owned(), "pln".to_owned())]);
+        assert_eq!(
+            edit_argv("/r/src/a.rs", 7, &openers, Some("code -w")).unwrap(),
+            ["code", "-w", "+7", "/r/src/a.rs"]
+        );
+        assert_eq!(
+            edit_argv("/r/notes", 1, &openers, None).unwrap(),
+            ["vi", "+1", "/r/notes"]
+        );
+    }
+
+    #[test]
+    fn a_broken_opener_is_an_error_not_the_editor() {
+        let openers = BTreeMap::from([("csv".to_owned(), "pln 'x".to_owned())]);
+        assert!(edit_argv("/r/a.csv", 1, &openers, Some("nvim")).is_err());
+    }
 }
 
 #[cfg(test)]

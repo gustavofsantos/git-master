@@ -55,6 +55,8 @@ impl From<&AppSettings> for Settings {
             line_wrap: None,
             tips: None,
             images: gm_core::settings::TerminalImages::Auto,
+            // Read by the terminal companion only; saving never writes the keys (D272).
+            openers: std::collections::BTreeMap::new(),
             threads: app.threads.clone(),
         }
     }

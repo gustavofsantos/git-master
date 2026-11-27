@@ -237,7 +237,8 @@ pub enum Request {
     Redraw,
     /// Put this text on the clipboard (OSC 52).
     Copy(String),
-    /// Open the file at `path` (absolute) in `$VISUAL` or `$EDITOR`, at `line`.
+    /// Open the file at `path` (absolute) in `$VISUAL` or `$EDITOR`, at `line`; or in the
+    /// program configured for its extension (D272).
     Edit {
         path: String,
         line: u32,
@@ -395,6 +396,9 @@ pub struct App {
     /// The workspace's folder when the repository is a workspace, so Update Workspace applies
     /// (D269).
     pub workspace: Option<String>,
+    /// The program that opens a file of an extension instead of the editor
+    /// (`gitmaster-open.<extension>.command`, D272).
+    pub openers: std::collections::BTreeMap<String, String>,
     /// What the last Update Workspace did, for the hint line once it ends.
     update_summary: Option<String>,
     /// When `Ctrl+C` was pressed, while a second press would quit (D271).
@@ -455,6 +459,7 @@ impl App {
             image_ids: Vec::new(),
             decode_jobs: Vec::new(),
             workspace: None,
+            openers: std::collections::BTreeMap::new(),
             update_summary: None,
             quit_armed: None,
         };
