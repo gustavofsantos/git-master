@@ -37,7 +37,9 @@ use crate::workflow::{
     WorkflowDiagnostic, WorkflowDryRun, WorkflowEnd, WorkflowInfo, WorkflowRunDetail,
     WorkflowRunStatus, WorkflowRunSummary,
 };
-use crate::workspace::{MemberPlan, MemberRequest, RemovalBlocker, WorkspaceProblem, WorkspaceRow};
+use crate::workspace::{
+    MemberPlan, MemberRequest, MemberUpdate, RemovalBlocker, WorkspaceProblem, WorkspaceRow,
+};
 
 /// The refusal of `DeleteMergedBranches` when the merged list no longer matches
 /// the one the human confirmed. The UI matches it to list the branches again.
@@ -283,6 +285,13 @@ pub enum CommandKind {
     CloneRepository {
         url: String,
         path: String,
+    },
+    /// Update Workspace (D269 (4)): fetches each repository the members of the workspace at
+    /// `workspace` belong to, off the engine thread as a remote operation, then fast-forwards every
+    /// member to its target. A person only; recorded in the command log (D28). Answers
+    /// `WorkspaceUpdated`.
+    UpdateWorkspace {
+        workspace: String,
     },
     /// Reads what removing the member `member` (its folder name) of the workspace at `workspace`
     /// would refuse or lose (D256 (5)). Answers `MemberRemovalInspected`. Never recorded in the
@@ -1437,6 +1446,13 @@ pub enum Event {
         id: OperationId,
         url: String,
         path: String,
+    },
+    /// Answers `UpdateWorkspace`: one row per member of the workspace at `path`, in the order of
+    /// its `.gitmodules`.
+    WorkspaceUpdated {
+        id: OperationId,
+        path: String,
+        members: Vec<MemberUpdate>,
     },
     /// Answers `InspectMemberRemoval`: what would stop the removal of the member; none when it
     /// would work.

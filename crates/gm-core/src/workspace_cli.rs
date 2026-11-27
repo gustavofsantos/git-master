@@ -8,7 +8,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use gm_schema::MemberRequest;
+use gm_schema::{MemberRequest, MemberUpdate, UpdateResult};
 
 use crate::GitPort;
 use crate::workspace::{self, AddRequest, CreateRequest, Workspaces};
@@ -16,7 +16,11 @@ use crate::worktree_cli::{self, Args, Env, Failure};
 
 const USAGE: &str = "usage: gitmaster workspace create <name> [--root <dir>] [--branch <branch> --repos-from <file|-> [--base <rev>] [--existing]]
        gitmaster workspace add <repo|url> <branch> [<base>] [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none] [--clone-to <dir>]
+       gitmaster workspace add <repo|url> --follow <remote>/<branch> [--workspace <name|dir>] [--root <dir>] [--as <member>] [--include symlink|reflink|none] [--clone-to <dir>]
        gitmaster workspace remove-member <member> [--workspace <name|dir>] [--root <dir>] [--force]
+       gitmaster workspace update [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
+       gitmaster workspace start-branch <member> <branch> [--workspace <name|dir>] [--root <dir>]
+       gitmaster workspace follow <member> <remote>/<branch> [--workspace <name|dir>] [--root <dir>]
        gitmaster workspace list [--format paths|names|tsv|json] [--root <dir>]
        gitmaster workspace path <name> [--root <dir>]
        gitmaster workspace status [--workspace <name|dir>] [--root <dir>] [--format tsv|json]
@@ -82,6 +86,9 @@ pub fn run_with(
         "status" => status(rest, &ctx, out),
         "remove" => remove(rest, &ctx, out, err),
         "remove-member" => remove_member(rest, &ctx, out, err),
+        "update" => update(rest, &ctx, out),
+        "start-branch" => start_branch(rest, &ctx, out),
+        "follow" => follow(rest, &ctx, out),
         _ => Err(Failure::Usage(format!("unknown subcommand '{name}'"))),
     };
     match result {
@@ -262,15 +269,18 @@ fn add(
 ) -> Result<(), Failure> {
     let args = Args::parse(
         words,
-        &["workspace", "as", "include", "root", "clone-to"],
+        &["workspace", "as", "include", "root", "clone-to", "follow"],
         &[],
     )?;
-    if args.positional.len() < 2 || args.positional.len() > 3 {
+    let follow = args.option("follow");
+    if follow.is_some() {
+        args.exactly(1, "a repository, and no branch with --follow")?;
+    } else if args.positional.len() < 2 || args.positional.len() > 3 {
         return Err(Failure::Usage(
             "expected a repository, a branch and an optional base".into(),
         ));
     }
-    let branch = args.positional[1].as_str();
+    let branch = args.positional.get(1).map_or("", String::as_str);
     let ws = target(ctx, args.option("workspace"), args.option("root"))?;
     let given = args.positional[0].as_str();
     let is_url = !ctx.env.cwd.join(given).exists() && workspace::looks_like_url(given);
@@ -299,6 +309,7 @@ fn add(
         base: args.positional.get(2).cloned(),
         member: args.option("as").map(str::to_owned),
         include: args.option("include").map(str::to_owned),
+        follow: follow.map(str::to_owned),
     };
     let kept = |message: &str| {
         if is_url {
@@ -442,5 +453,84 @@ fn remove_member(
     for note in &removed.notes {
         writeln!(err, "{note}")?;
     }
+    Ok(())
+}
+
+/// `update`: one line per member, in the order of `.gitmodules` (D269 (4)). A skip is not a
+/// failure; a fetch or a move that failed makes the exit status `1`, after the last line.
+fn update(words: &[String], ctx: &Ctx, out: &mut dyn Write) -> Result<(), Failure> {
+    let args = Args::parse(words, &["workspace", "format", "root"], &[])?;
+    args.exactly(0, "no arguments")?;
+    let format = args.option("format").unwrap_or("tsv");
+    if !["tsv", "json"].contains(&format) {
+        return Err(Failure::Usage(format!("unknown format '{format}'")));
+    }
+    let ws = target(ctx, args.option("workspace"), args.option("root"))?;
+    let rows = ctx.ws.update(&ws)?;
+    if format == "json" {
+        let json = serde_json::to_string(&rows).map_err(|e| Failure::Run(e.to_string()))?;
+        writeln!(out, "{json}")?;
+    } else {
+        for row in &rows {
+            writeln!(out, "{}", update_line(row))?;
+        }
+    }
+    let failed = rows
+        .iter()
+        .filter(|row| row.result == UpdateResult::Failed)
+        .count();
+    if failed > 0 {
+        return Err(Failure::Run(format!("{failed} member(s) failed")));
+    }
+    Ok(())
+}
+
+/// A `tsv` line of `update`: the member, the result and its detail.
+fn update_line(row: &MemberUpdate) -> String {
+    let short =
+        |oid: &Option<String>| -> String { oid.as_deref().unwrap_or("").chars().take(7).collect() };
+    let (result, detail) = match row.result {
+        UpdateResult::Updated => (
+            "updated",
+            format!("{}..{}", short(&row.from), short(&row.to)),
+        ),
+        UpdateResult::UpToDate => ("up-to-date", short(&row.to)),
+        UpdateResult::Skipped => ("skipped", row.reason.clone().unwrap_or_default()),
+        UpdateResult::Failed => (
+            "failed",
+            row.reason
+                .as_deref()
+                .unwrap_or("")
+                .replace(['\n', '\t'], " "),
+        ),
+    };
+    format!("{}\t{result}\t{detail}", row.member)
+}
+
+/// `start-branch <member> <branch>` (D269 (5)).
+fn start_branch(words: &[String], ctx: &Ctx, out: &mut dyn Write) -> Result<(), Failure> {
+    let args = Args::parse(words, &["workspace", "root"], &[])?;
+    args.exactly(2, "a member and a branch")?;
+    let ws = target(ctx, args.option("workspace"), args.option("root"))?;
+    let dir = ctx.ws.start_branch(
+        &ws,
+        args.positional[0].trim_end_matches('/'),
+        &args.positional[1],
+    )?;
+    writeln!(out, "{}", dir.display())?;
+    Ok(())
+}
+
+/// `follow <member> <remote>/<branch>` (D269 (5)).
+fn follow(words: &[String], ctx: &Ctx, out: &mut dyn Write) -> Result<(), Failure> {
+    let args = Args::parse(words, &["workspace", "root"], &[])?;
+    args.exactly(2, "a member and a remote branch")?;
+    let ws = target(ctx, args.option("workspace"), args.option("root"))?;
+    let dir = ctx.ws.follow(
+        &ws,
+        args.positional[0].trim_end_matches('/'),
+        &args.positional[1],
+    )?;
+    writeln!(out, "{}", dir.display())?;
     Ok(())
 }

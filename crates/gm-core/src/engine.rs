@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
@@ -351,7 +351,14 @@ struct ActiveRemote {
     root: PathBuf,
     /// The phases of a push, whose `after.push` observers run when it succeeds (`WF3c`).
     phases: Option<Phases>,
+    /// Update Workspace (D269 (4)): the workspace, and what its fetch thread found: the
+    /// repositories whose fetch failed, with Git's message.
+    update: Option<(PathBuf, FetchFailures)>,
 }
+
+/// The repositories whose fetch failed in Update Workspace, with Git's message (D269 (4)),
+/// filled on the fetch thread and read when its report comes back.
+type FetchFailures = Arc<Mutex<BTreeMap<String, String>>>;
 
 struct Op<'a> {
     id: OperationId,
@@ -2070,6 +2077,36 @@ impl Engine {
                 events.extend(self.start_observers(report.id, phases, &active.op.kind, &[]));
             }
         }
+        // Update Workspace moves the members once the fetch thread is done (D269 (4)); a member
+        // that failed fails the operation, a skipped one does not.
+        let (mut state, mut detail) = (state, detail);
+        if state == OperationState::Done
+            && let Some((ws, found)) = &active.update
+        {
+            let failures = found.lock().map_or_default(|slot| slot.clone());
+            let workspaces = Workspaces::new(self.git.as_ref(), self.workspace_config.clone());
+            match workspaces.update_members(ws, &failures) {
+                Ok(members) => {
+                    let failed = members
+                        .iter()
+                        .filter(|m| m.result == gm_schema::UpdateResult::Failed)
+                        .count();
+                    if failed > 0 {
+                        state = OperationState::Failed;
+                        detail = Some(format!("{failed} member(s) failed"));
+                    }
+                    events.push(Event::WorkspaceUpdated {
+                        id: report.id,
+                        path: ws.to_string_lossy().into_owned(),
+                        members,
+                    });
+                }
+                Err(error) => {
+                    state = OperationState::Failed;
+                    detail = Some(error.message().to_owned());
+                }
+            }
+        }
         if state == OperationState::Done
             && let CommandKind::CloneRepository { url, path } = &active.op.kind
         {
@@ -2610,7 +2647,10 @@ impl Engine {
         }
         if matches!(
             command.kind,
-            CommandKind::Fetch | CommandKind::Pull | CommandKind::CloneRepository { .. }
+            CommandKind::Fetch
+                | CommandKind::Pull
+                | CommandKind::CloneRepository { .. }
+                | CommandKind::UpdateWorkspace { .. }
         ) {
             self.start_remote_op(op, None, events);
             return;
@@ -2734,7 +2774,8 @@ impl Engine {
             CommandKind::Fetch
             | CommandKind::Pull
             | CommandKind::PushWithLease
-            | CommandKind::CloneRepository { .. } => {
+            | CommandKind::CloneRepository { .. }
+            | CommandKind::UpdateWorkspace { .. } => {
                 Err("remote operations are started by handle".to_owned())
             }
             CommandKind::CreateWorktree { .. } => self.add_worktree(id, actor, kind),
@@ -2872,6 +2913,7 @@ impl Engine {
             CommandKind::Fetch => "fetch",
             CommandKind::Pull => "pull",
             CommandKind::CloneRepository { .. } => "clone a repository",
+            CommandKind::UpdateWorkspace { .. } => "update a workspace",
             _ => "push with lease",
         };
         only_a_human(actor, what)?;
@@ -2899,6 +2941,38 @@ impl Engine {
             }
             _ => self.open_root()?,
         };
+        if let CommandKind::UpdateWorkspace { workspace } = kind {
+            let ws = PathBuf::from(workspace);
+            let workspaces = Workspaces::new(self.git.as_ref(), self.workspace_config.clone());
+            if !workspaces.is_workspace(&ws) {
+                return Err(format!("'{workspace}' is not a workspace"));
+            }
+            let targets = workspaces
+                .fetch_targets(&ws)
+                .map_err(|e| e.message().to_owned())?;
+            let found = Arc::new(Mutex::new(BTreeMap::new()));
+            let into = Arc::clone(&found);
+            let global = self.workspace_config.clone();
+            let run: crate::port::RemoteRun = Box::new(move || {
+                let failures = workspace::fetch_all(&targets, global.as_deref());
+                if let Ok(mut slot) = into.lock() {
+                    *slot = failures;
+                }
+                Ok(())
+            });
+            self.remote = Some(ActiveRemote {
+                op: ActiveHistory {
+                    id,
+                    actor: actor.clone(),
+                    kind: kind.clone(),
+                },
+                root,
+                phases,
+                update: Some((ws, found)),
+            });
+            self.remote_jobs.push(RemoteJob { id, run });
+            return Ok(());
+        }
         let run = match kind {
             CommandKind::Fetch => self.git.fetch(&root),
             CommandKind::Pull => self.git.pull(&root),
@@ -2922,6 +2996,7 @@ impl Engine {
             },
             root,
             phases,
+            update: None,
         });
         self.remote_jobs.push(RemoteJob { id, run });
         Ok(())
@@ -6619,6 +6694,7 @@ fn success_message(kind: &CommandKind) -> &'static str {
         CommandKind::Fetch => "Fetched",
         CommandKind::Pull => "Pulled",
         CommandKind::CloneRepository { .. } => "Cloned",
+        CommandKind::UpdateWorkspace { .. } => "Updated",
         _ => "Pushed",
     }
 }

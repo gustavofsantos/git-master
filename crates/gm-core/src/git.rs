@@ -1342,9 +1342,18 @@ impl GitPort for SubprocessGit {
             let recorded = String::from_utf8_lossy(&Self::run_allowing(recorded, &[0, 1])?)
                 .trim()
                 .to_owned();
+            // What a following member follows, from the workspace's `.gitmodules` (D269 (2)).
+            let mut follow = self.git(root);
+            follow
+                .args(["config", "--file", ".gitmodules", "--get"])
+                .arg(format!("submodule.{path}.follow"));
+            let follow = String::from_utf8_lossy(&Self::run_allowing(follow, &[0, 1])?)
+                .trim()
+                .to_owned();
             members.push(Member {
                 path,
                 branch: (!name.is_empty()).then_some(name),
+                follow: (!follow.is_empty()).then_some(follow),
                 head: (!head.is_empty()).then_some(head),
                 recorded: (!recorded.is_empty()).then_some(recorded),
             });

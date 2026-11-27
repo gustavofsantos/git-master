@@ -85,3 +85,28 @@ pub struct RemovalBlocker {
     pub detail: String,
     pub overridable: bool,
 }
+
+/// How one member ended in Update Workspace (D269 (4)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateResult {
+    /// The member moved to its target, a fast-forward.
+    Updated,
+    /// The member is at its target or contains it.
+    UpToDate,
+    /// The member could not move and was left as it was; `reason` says why.
+    Skipped,
+    /// Git failed; `reason` holds its message.
+    Failed,
+}
+
+/// One member's line of Update Workspace (D269 (4)): `from` and `to` are the commits before and
+/// after (equal when it did not move), `reason` why it was skipped or failed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemberUpdate {
+    pub member: String,
+    pub result: UpdateResult,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub reason: Option<String>,
+}

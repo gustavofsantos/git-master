@@ -1639,6 +1639,8 @@ impl Model {
             // An inspection nobody asked for is dropped; pruning's preview is shown by its
             // dialog (W6), not here yet.
             // A plan nobody asked for in this window. The restack resolver is not shown yet (D154).
+            // The app does not start Update Workspace yet (D269 (6)).
+            | Event::WorkspaceUpdated { .. }
             | Event::RestackPlanned { .. }
             | Event::RestackResolutionStarted { .. }
             | Event::RestackResolutionFinished { .. }
@@ -2124,6 +2126,7 @@ fn event_id(event: &Event) -> Option<OperationId> {
         | Event::WorkspaceMembersAdded { id, .. }
         | Event::ClonePlanned { id, .. }
         | Event::RepositoryCloned { id, .. }
+        | Event::WorkspaceUpdated { id, .. }
         | Event::MemberRemovalInspected { id, .. }
         | Event::WorkspaceMemberRemoved { id, .. }
         | Event::HookSectionsListed { id, .. }

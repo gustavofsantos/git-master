@@ -1192,3 +1192,96 @@ fn a_clone_that_fails_creates_nothing_and_says_why() {
     );
     assert!(!done(&agent));
 }
+
+/// `gitmaster workspace <words>` with the scratch identity, asserting success (D269 setup).
+fn cli(scratch: &Scratch, words: &[&str]) -> String {
+    let words: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
+    let git = SubprocessGit {
+        global_config: Some(scratch.identity.clone()),
+        ..SubprocessGit::default()
+    };
+    let env = gm_core::worktree_cli::Env {
+        cwd: scratch.path(),
+        home: Some(scratch.path().join("home")),
+        worktrees_home: None,
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = gm_core::workspace_cli::run_with(
+        &words,
+        &env,
+        &git,
+        Some(&scratch.identity),
+        &mut "".as_bytes(),
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, 0, "{words:?}: {}", String::from_utf8_lossy(&err));
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn update_workspace_fetches_off_the_engine_thread_and_moves_a_following_member() {
+    let scratch = Scratch::new();
+    let shared = scratch.repo_with_remote_branch("shared", "feat/x");
+    let root = text(&scratch.root());
+    cli(&scratch, &["create", "one", "--root", &root]);
+    let ws = scratch.ws("one");
+    cli(
+        &scratch,
+        &[
+            "add",
+            &text(&shared),
+            "--follow",
+            "origin/main",
+            "--workspace",
+            &text(&ws),
+        ],
+    );
+    // A colleague pushes to the remote's main.
+    let origin = scratch.path().join("origin-shared.git");
+    let work = scratch.path().join("colleague");
+    git_in(
+        &scratch.path(),
+        &["clone", "-q", &text(&origin), &text(&work)],
+    );
+    git_in(&work, &["checkout", "-q", "-B", "main", "origin/main"]);
+    std::fs::write(work.join("b.txt"), "b\n").unwrap();
+    git_in(&work, &["add", "b.txt"]);
+    git_in(&work, &["commit", "-q", "-m", "b"]);
+    git_in(&work, &["push", "-q", "origin", "main"]);
+    let tip = git_in(&work, &["rev-parse", "HEAD"]);
+
+    let mut harness = Harness::new(&scratch);
+    harness.open(&ws);
+    let refused = harness.run(
+        Actor::Agent { name: "a".into() },
+        CommandKind::UpdateWorkspace {
+            workspace: text(&ws),
+        },
+    );
+    assert_eq!(
+        state_of(&refused),
+        Some(OperationState::Failed),
+        "a person only"
+    );
+
+    let events = remote(
+        &mut harness,
+        CommandKind::UpdateWorkspace {
+            workspace: text(&ws),
+        },
+    );
+    assert_eq!(state_of(&events), Some(OperationState::Done), "{events:?}");
+    let rows = events
+        .iter()
+        .find_map(|event| match event {
+            Event::WorkspaceUpdated { members, .. } => Some(members.clone()),
+            _ => None,
+        })
+        .expect("a WorkspaceUpdated event");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].member, "shared");
+    assert_eq!(rows[0].result, gm_schema::UpdateResult::Updated);
+    assert_eq!(rows[0].to.as_deref(), Some(tip.as_str()));
+    assert_eq!(git_in(&ws.join("shared"), &["rev-parse", "HEAD"]), tip);
+}

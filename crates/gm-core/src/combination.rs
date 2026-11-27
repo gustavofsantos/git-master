@@ -9,6 +9,9 @@ pub struct Member {
     pub path: String,
     /// The branch the member has checked out; `None` when its HEAD is detached.
     pub branch: Option<String>,
+    /// The remote branch a following member follows (D269 (1)); `None` for a member meant to be
+    /// on a branch.
+    pub follow: Option<String>,
     /// The commit the member's HEAD is at; `None` when the branch has no commit yet.
     pub head: Option<String>,
     /// The commit the workspace records for the member; `None` when it records none.
@@ -27,12 +30,16 @@ pub struct Plan {
 const SHORT_ID: usize = 7;
 
 /// Plans the combination of `members`, or says why it is refused. The refusal is the
-/// text the operation fails with. A detached member is named, so the person knows which.
+/// text the operation fails with. A detached member is named, so the person knows which; a
+/// following member is detached by design and is recorded at its commit (D269 (3)).
 pub fn plan(members: &[Member]) -> Result<Plan, String> {
     if members.is_empty() {
         return Err("This repository has no submodule to record.".to_owned());
     }
-    if let Some(member) = members.iter().find(|member| member.branch.is_none()) {
+    if let Some(member) = members
+        .iter()
+        .find(|member| member.branch.is_none() && member.follow.is_none())
+    {
         return Err(format!(
             "{} is on a detached HEAD: check out its branch first.",
             member.path
@@ -66,13 +73,13 @@ pub fn message(members: &[Member]) -> String {
         .unwrap_or(0);
     let branches = members
         .iter()
-        .map(|member| member.branch.as_deref().unwrap_or("").chars().count())
+        .map(|member| label(member).chars().count())
         .max()
         .unwrap_or(0);
     let rows: Vec<String> = members
         .iter()
         .map(|member| {
-            let branch = member.branch.as_deref().unwrap_or("");
+            let branch = label(member);
             let short: String = member
                 .head
                 .as_deref()
@@ -86,6 +93,15 @@ pub fn message(members: &[Member]) -> String {
     format!("Record combination\n\n{}\n", rows.join("\n"))
 }
 
+/// The branch column of a member: its branch, or the remote branch it follows.
+fn label(member: &Member) -> &str {
+    member
+        .branch
+        .as_deref()
+        .or(member.follow.as_deref())
+        .unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +110,7 @@ mod tests {
         Member {
             path: path.to_owned(),
             branch: branch.map(str::to_owned),
+            follow: None,
             head: Some(head.to_owned()),
             recorded: Some(recorded.to_owned()),
         }
@@ -161,6 +178,21 @@ mod tests {
         assert_eq!(
             plan(&members),
             Err("checkout is on a detached HEAD: check out its branch first.".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_following_member_is_recorded_at_its_commit_with_what_it_follows() {
+        let mut shared = member("shared", None, OTHER, OLD);
+        shared.follow = Some("origin/main".to_owned());
+        let members = [member("billing", Some("feat"), NEW, NEW), shared];
+
+        let planned = plan(&members).expect("a following member is not refused");
+        assert_eq!(planned.paths, ["shared"]);
+        assert!(
+            planned.message.contains("shared   origin/main"),
+            "{}",
+            planned.message
         );
     }
 

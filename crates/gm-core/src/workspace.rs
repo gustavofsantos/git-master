@@ -9,13 +9,15 @@
 //! `GitPort`, as the worktree commands do; the superproject's Git calls run as subprocesses
 //! (D177 (5)), with the global configuration given to `Workspaces::new`.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gm_schema::{
-    BranchEntry, BranchHow, MemberPlan, MemberRequest, RemovalBlocker, RemovalBlockerKind,
-    StatusEntry, WorkspaceProblem, WorkspaceRow, WorktreeEntry, WorktreeMode,
+    BranchEntry, BranchHow, MemberPlan, MemberRequest, MemberUpdate, RemovalBlocker,
+    RemovalBlockerKind, StatusEntry, UpdateResult, WorkspaceProblem, WorkspaceRow, WorktreeEntry,
+    WorktreeMode,
 };
 use serde::Serialize;
 
@@ -175,8 +177,10 @@ pub struct Member {
     pub path: String,
     /// The path of the main checkout the member belongs to.
     pub url: String,
-    /// The branch the member follows, from `submodule.<name>.branch`.
+    /// The branch the member is checked out on, from `submodule.<name>.branch`.
     pub branch: Option<String>,
+    /// The remote branch a following member follows, from `submodule.<name>.follow` (D269 (2)).
+    pub follow: Option<String>,
 }
 
 /// One member in a status listing. A member whose folder is gone has `branch` `(missing)`.
@@ -185,6 +189,8 @@ pub struct MemberState {
     pub member: String,
     pub branch: Option<String>,
     pub detached: bool,
+    /// The remote branch a following member follows; `None` for a member on a branch (D269 (3)).
+    pub follow: Option<String>,
     pub dirty: bool,
     pub new_commits: usize,
     pub recorded: Option<String>,
@@ -197,11 +203,12 @@ pub struct MemberState {
 
 impl MemberState {
     /// The branch column of the `tsv` format.
-    pub fn branch_label(&self) -> &str {
-        match (&self.branch, self.detached) {
-            (Some(branch), _) => branch,
-            (None, true) => "(detached)",
-            (None, false) => "(missing)",
+    pub fn branch_label(&self) -> String {
+        match (&self.branch, &self.follow, self.detached) {
+            (Some(branch), _, _) => branch.clone(),
+            (None, Some(follow), true) => format!("(follows {follow})"),
+            (None, _, true) => "(detached)".to_owned(),
+            (None, _, false) => "(missing)".to_owned(),
         }
     }
 }
@@ -231,6 +238,9 @@ pub struct AddRequest {
     pub member: Option<String>,
     /// The `--include` mode of `.worktreeinclude`, from the configuration when `None`.
     pub include: Option<String>,
+    /// The remote branch the member follows instead of a branch (`--follow`, D269 (1)); `branch`
+    /// and `base` are not used then.
+    pub follow: Option<String>,
 }
 
 /// Where a member's branch comes from (D178 (2)).
@@ -295,6 +305,8 @@ struct Plan {
     /// The folder the repository's Git commands run in.
     root: PathBuf,
     branch: String,
+    /// The remote branch a following member follows; `branch` is empty then (D269 (1)).
+    follow: Option<String>,
     mode: WorktreeMode,
     branch_how: BranchHow,
     /// The report's words for the branch, after `added <dir> on <branch>:`.
@@ -411,6 +423,8 @@ struct Choice<'a> {
     base: Option<&'a str>,
     member: Option<&'a str>,
     include: Option<&'a str>,
+    /// Follow this remote branch instead of checking out `branch` (D269 (1)).
+    follow: Option<&'a str>,
 }
 
 /// The workspace operations over `git`, the port for the member worktrees, and the superproject's
@@ -593,6 +607,7 @@ impl<'a> Workspaces<'a> {
                             path: String::new(),
                             url: String::new(),
                             branch: None,
+                            follow: None,
                         },
                     ));
                     found.len() - 1
@@ -602,6 +617,7 @@ impl<'a> Workspaces<'a> {
                 "path" => value.clone_into(&mut member.path),
                 "url" => value.clone_into(&mut member.url),
                 "branch" => member.branch = Some(value.to_owned()),
+                "follow" => member.follow = Some(value.to_owned()),
                 _ => {}
             }
         }
@@ -628,6 +644,7 @@ impl<'a> Workspaces<'a> {
             member: member.path.clone(),
             branch: None,
             detached: false,
+            follow: member.follow.clone(),
             dirty: false,
             new_commits: 0,
             recorded: recorded.clone(),
@@ -752,6 +769,7 @@ impl<'a> Workspaces<'a> {
                 base,
                 member: None,
                 include: None,
+                follow: None,
             };
             match self.plan_member(&dir, &root, &entries, &known, &choice) {
                 Ok(plan) => plans.push(plan),
@@ -882,6 +900,7 @@ impl<'a> Workspaces<'a> {
             base: request.base.as_deref(),
             member: request.member.as_deref(),
             include: request.include.as_deref(),
+            follow: request.follow.as_deref(),
         };
         let plan = self
             .plan_member(ws, &root, &entries, &known, &choice)
@@ -900,7 +919,9 @@ impl<'a> Workspaces<'a> {
         choice: &Choice,
     ) -> Result<Plan, Refusal> {
         let branch = choice.branch;
-        check_branch(branch)?;
+        if choice.follow.is_none() {
+            check_branch(branch)?;
+        }
         let main = PathBuf::from(&entries[0].path);
         let member = choice.member.map_or_else(
             || {
@@ -912,7 +933,9 @@ impl<'a> Workspaces<'a> {
         if !valid_name(&member) {
             return Err(Error::Run(format!("'{member}' is not a folder name for a member")).into());
         }
-        if let Some(entry) = worktree_cli::holder(entries, branch) {
+        if choice.follow.is_none()
+            && let Some(entry) = worktree_cli::holder(entries, branch)
+        {
             return Err(Refusal {
                 error: Error::Run(format!(
                     "branch '{branch}' is checked out at {}; a branch can be checked out in one worktree only",
@@ -938,6 +961,24 @@ impl<'a> Workspaces<'a> {
 
         let include =
             worktree_cli::include_mode(self.git, root, choice.include).map_err(Error::from)?;
+        if let Some(follow) = choice.follow {
+            self.check_remote_branch(&main, follow)?;
+            return Ok(Plan {
+                member,
+                dir,
+                main,
+                root: root.to_path_buf(),
+                branch: String::new(),
+                follow: Some(follow.to_owned()),
+                mode: WorktreeMode::Detached {
+                    commit: format!("refs/remotes/{follow}"),
+                },
+                // Not read for a following member: only `create` plans report a branch.
+                branch_how: BranchHow::CheckOut,
+                how: format!("following {follow}"),
+                include,
+            });
+        }
         let source = self.branch_source(root, &main, known, branch, choice.base)?;
         Ok(Plan {
             member,
@@ -945,6 +986,7 @@ impl<'a> Workspaces<'a> {
             main,
             root: root.to_path_buf(),
             branch: branch.to_owned(),
+            follow: None,
             mode: source.mode(branch),
             branch_how: source.branch_how(),
             how: source.how(choice.base.is_some()),
@@ -1007,6 +1049,24 @@ impl<'a> Workspaces<'a> {
         ))
     }
 
+    /// Fails unless `follow` names a remote branch, `<remote>/<branch>`, of the repository whose
+    /// main checkout is `main` (D269 (1)).
+    fn check_remote_branch(&self, main: &Path, follow: &str) -> Result<(), Error> {
+        let spec = format!("refs/remotes/{follow}^{{commit}}");
+        if follow.is_empty()
+            || self
+                .sub
+                .text_if(main, &["rev-parse", "--verify", "--quiet", &spec])
+                .is_none()
+        {
+            return Err(Error::Run(format!(
+                "'{follow}' is not a remote branch of {}; name it as <remote>/<branch>, and fetch first when it is new",
+                main.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Fails unless `rev` names a commit in the repository whose main checkout is `main`.
     fn check_commit(&self, main: &Path, rev: &str) -> Result<(), Error> {
         let spec = format!("{rev}^{{commit}}");
@@ -1046,18 +1106,30 @@ impl<'a> Workspaces<'a> {
             .notes
             .extend(String::from_utf8_lossy(&shared).lines().map(str::to_owned));
 
-        // Registers the existing worktree: Git adds it in place, without a clone (D174).
-        let registered = self.sub.text(
-            ws,
-            &[
-                "submodule",
-                "add",
-                "-b",
-                &plan.branch,
-                &plan.main.to_string_lossy(),
-                &plan.member,
-            ],
-        );
+        // Registers the existing worktree: Git adds it in place, without a clone (D174). A
+        // following member has no branch; `.gitmodules` records what it follows (D269 (2)).
+        let main = plan.main.to_string_lossy();
+        let mut args = vec!["submodule", "add"];
+        if plan.follow.is_none() {
+            args.extend(["-b", &plan.branch]);
+        }
+        args.extend([&*main, &plan.member]);
+        let registered = self.sub.text(ws, &args).and_then(|_| match &plan.follow {
+            Some(follow) => self
+                .sub
+                .text(
+                    ws,
+                    &[
+                        "config",
+                        "--file",
+                        ".gitmodules",
+                        &format!("submodule.{}.follow", plan.member),
+                        follow,
+                    ],
+                )
+                .map(drop),
+            None => Ok(()),
+        });
         if let Err(error) = registered {
             let _ = self.git.remove_worktree(&plan.root, &dir_text, 1);
             added.failure = Some(error.message().to_owned());
@@ -1072,7 +1144,11 @@ impl<'a> Workspaces<'a> {
             ));
         }
 
-        let message = format!("Add {} on {}", plan.member, plan.branch);
+        let on = match &plan.follow {
+            Some(follow) => format!("following {follow}"),
+            None => format!("on {}", plan.branch),
+        };
+        let message = format!("Add {} {on}", plan.member);
         if let Err(error) = self.sub.text(
             ws,
             &[
@@ -1094,12 +1170,15 @@ impl<'a> Workspaces<'a> {
             ));
             return added;
         }
-        added.notes.push(format!(
-            "gitmaster: added {} on {}: {}",
-            dir.display(),
-            plan.branch,
-            plan.how
-        ));
+        added.notes.push(match &plan.follow {
+            Some(_) => format!("gitmaster: added {} {on}", dir.display()),
+            None => format!(
+                "gitmaster: added {} on {}: {}",
+                dir.display(),
+                plan.branch,
+                plan.how
+            ),
+        });
         added
     }
 
@@ -1452,6 +1531,11 @@ impl<'a> Workspaces<'a> {
                 "'{member}' is not a member of this workspace"
             )));
         };
+        if let Some(follow) = &found.follow {
+            return Err(Error::Run(format!(
+                "{member} follows {follow} and has no branch to check out; start a branch in it instead"
+            )));
+        }
         let Some(branch) = found.branch.as_deref() else {
             return Err(Error::Run(format!(
                 "{member} has no branch set in .gitmodules"
@@ -1502,6 +1586,265 @@ impl<'a> Workspaces<'a> {
         self.sub.text(ws, &["-C", &dir_text, "checkout", branch])?;
         Ok(())
     }
+
+    // ---- Following members and Update Workspace (D269) ----
+
+    /// The folders to fetch for Update Workspace: one member folder per repository the members
+    /// belong to, in the order of `.gitmodules`, skipping members whose folder is gone. The key is
+    /// the repository's main checkout, as `.gitmodules` records it.
+    pub fn fetch_targets(&self, ws: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
+        let mut targets: Vec<(String, PathBuf)> = Vec::new();
+        for member in self.members(ws)? {
+            let dir = ws.join(&member.path);
+            if dir.exists() && !targets.iter().any(|(repo, _)| *repo == member.url) {
+                targets.push((member.url, dir));
+            }
+        }
+        Ok(targets)
+    }
+
+    /// Update Workspace from the command line (D269 (4)): fetches each repository once, then moves
+    /// every member, as `fetch_all` and `update_members` do.
+    pub fn update(&self, ws: &Path) -> Result<Vec<MemberUpdate>, Error> {
+        let failures = fetch_all(&self.fetch_targets(ws)?, self.sub.global_config.as_deref());
+        self.update_members(ws, &failures)
+    }
+
+    /// The second half of Update Workspace, after the fetch (D269 (4)): each member, in the order
+    /// of `.gitmodules`, moves to its target with `git merge --ff-only` when that is a
+    /// fast-forward and it has no change; otherwise it stays as it was and the result says why.
+    /// `failures` maps a repository (its main checkout) whose fetch failed to Git's message.
+    pub fn update_members(
+        &self,
+        ws: &Path,
+        failures: &BTreeMap<String, String>,
+    ) -> Result<Vec<MemberUpdate>, Error> {
+        let mut rows = Vec::new();
+        for member in self.members(ws)? {
+            rows.push(self.update_member(ws, &member, failures));
+        }
+        Ok(rows)
+    }
+
+    fn update_member(
+        &self,
+        ws: &Path,
+        member: &Member,
+        failures: &BTreeMap<String, String>,
+    ) -> MemberUpdate {
+        let mut row = MemberUpdate {
+            member: member.path.clone(),
+            result: UpdateResult::Skipped,
+            from: None,
+            to: None,
+            reason: None,
+        };
+        let skip = |mut row: MemberUpdate, why: &str| {
+            row.reason = Some(why.to_owned());
+            row
+        };
+        let fail = |mut row: MemberUpdate, why: String| {
+            row.result = UpdateResult::Failed;
+            row.reason = Some(why);
+            row
+        };
+        let dir = ws.join(&member.path);
+        if !dir.exists() {
+            return skip(row, "missing");
+        }
+        if let Some(message) = failures.get(&member.url) {
+            return fail(row, message.clone());
+        }
+        let state = match self.git.status(&dir) {
+            Ok(state) => state,
+            Err(error) => return fail(row, error.0),
+        };
+        row.from.clone_from(&state.branch.oid);
+        row.to.clone_from(&state.branch.oid);
+        let target = match (&member.follow, &state.branch.head) {
+            (Some(follow), None) => {
+                let spec = format!("refs/remotes/{follow}^{{commit}}");
+                match self
+                    .sub
+                    .text_if(&dir, &["rev-parse", "--verify", "--quiet", &spec])
+                {
+                    Some(oid) => oid.trim().to_owned(),
+                    None => return fail(row, format!("{follow} is not in the repository")),
+                }
+            }
+            (None, Some(head)) if member.branch.as_deref().is_none_or(|b| b == head) => {
+                let spec = format!("{head}@{{upstream}}");
+                match self
+                    .sub
+                    .text_if(&dir, &["rev-parse", "--verify", "--quiet", &spec])
+                {
+                    Some(oid) => oid.trim().to_owned(),
+                    None => return skip(row, "no upstream"),
+                }
+            }
+            _ => return skip(row, "not on its branch"),
+        };
+        let Some(head) = state.branch.oid.clone() else {
+            return skip(row, "not on its branch");
+        };
+        let ancestor = |a: &str, b: &str| {
+            self.sub
+                .text_if(&dir, &["merge-base", "--is-ancestor", a, b])
+                .is_some()
+        };
+        if ancestor(&target, &head) {
+            row.result = UpdateResult::UpToDate;
+            return row;
+        }
+        if !ancestor(&head, &target) {
+            return skip(row, "diverged");
+        }
+        if state.entries.iter().any(is_change) {
+            return skip(row, "changes");
+        }
+        match self
+            .sub
+            .text(&dir, &["merge", "--ff-only", "--quiet", &target])
+        {
+            Ok(_) => {
+                row.result = UpdateResult::Updated;
+                row.to = Some(target);
+                row
+            }
+            Err(error) => fail(row, error.message().to_owned()),
+        }
+    }
+
+    /// The member `name` (its folder in the workspace), and its folder, which must exist.
+    fn member_here(&self, ws: &Path, name: &str) -> Result<(Member, PathBuf), Error> {
+        let found = self.member_named(ws, name)?;
+        let dir = ws.join(&found.path);
+        if !dir.exists() {
+            return Err(Error::Run(format!(
+                "{name} is missing: its folder is not there"
+            )));
+        }
+        Ok((found, dir))
+    }
+
+    /// Starts `branch` in the following member `name`, at the commit it is on, with its changed
+    /// files carried onto it, and records the branch in place of what it followed (D269 (5)).
+    /// Returns the member's folder.
+    pub fn start_branch(&self, ws: &Path, name: &str, branch: &str) -> Result<PathBuf, Error> {
+        check_branch(branch)?;
+        let (member, dir) = self.member_here(ws, name)?;
+        if member.follow.is_none() {
+            return Err(Error::Run(format!(
+                "{name} is on a branch and follows nothing; start a branch in a following member"
+            )));
+        }
+        let local = format!("refs/heads/{branch}");
+        if self
+            .sub
+            .text_if(&dir, &["rev-parse", "--verify", "--quiet", &local])
+            .is_some()
+        {
+            return Err(Error::Run(format!(
+                "branch '{branch}' exists in {} already; choose another name",
+                member.url
+            )));
+        }
+        self.sub.text(&dir, &["switch", "--quiet", "-c", branch])?;
+        let key = |var: &str| format!("submodule.{}.{var}", member.name);
+        self.sub.text(
+            ws,
+            &["config", "--file", ".gitmodules", "--unset", &key("follow")],
+        )?;
+        self.sub.text(
+            ws,
+            &["config", "--file", ".gitmodules", &key("branch"), branch],
+        )?;
+        self.commit_modules(ws, &format!("Start {branch} in {name}"))?;
+        Ok(dir)
+    }
+
+    /// Makes the member `name` follow the remote branch `follow`: checks it out there on a
+    /// detached HEAD, without fetching, and records what it follows in place of its branch, which
+    /// stays in the repository (D269 (5)). Refused while the member has any change. Returns the
+    /// member's folder.
+    pub fn follow(&self, ws: &Path, name: &str, follow: &str) -> Result<PathBuf, Error> {
+        let (member, dir) = self.member_here(ws, name)?;
+        if self.git.status(&dir)?.entries.iter().any(is_change) {
+            return Err(Error::Run(format!(
+                "{name} has staged, unstaged or untracked files; commit or discard them first"
+            )));
+        }
+        self.check_remote_branch(&dir, follow)?;
+        let remote = format!("refs/remotes/{follow}");
+        self.sub
+            .text(&dir, &["checkout", "--quiet", "--detach", &remote])?;
+        if member.follow.as_deref() == Some(follow) {
+            return Ok(dir);
+        }
+        let key = |var: &str| format!("submodule.{}.{var}", member.name);
+        if member.branch.is_some() {
+            self.sub.text(
+                ws,
+                &["config", "--file", ".gitmodules", "--unset", &key("branch")],
+            )?;
+        }
+        self.sub.text(
+            ws,
+            &["config", "--file", ".gitmodules", &key("follow"), follow],
+        )?;
+        self.commit_modules(ws, &format!("Follow {follow} in {name}"))?;
+        Ok(dir)
+    }
+
+    /// Commits the workspace's `.gitmodules` alone, with `message`.
+    fn commit_modules(&self, ws: &Path, message: &str) -> Result<(), Error> {
+        self.sub
+            .text(ws, &["commit", "-q", "-m", message, "--", ".gitmodules"])
+            .map(drop)
+            .map_err(|error| {
+                Error::Run(format!(
+                    ".gitmodules is changed in {} but not committed: {}; commit it with git -C {} commit",
+                    ws.display(),
+                    error.message(),
+                    ws.display()
+                ))
+            })
+    }
+}
+
+/// Fetches every repository of `targets` (a repository's main checkout and a folder to fetch it
+/// in) from every remote, one after the other, as Fetch does (`git fetch --all --prune`), with no
+/// prompt for a password (D256 (1)). Returns Git's message for each repository whose fetch failed.
+/// `global_config` is the global Git configuration of the calls, as for `Workspaces::new`.
+pub fn fetch_all(
+    targets: &[(String, PathBuf)],
+    global_config: Option<&Path>,
+) -> BTreeMap<String, String> {
+    let mut failures = BTreeMap::new();
+    for (repo, dir) in targets {
+        let mut command = Command::new("git");
+        command
+            .args(crate::remote::fetch_args())
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        if let Some(global) = global_config {
+            command.env("GIT_CONFIG_GLOBAL", global);
+        }
+        let why = match command.output() {
+            Ok(output) if output.status.success() => continue,
+            Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            Err(error) => format!("cannot run git: {error}"),
+        };
+        failures.insert(
+            repo.clone(),
+            if why.is_empty() {
+                "git fetch failed".to_owned()
+            } else {
+                why
+            },
+        );
+    }
+    failures
 }
 
 /// The name of the folder of the main checkout `main`, the project a message names.
